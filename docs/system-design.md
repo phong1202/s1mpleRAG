@@ -695,21 +695,25 @@ components most likely to be silently wrong.
 
 ---
 
-## 17. Build order
+## 17. Build phases
 
-Each step ends somewhere verifiable.
+The system splits cleanly at the write/read boundary, and the two phases ship independently.
 
-| # | Step | Done when |
-|---|------|-----------|
-| 1 | Compose: rabbitmq, redis, minio + `shared/` clients | All three reachable from a test |
-| 2 | Schema migration (§5.1) + models | `alembic upgrade head`; old CRUD tests replaced |
-| 3 | Docling service container | `POST /parse` returns markdown for a fixture PDF |
-| 4 | Celery skeleton + chain, all stages no-op | Chain runs end to end, state machine advances |
-| 5 | S1 + S2 real | Fixture PDF → `chunks.json` in MinIO |
-| 6 | Rate limiter + S3 | Batch validation holds under a forced malformed response |
-| 7 | S4 + S5 | Rows land; re-running the chain changes nothing (idempotency) |
-| 8 | `app/core/` + `POST /query` | Question returns an answer with page-accurate citations |
-| 9 | Ingestion API + presigned upload | Upload → poll → query, full loop |
+### Phase 1 — Ingestion (upload + processing)
 
-Step 4 is deliberately placed before any real work: it proves chaining, routing, retries, and the
-state machine while every stage is still trivial to debug.
+**This is the scope of the first implementation plan.** See `ingestion-plan.md`.
+
+Everything in §§3–9, 11–14 of this document. Ends with real embeddings in `parent_chunks` and
+`child_chunks`, verified by a similarity query.
+
+### Phase 2 — Retrieval (deferred)
+
+Everything in §10: `app/core/` (`retriever.py`, `context_builder.py`, `generator.py`),
+`POST /query`, `query_controller.py`, `query_service.py`, and the `DISTINCT ON` retrieval SQL.
+
+**Nothing from Phase 2 is stubbed during Phase 1** — no empty `app/core/` directory, no placeholder
+router. It arrives whole, or not at all.
+
+The one exception is a **DB-level similarity test** that stays in Phase 1. Without it, Phase 1 ends
+with no evidence the embeddings are usable: wrong normalization, wrong dimension, and a misconfigured
+`vector_ip_ops` index all look identical to "rows inserted successfully."
