@@ -21,12 +21,8 @@ DocumentId = Annotated[int, Path(ge=1, le=2_147_483_647)]
 # Shared `responses={...}` fragments, composed per route below, so the
 # OpenAPI docs match what app/exceptions/handlers.py actually returns
 # instead of FastAPI's default HTTPValidationError shape.
-_VALIDATION_RESPONSE = {
-    422: {"model": ValidationErrorResponse, "description": "Validation failed"}
-}
-_NOT_FOUND_RESPONSE = {
-    404: {"model": ErrorResponse, "description": "Document not found"}
-}
+_VALIDATION_RESPONSE = {422: {"model": ValidationErrorResponse, "description": "Validation failed"}}
+_NOT_FOUND_RESPONSE = {404: {"model": ErrorResponse, "description": "Document not found"}}
 _TITLE_CONFLICT_RESPONSE = {
     409: {"model": ErrorResponse, "description": "A document with this title already exists"}
 }
@@ -43,9 +39,7 @@ async def create_document(
     service: DocumentService = Depends(get_document_service),
 ) -> ApiResponse[DocumentOut]:
     document = await service.create(payload)
-    return ApiResponse.created(
-        DocumentOut.model_validate(document), message="Document created"
-    )
+    return ApiResponse.created(DocumentOut.model_validate(document), message="Document created")
 
 
 @router.get(
@@ -93,9 +87,7 @@ async def update_document(
     service: DocumentService = Depends(get_document_service),
 ) -> ApiResponse[DocumentOut]:
     document = await service.update(document_id, payload)
-    return ApiResponse.ok(
-        DocumentOut.model_validate(document), message="Document updated"
-    )
+    return ApiResponse.ok(DocumentOut.model_validate(document), message="Document updated")
 
 
 @router.delete(

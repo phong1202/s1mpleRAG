@@ -74,7 +74,9 @@ class DocumentService:
         fields = data.model_dump(exclude_unset=True, exclude_none=True)
 
         new_title = fields.get("title")
-        if new_title is not None and new_title != document.title:
+        # Kept nested rather than collapsed: the outer test asks whether the
+        # title is changing at all, the inner whether the new one is taken.
+        if new_title is not None and new_title != document.title:  # noqa: SIM102
             if await self.repository.get_by_title(new_title) is not None:
                 raise AppException(
                     ErrorCode.DOCUMENT_TITLE_EXISTS,

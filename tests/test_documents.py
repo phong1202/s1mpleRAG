@@ -5,9 +5,7 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_create_returns_201_envelope(client):
-    response = await client.post(
-        "/documents", json={"title": "Intro", "content": "hello"}
-    )
+    response = await client.post("/documents", json={"title": "Intro", "content": "hello"})
 
     assert response.status_code == 201
     body = response.json()
@@ -21,9 +19,7 @@ async def test_create_returns_201_envelope(client):
 
 @pytest.mark.asyncio
 async def test_get_round_trips_a_created_document(client):
-    created = await client.post(
-        "/documents", json={"title": "Intro", "content": "hello"}
-    )
+    created = await client.post("/documents", json={"title": "Intro", "content": "hello"})
     document_id = created.json()["data"]["id"]
 
     response = await client.get(f"/documents/{document_id}")
@@ -66,9 +62,7 @@ async def test_zero_id_returns_422(client):
 @pytest.mark.asyncio
 async def test_list_reports_pagination_inside_data(client):
     for index in range(3):
-        await client.post(
-            "/documents", json={"title": f"Doc {index}", "content": "x"}
-        )
+        await client.post("/documents", json={"title": f"Doc {index}", "content": "x"})
 
     response = await client.get("/documents", params={"limit": 2, "offset": 0})
 
@@ -82,14 +76,10 @@ async def test_list_reports_pagination_inside_data(client):
 
 @pytest.mark.asyncio
 async def test_update_changes_only_supplied_fields(client):
-    created = await client.post(
-        "/documents", json={"title": "Before", "content": "body"}
-    )
+    created = await client.post("/documents", json={"title": "Before", "content": "body"})
     document_id = created.json()["data"]["id"]
 
-    response = await client.patch(
-        f"/documents/{document_id}", json={"title": "After"}
-    )
+    response = await client.patch(f"/documents/{document_id}", json={"title": "After"})
 
     assert response.status_code == 200
     data = response.json()["data"]
@@ -99,9 +89,7 @@ async def test_update_changes_only_supplied_fields(client):
 
 @pytest.mark.asyncio
 async def test_delete_returns_200_and_the_document_is_gone(client):
-    created = await client.post(
-        "/documents", json={"title": "Doomed", "content": "x"}
-    )
+    created = await client.post("/documents", json={"title": "Doomed", "content": "x"})
     document_id = created.json()["data"]["id"]
 
     deleted = await client.delete(f"/documents/{document_id}")
@@ -136,9 +124,7 @@ async def test_duplicate_title_race_returns_409_not_500(client):
         "app.repositories.document_repository.DocumentRepository.get_by_title",
         return_value=None,
     ):
-        response = await client.post(
-            "/documents", json={"title": "RaceCondition", "content": "b"}
-        )
+        response = await client.post("/documents", json={"title": "RaceCondition", "content": "b"})
 
     assert response.status_code == 409
     body = response.json()

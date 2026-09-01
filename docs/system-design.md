@@ -589,8 +589,12 @@ nothing, which inverts your main diagnostic signal. Requeuing frees the slot and
 ## 13. Configuration
 
 ```bash
-# existing
-DATABASE_URL=postgresql+asyncpg://rag:rag@db:5432/rag_beginner
+# existing — the API composes its async DSN from these five parts
+DB_HOST=db
+DB_PORT=5432
+DB_USER=rag
+DB_PASSWORD=rag
+DB_NAME=rag_beginner
 APP_NAME=rag-beginner
 ENVIRONMENT=development
 LOG_LEVEL=INFO

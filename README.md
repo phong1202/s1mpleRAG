@@ -27,31 +27,31 @@ Requests flow **controller → service → repository → model**. A repository
 returns `None` for a missing row; the service turns that into an
 `AppException`; the handler renders it as a 404 envelope.
 
-## Running locally (conda)
+## Running locally (uv)
 
 ```bash
-conda create -n rag-beginner python=3.12 -y
-conda activate rag-beginner
-pip install -r requirements.txt
+uv sync                       # creates .venv from uv.lock
 
-cp .env.example .env          # edit DATABASE_URL if needed
+cp .env.example .env          # edit the DB_* variables if needed
 docker compose up -d db       # Postgres + pgvector on host port 5433
-alembic upgrade head
+uv run alembic upgrade head
 
-python main.py                # http://localhost:8000/docs
+uv run python main.py         # http://localhost:8000/docs
 ```
 
 **The host port is 5433, not 5432** — port 5432 is commonly already taken by
 another Postgres container.
 
-If `pip install` pulls in unexpected package versions, a populated
-`~/.local/lib/python3.12/site-packages` can shadow the conda env on
-`sys.path`. Setting `PYTHONNOUSERSITE=1` on the env keeps it self-contained:
+`uv run` resolves the project environment itself, so there is no environment to
+activate and no way to run against the wrong interpreter by forgetting to. If
+you prefer an activated shell, `source .venv/bin/activate` works and the `uv
+run` prefix then becomes optional.
 
-```bash
-conda env config vars set PYTHONNOUSERSITE=1 -n rag-beginner
-conda activate rag-beginner   # reactivate to pick up the change
-```
+Dependencies live in `pyproject.toml`; `uv.lock` pins the exact resolved
+versions and is committed, so every machine and the Docker image install the
+same set. Add a dependency with `uv add <package>` (`uv add --dev <package>`
+for a test-only one) rather than editing `pyproject.toml` by hand — that keeps
+the lock file in step.
 
 ## Running with Docker
 
@@ -61,7 +61,7 @@ docker compose exec api alembic upgrade head
 curl http://localhost:8000/health
 ```
 
-The conda path and the Docker path are two independent ways to run the same
+The uv path and the Docker path are two independent ways to run the same
 application. Pick one per session. Mixing them — for example running migrations
 in the container against a database reached from the host — is the most likely
 source of confusion.
@@ -102,6 +102,44 @@ in a bug report.
 | PATCH | `/documents/{id}` | Partial update. 404 if absent; 409 on a title collision. |
 | DELETE | `/documents/{id}` | 200, `data: null`. 404 if absent. |
 
+## Linting
+
+```bash
+uv run ruff check .            # lint
+uv run ruff check --fix .      # apply the safe fixes
+uv run ruff format .           # format
+```
+
+Rules and their exceptions live in `[tool.ruff]` in `pyproject.toml`, each
+exception carrying the reason it exists. Two are worth knowing about:
+
+- `Depends()` in a default argument is FastAPI's calling convention, so
+  `fastapi.Depends`, `fastapi.Query` and `fastapi.Path` are registered as
+  immutable calls; without that, B008 fires on every endpoint.
+- `alembic/versions/` and `*.md` are excluded. Migrations come from Alembic's
+  own template, and `ruff format` rewrites ```python blocks inside Markdown —
+  the design docs use those for illustrative payloads, not runnable code.
+
+A **pre-commit hook** runs both checks and blocks the commit on failure. Git
+hooks are not tracked, so a fresh clone has to reinstall it:
+
+```bash
+cat > .git/hooks/pre-commit <<'EOF'
+#!/bin/sh
+if ! uv run ruff check .; then
+    echo "ruff check failed - fix with: uv run ruff check --fix ."
+    exit 1
+fi
+if ! uv run ruff format --check .; then
+    echo "formatting differs - fix with: uv run ruff format ."
+    exit 1
+fi
+EOF
+chmod +x .git/hooks/pre-commit
+```
+
+Bypass once with `git commit --no-verify`.
+
 ## Testing
 
 **Postgres must be running first** — the suite runs against a real database, not
@@ -110,7 +148,7 @@ pieces worth verifying:
 
 ```bash
 docker compose up -d db
-pytest
+uv run pytest
 ```
 
 The suite creates a `rag_beginner_test` database if it is missing and brings it
@@ -124,9 +162,9 @@ file in `alembic/versions/` — the revision id and history chain are Alembic's 
 own.
 
 ```bash
-alembic revision --autogenerate -m "describe the change"
+uv run alembic revision --autogenerate -m "describe the change"
 # review and edit the generated file's body, then:
-alembic upgrade head
+uv run alembic upgrade head
 ```
 
 Editing the *body* of a generated revision is normal — that is how the initial
@@ -137,7 +175,12 @@ autogenerate cannot infer.
 
 | Variable | Required | Default |
 | --- | --- | --- |
-| `DATABASE_URL` | **yes** | — |
+| `DB_HOST` | **yes** | — |
+| `DB_PORT` | **yes** | — |
+| `DB_USER` | **yes** | — |
+| `DB_PASSWORD` | **yes** | — |
+| `DB_NAME` | **yes** | — |
+| `DATABASE_URL` | no | — |
 | `APP_NAME` | no | `rag-beginner` |
 | `ENVIRONMENT` | no | `development` |
 | `LOG_LEVEL` | no | `INFO` |
@@ -145,8 +188,22 @@ autogenerate cannot infer.
 | `HOST` | no | `0.0.0.0` |
 | `PORT` | no | `8000` |
 
-`DATABASE_URL` has no default on purpose: a silently-wrong database is worse
-than a refusal to start.
+The five `DB_*` variables have no defaults on purpose: a silently-wrong
+database is worse than a refusal to start, so an incomplete set is rejected
+by name rather than filled in. `app.config` assembles them into the
+SQLAlchemy DSN, percent-encoding user and password so a password containing
+`@` or `/` cannot corrupt the URL.
+
+`DATABASE_URL` is an escape hatch for environments that hand out one
+ready-made DSN — a managed Postgres, or the test suite pointing Alembic at a
+scratch database. When set it wins over the five parts, which may then be
+omitted.
+
+`docker-compose.yml` reads the same `.env`: the `db` service takes its
+`POSTGRES_*` credentials and its published port from `DB_USER` /
+`DB_PASSWORD` / `DB_NAME` / `DB_PORT`, and the `api` service overrides only
+`DB_HOST=db` and `DB_PORT=5432`, since container-to-container traffic uses
+the service name and the internal port rather than the host mapping.
 
 ## Deliberate gaps
 

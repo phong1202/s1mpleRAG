@@ -1,0 +1,57 @@
+[project]
+name = "s1mplerag"
+version = "0.1.0"
+description = "A beginner-friendly RAG scaffold: FastAPI, async SQLAlchemy, pgvector."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic-settings",
+    "sqlalchemy[asyncio]",
+    "asyncpg",
+    "pgvector",
+    "alembic",
+]
+
+[dependency-groups]
+# Kept out of the production image, which builds with `uv sync --no-dev`.
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "ruff>=0.16.5",
+]
+
+[tool.uv]
+# An application, not a library: there is nothing to build or install, so uv
+# only manages dependencies. `app` stays importable from the working
+# directory, which is what uvicorn (--app-dir defaults to "."), alembic
+# (prepend_sys_path = .) and pytest already rely on.
+package = false
+
+[tool.ruff]
+line-length = 100
+# Alembic generates these from its own template (`Union[str, None]`, `Sequence`
+# from typing). Their style is Alembic's, not this project's, and reformatting
+# them would put us at odds with every future `alembic revision`.
+extend-exclude = [
+    "alembic/versions",
+    # `ruff format` also formats ```python blocks inside Markdown. The design
+    # docs use those blocks for illustrative payloads, not runnable code, and
+    # reformatting them rewrites prose the author laid out on purpose.
+    "*.md",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "C4"]
+ignore = [
+    # Wants PEP 695 `class ApiResponse[T]` instead of `Generic[T]`. That
+    # rewrites the runtime type every response passes through — a deliberate
+    # change to make on its own, not a side effect of adopting a linter.
+    "UP046",
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# `Depends()` / `Query()` / `Path()` in a default argument is the FastAPI
+# calling convention, not the mutable-default bug B008 exists to catch.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path"]

@@ -1,14 +1,12 @@
 import asyncio
 from logging.config import fileConfig
 
+import pgvector.sqlalchemy  # noqa: F401  — lets autogenerate render Vector
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
-
-import pgvector.sqlalchemy  # noqa: F401  — lets autogenerate render Vector
-
 from app.config import get_settings
 from app.models import Base  # noqa: F401  — registers every table on Base.metadata
 

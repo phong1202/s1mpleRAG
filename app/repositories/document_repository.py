@@ -24,9 +24,7 @@ class DocumentRepository:
         return await self.session.get(Document, document_id)
 
     async def get_by_title(self, title: str) -> Document | None:
-        result = await self.session.execute(
-            select(Document).where(Document.title == title)
-        )
+        result = await self.session.execute(select(Document).where(Document.title == title))
         return result.scalar_one_or_none()
 
     async def list(self, limit: int, offset: int) -> tuple[list[Document], int]:

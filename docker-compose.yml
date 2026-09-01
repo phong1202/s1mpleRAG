@@ -2,29 +2,31 @@ services:
   db:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: rag
-      POSTGRES_PASSWORD: rag
-      POSTGRES_DB: rag_beginner
+      POSTGRES_USER: ${DB_USER:?set DB_USER in .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_NAME:?set DB_NAME in .env}
     ports:
-      # 5433 on the host: 5432 is already taken by an existing citus container.
-      - "5433:5432"
+      - "${DB_PORT:?set DB_PORT in .env}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rag -d rag_beginner"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 5s
       timeout: 5s
       retries: 10
 
   api:
     build: .
+    env_file:
+      - .env
     environment:
       # Container-to-container: the service name and the internal port 5432,
-      # not the host's 5433.
-      DATABASE_URL: postgresql+asyncpg://rag:rag@db:5432/rag_beginner
-      ENVIRONMENT: development
+      # not the host's DB_HOST/DB_PORT. Environment entries beat env_file, and
+      # env vars beat the bind-mounted .env inside the container.
+      DB_HOST: db
+      DB_PORT: 5432
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:8000"
     volumes:
       - .:/code
     depends_on:
