@@ -1,0 +1,412 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Luồng hệ thống RAG — thiết kế dự kiến",
+    "output": "rag-system-flow.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1370,
+      650
+    ],
+    "views": [
+      {
+        "id": "duong-ghi",
+        "label": "Đường ghi",
+        "focus": [
+          "client",
+          "api",
+          "rabbitmq",
+          "minio",
+          "s1"
+        ],
+        "note": "PDF đi thẳng vào MinIO bằng presigned PUT; API chỉ đối chiếu hash rồi đẩy việc sang broker."
+      },
+      {
+        "id": "chuoi-stage",
+        "label": "Chuỗi 5 stage",
+        "focus": [
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5"
+        ],
+        "note": "Mỗi stage nhận checkpoint của stage trước và ghi checkpoint của mình trước khi chuyển tiếp."
+      },
+      {
+        "id": "duong-doc",
+        "label": "Đường đọc",
+        "focus": [
+          "postgres",
+          "query",
+          "openai"
+        ],
+        "note": "Nhúng câu hỏi, tìm child chunk, gom về parent rồi mới sinh câu trả lời."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "trình duyệt · CLI",
+      "pos": [
+        16,
+        60
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "tag": "ngoài hệ thống"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "api :8000",
+      "sublabel": "FastAPI · async",
+      "pos": [
+        251,
+        60
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "tag": "đăng ký + publish"
+    },
+    {
+      "id": "rabbitmq",
+      "type": "messagebus",
+      "label": "RabbitMQ",
+      "sublabel": "queue cpu · llm",
+      "pos": [
+        486,
+        60
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "tag": "AMQP ack"
+    },
+    {
+      "id": "minio",
+      "type": "database",
+      "label": "MinIO",
+      "sublabel": "raw/ · staging/",
+      "pos": [
+        16,
+        205
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "tag": "S3-API"
+    },
+    {
+      "id": "s1",
+      "type": "backend",
+      "label": "S1 Parse",
+      "sublabel": "PyMuPDF + dò bản scan",
+      "pos": [
+        251,
+        205
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "tag": "queue cpu · c8"
+    },
+    {
+      "id": "s2",
+      "type": "backend",
+      "label": "S2 Structure",
+      "sublabel": "chunk cha 500–1000 token",
+      "pos": [
+        486,
+        205
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "tag": "queue cpu"
+    },
+    {
+      "id": "s3",
+      "type": "backend",
+      "label": "S3 Enrich",
+      "sublabel": "context + category",
+      "pos": [
+        721,
+        205
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "tag": "queue llm · c20"
+    },
+    {
+      "id": "s4",
+      "type": "backend",
+      "label": "S4 Embed",
+      "sublabel": "chuẩn hoá L2 · 1536-d",
+      "pos": [
+        956,
+        205
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "tag": "queue llm"
+    },
+    {
+      "id": "s5",
+      "type": "backend",
+      "label": "S5 Persist",
+      "sublabel": "một transaction, upsert",
+      "pos": [
+        1191,
+        205
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "tag": "queue cpu"
+    },
+    {
+      "id": "docling",
+      "type": "backend",
+      "label": "docling :8100",
+      "sublabel": "container riêng · c1",
+      "pos": [
+        251,
+        350
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "tag": "model nặng"
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "Postgres 16",
+      "sublabel": "pgvector · nguồn sự thật",
+      "pos": [
+        1191,
+        350
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "tag": "documents + chunks"
+    },
+    {
+      "id": "openai",
+      "type": "external",
+      "label": "OpenAI",
+      "sublabel": "gpt-4o-mini · embed-3-small",
+      "pos": [
+        706,
+        495
+      ],
+      "size": [
+        180,
+        68
+      ],
+      "tag": "có hạn ngạch"
+    },
+    {
+      "id": "query",
+      "type": "backend",
+      "label": "POST /query",
+      "sublabel": "chạy trong tiến trình api",
+      "pos": [
+        1191,
+        495
+      ],
+      "size": [
+        150,
+        68
+      ],
+      "tag": "đường đọc"
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-upload",
+      "from": "client",
+      "to": "minio",
+      "label": "presigned PUT · raw/{sha256}.pdf",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "c-register",
+      "from": "client",
+      "to": "api",
+      "label": "POST /documents + sha256",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDy": -28
+    },
+    {
+      "id": "c-publish",
+      "from": "api",
+      "to": "rabbitmq",
+      "label": "publish sau khi đối chiếu hash",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDy": 101
+    },
+    {
+      "id": "c-consume",
+      "from": "rabbitmq",
+      "to": "s1",
+      "label": "consume queue cpu",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "c-fetch",
+      "from": "minio",
+      "to": "s1",
+      "label": "tải PDF gốc",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-docling",
+      "from": "s1",
+      "to": "docling",
+      "label": "POST /parse · trang có bảng hoặc ảnh",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "c-parsed",
+      "from": "s1",
+      "to": "s2",
+      "label": "parsed.json",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-chunks",
+      "from": "s2",
+      "to": "s3",
+      "label": "chunks.json",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-enriched",
+      "from": "s3",
+      "to": "s4",
+      "label": "enriched.json",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-npy",
+      "from": "s4",
+      "to": "s5",
+      "label": "embeddings.npy",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-enrich-llm",
+      "from": "s3",
+      "to": "openai",
+      "label": "20 chunk mỗi lượt",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "c-embed-llm",
+      "from": "s4",
+      "to": "openai",
+      "label": "100 văn bản mỗi lượt",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "c-persist",
+      "from": "s5",
+      "to": "postgres",
+      "label": "upsert parent/child · COMPLETED",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "c-search",
+      "from": "postgres",
+      "to": "query",
+      "label": "lấy dư top_k×5 rồi gom về parent",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "c-generate",
+      "from": "query",
+      "to": "openai",
+      "label": "nhúng câu hỏi · sinh câu trả lời",
+      "fromSide": "left",
+      "toSide": "right"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Checkpoint và khôi phục",
+      "items": [
+        "Mỗi stage ghi kết quả vào staging/{document_id}/ trước khi chuyển tiếp",
+        "Stage thấy output của mình đã có thì bỏ qua — không cần khoá phân tán",
+        "staging/ xoá sau 7 ngày; raw/ giữ vĩnh viễn để còn ingest lại được"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Hàng đợi và nhịp gọi",
+      "items": [
+        "Hai hàng đợi tách theo tài nguyên: cpu cho S1/S2/S5, llm cho S3/S4",
+        "Redis là container thứ 8, không vẽ: chỉ giữ token bucket cho S3 và S4",
+        "Không có result backend — documents.status mới là trạng thái bền"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Đường đọc gọn hơn đường ghi",
+      "items": [
+        "Một chặng: nhúng câu hỏi, tìm child, gom về parent, ngữ cảnh 8000 token",
+        "DISTINCT ON cần parent_id đứng đầu ORDER BY, nếu không sai mà không báo lỗi",
+        "page_number nằm ở child nên trích dẫn chỉ chính xác tới mức trang"
+      ]
+    }
+  ]
+}
