@@ -15,6 +15,83 @@ services:
       timeout: 5s
       retries: 10
 
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment:
+      # The whole reason RABBITMQ_* is stored in parts: the broker needs the
+      # credentials as its own variables, and app/config.py assembles the same
+      # values into a URL. One source, two consumers.
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?set RABBITMQ_USER in .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
+    ports:
+      - "${RABBITMQ_PORT:?set RABBITMQ_PORT in .env}:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # 6379 is literal because REDIS_URL is kept whole -- there is no
+    # REDIS_PORT to reference, by the same decision.
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?set MINIO_ACCESS_KEY in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY in .env}
+    ports:
+      - "${MINIO_PORT:?set MINIO_PORT in .env}:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Creates the buckets and exits. Not a long-running entrypoint: buckets are
+  # a one-time job, and attaching it to minio's lifecycle would only make
+  # minio slower to start.
+  minio-init:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW}
+      MINIO_BUCKET_STAGING: ${MINIO_BUCKET_STAGING}
+    # `mc ilm rule add` is NOT idempotent -- it mints a new rule ID on every
+    # run, so repeated `compose up` would stack duplicate expiry rules on the
+    # bucket forever. `import` replaces the whole lifecycle configuration from
+    # the JSON below, which makes a re-run a no-op. Nothing is tolerated with
+    # `|| true` any more: with the operations idempotent, a failure here is
+    # real and should stop the container.
+    entrypoint:
+      - /bin/sh
+      - -euc
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ACCESS_KEY" "$$MINIO_SECRET_KEY"
+        mc mb --ignore-existing "local/$$MINIO_BUCKET_RAW"
+        mc mb --ignore-existing "local/$$MINIO_BUCKET_STAGING"
+        mc ilm rule import "local/$$MINIO_BUCKET_STAGING" <<'JSON'
+        {"Rules":[{"ID":"expire-staging-7d","Status":"Enabled","Expiration":{"Days":7},"Filter":{}}]}
+        JSON
+
   api:
     build: .
     env_file:
@@ -35,3 +112,4 @@ services:
 
 volumes:
   pgdata:
+  miniodata:
