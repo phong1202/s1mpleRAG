@@ -12,6 +12,7 @@ dependencies = [
     "pgvector",
     "alembic",
     "pymupdf>=1.28.2",
+    "psycopg[binary]>=3.3.5",
 ]
 
 [dependency-groups]
