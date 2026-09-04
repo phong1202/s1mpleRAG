@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     minio_public_endpoint: str | None = None
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin"
+    # S3 requires a region even where MinIO ignores it: botocore refuses to
+    # sign without one. Configurable because pointing at real S3 means
+    # naming the bucket's actual region.
+    minio_region: str = "us-east-1"
     minio_bucket_raw: str = "raw"
     minio_bucket_staging: str = "staging"
 
