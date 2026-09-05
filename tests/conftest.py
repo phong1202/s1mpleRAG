@@ -12,6 +12,17 @@ from app.app import create_app
 from app.config import get_settings
 from app.utils.database import get_session
 
+# Shared by any test that needs a complete, valid database config in the
+# environment -- e.g. one exercising Settings() directly rather than through
+# the real .env.
+DB_ENV = {
+    "DB_HOST": "localhost",
+    "DB_PORT": "5433",
+    "DB_USER": "u",
+    "DB_PASSWORD": "p",
+    "DB_NAME": "db",
+}
+
 TEST_DB_NAME = "rag_beginner_test"
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
@@ -100,3 +111,11 @@ async def client(db_session):
         yield ac
 
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def db_env(monkeypatch):
+    """A complete set of database settings in the environment."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    for name, value in DB_ENV.items():
+        monkeypatch.setenv(name, value)

@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 from urllib.parse import quote, quote_plus
 
 from pydantic import Field, model_validator
@@ -101,7 +102,11 @@ class Settings(BaseSettings):
 
     # --- LLM ---
     # "stub" is the deliberate default: without a key the suite still runs.
-    llm_provider: str = "stub"
+    # A Literal, not a plain str: a typo like "opneai" must fail at
+    # startup rather than silently fall back to the stub and let a
+    # production run fill the database with normalised-noise embeddings
+    # that look real.
+    llm_provider: Literal["stub", "openai"] = "stub"
     openai_api_key: str | None = None
     openai_chat_model: str = "gpt-4o-mini"
     openai_embed_model: str = "text-embedding-3-small"

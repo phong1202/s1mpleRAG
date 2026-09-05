@@ -16,6 +16,7 @@ dependencies = [
     "boto3>=1.43.87",
     "redis>=8.1.0",
     "kombu>=5.6.2",
+    "openai>=3.8.0",
 ]
 
 [dependency-groups]

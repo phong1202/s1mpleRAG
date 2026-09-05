@@ -2,14 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings, get_settings
-
-DB_ENV = {
-    "DB_HOST": "localhost",
-    "DB_PORT": "5433",
-    "DB_USER": "u",
-    "DB_PASSWORD": "p",
-    "DB_NAME": "db",
-}
+from tests.conftest import DB_ENV
 
 
 @pytest.fixture(autouse=True)
@@ -22,14 +15,6 @@ def _reset_settings_cache():
     vars actually applied again."""
     yield
     get_settings.cache_clear()
-
-
-@pytest.fixture
-def db_env(monkeypatch):
-    """A complete set of database settings in the environment."""
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    for name, value in DB_ENV.items():
-        monkeypatch.setenv(name, value)
 
 
 def _clear_db_env(monkeypatch):
