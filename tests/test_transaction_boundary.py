@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import app.utils.database as db_module
 from app.exceptions import AppException, ErrorCode
-from app.repositories.document_repository import DocumentRepository
+from app.models.document import Document
 from app.utils.database import get_session
 from tests.conftest import TEST_DATABASE_URL
 
@@ -82,7 +82,8 @@ async def test_successful_operation_commits_and_is_visible_from_another_connecti
     title = "txn-boundary-commit"
     try:
         async with session_scope() as session:
-            await DocumentRepository(session).create(title=title, content="x")
+            session.add(Document(title=title, content="x"))
+            await session.flush()
 
         assert await _title_exists(title) is True
     finally:
@@ -95,7 +96,8 @@ async def test_app_exception_after_a_flush_is_rolled_back():
     try:
         with pytest.raises(AppException):
             async with session_scope() as session:
-                await DocumentRepository(session).create(title=title, content="x")
+                session.add(Document(title=title, content="x"))
+                await session.flush()
                 raise AppException(ErrorCode.DOCUMENT_NOT_FOUND, "forced for test")
 
         assert await _title_exists(title) is False
@@ -109,7 +111,8 @@ async def test_unhandled_exception_after_a_flush_is_rolled_back():
     try:
         with pytest.raises(RuntimeError):
             async with session_scope() as session:
-                await DocumentRepository(session).create(title=title, content="x")
+                session.add(Document(title=title, content="x"))
+                await session.flush()
                 raise RuntimeError("forced for test")
 
         assert await _title_exists(title) is False
