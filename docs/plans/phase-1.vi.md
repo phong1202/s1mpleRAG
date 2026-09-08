@@ -2346,7 +2346,6 @@ tức chạy lại đúng một stage, vô hại.
 """
 
 import uuid
-from collections import Counter
 from datetime import datetime, timezone
 
 from celery import chain
@@ -2366,11 +2365,6 @@ def _advance(document_id: str, status: str, stage: str | None = None, completed:
             document.stage = stage
         if completed:
             document.completed_at = datetime.now(timezone.utc)
-    # Ngôn ngữ chủ đạo, theo số lượng parent. Tài liệu song ngữ nhận bên nào
-    # chiếm nhiều hơn -- lọc ở tầng document chỉ là gợi ý thô, còn cột trên
-    # từng chunk mới là thứ retrieval thật sự đọc.
-    languages = [p["language"] for p in chunks["parents"] if p["language"]]
-    document.language = Counter(languages).most_common(1)[0][0] if languages else None
 
 
 @app.task(name="worker.stages.parse", bind=True, max_retries=3)
@@ -3854,6 +3848,7 @@ def test_status_becomes_completed(seeded_document):
 """S5 — Persist. Một transaction, sync Session. Luôn an toàn khi chạy lại."""
 
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 
 from sqlalchemy.dialects.postgresql import insert
@@ -3926,6 +3921,11 @@ def persist_document(
     document.status = "COMPLETED"
     document.stage = "PERSISTING"
     document.completed_at = datetime.now(timezone.utc)
+    # Ngôn ngữ chủ đạo, theo số lượng parent. Tài liệu song ngữ nhận bên nào
+    # chiếm nhiều hơn -- lọc ở tầng document chỉ là gợi ý thô, còn cột trên
+    # từng chunk mới là thứ retrieval thật sự đọc.
+    languages = [p["language"] for p in chunks["parents"] if p["language"]]
+    document.language = Counter(languages).most_common(1)[0][0] if languages else None
 ```
 
 - [ ] **Step 4: Nối vào stage `persist`**
