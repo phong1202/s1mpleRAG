@@ -27,3 +27,11 @@ class ParentChunk(Base):
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     page_start: Mapped[int] = mapped_column(Integer, nullable=False)
     page_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    # "Chapter 2 > Article 19 > Clause 2". S2 already has this in hand while
+    # splitting on headings; rebuilding it later means re-running Docling
+    # over the whole corpus.
+    heading_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Detected here, not on the child: 150 tokens is too little to classify
+    # reliably, and Vietnamese prose mixed with English terms is exactly what
+    # makes that misclassify.
+    language: Mapped[str | None] = mapped_column(Text, nullable=True)

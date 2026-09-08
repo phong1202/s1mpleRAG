@@ -28,8 +28,8 @@ async def test_document_is_a_file_entity_not_a_title_content_pair(db_session):
     assert isinstance(doc.id, uuid.UUID)
     assert doc.status == "QUEUED"
     assert doc.attempts == 0
-    assert not hasattr(doc, "title")
     assert not hasattr(doc, "content")
+    assert doc.title is None  # S1 fills it; the client never sends one
 
 
 async def test_sha256_hash_is_unique(db_session):
@@ -107,3 +107,71 @@ async def test_the_embedding_column_width_matches_the_configured_dimensions():
     if someone changes the setting without touching the schema, this is
     where it fails loudly instead of at the first mismatched insert."""
     assert get_settings().embed_dimensions == 1536
+
+
+async def test_retrieval_columns_default_to_null(db_session):
+    """S1 and S2 fill these columns. Phase 1a stays green while they are
+    empty -- that is what keeps this task independent of Task 13 and 14."""
+    doc = Document(sha256_hash="e" * 64, filename="x.pdf", object_key="raw/x.pdf", size_bytes=1)
+    db_session.add(doc)
+    await db_session.flush()
+
+    parent = ParentChunk(
+        document_id=doc.id,
+        chunk_index=0,
+        content="x",
+        token_count=1,
+        page_start=1,
+        page_end=1,
+    )
+    db_session.add(parent)
+    await db_session.flush()
+
+    assert doc.title is None and doc.language is None
+    assert parent.heading_path is None and parent.language is None
+
+
+async def test_child_tsv_is_generated_and_follows_the_language(db_session):
+    """tsv is a GENERATED column: no stage can forget to update it, and none
+    is allowed to write it. `language` picks the text search config -- that
+    is the entire reason this is not a flat to_tsvector('english', ...)."""
+    doc = Document(sha256_hash="f" * 64, filename="x.pdf", object_key="raw/x.pdf", size_bytes=1)
+    db_session.add(doc)
+    await db_session.flush()
+    parent = ParentChunk(
+        document_id=doc.id,
+        chunk_index=0,
+        content="x",
+        token_count=1,
+        page_start=1,
+        page_end=1,
+    )
+    db_session.add(parent)
+    await db_session.flush()
+
+    for index, language in enumerate(["en", "vi"]):
+        db_session.add(
+            ChildChunk(
+                document_id=doc.id,
+                parent_id=parent.id,
+                chunk_index=index,
+                content="Electronic invoices were issued",
+                contextualized="ctx",
+                page_number=1,
+                token_count=5,
+                embedding=[0.0] * 1536,
+                language=language,
+            )
+        )
+    await db_session.flush()
+
+    rows = (
+        await db_session.execute(
+            text("SELECT language, tsv::text FROM child_chunks ORDER BY chunk_index")
+        )
+    ).all()
+
+    # 'english' stems: invoices -> invoic. 'simple' does not stem, and keeps
+    # everything an English stopword list would throw away.
+    assert "invoic'" in rows[0][1] and "invoices" not in rows[0][1]
+    assert "invoices" in rows[1][1]

@@ -36,3 +36,10 @@ class ChildChunk(Base):
     # test_the_embedding_column_width_matches_the_configured_dimensions.
     embedding: Mapped[list[float]] = mapped_column(Vector(1536), nullable=False)
     category: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Inherited from the parent. It picks the text search config for `tsv`,
+    # so it has to be set for the generated column to mean anything.
+    language: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # `tsv` is deliberately NOT mapped here. The database owns it and Phase 2
+    # reads it with raw SQL; mapping it would tempt SQLAlchemy to write to a
+    # generated column, and Postgres refuses that.

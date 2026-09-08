@@ -23,6 +23,15 @@ class Document(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Display name, extracted in S1: PDF metadata, then the first h1, then
+    # the filename. Phase 2's router matches how a user names a document
+    # ("summarize decree 123") against this, since `2024-final-v3(1).pdf`
+    # matches nothing a person would type.
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Dominant language: vi | en | other. A closed set, same discipline as
+    # the category taxonomy. Written by S5, from its parent chunks.
+    language: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # A closed set of nine values (see the ck_documents_status check
     # constraint in the migration): QUEUED, PARSING, STRUCTURING, ENRICHING,
     # EMBEDDING, PERSISTING, COMPLETED, RETRYING, DEAD_LETTER. Kept as a
