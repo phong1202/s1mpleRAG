@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 
 from fastapi import Depends
 
@@ -72,6 +73,21 @@ class IngestionService:
         if document is None:
             raise AppException(ErrorCode.DOCUMENT_ALREADY_INGESTED)
         return document
+
+    async def get(self, document_id: uuid.UUID) -> Document:
+        document = await self.repository.get_by_id(document_id)
+        if document is None:
+            raise AppException(ErrorCode.DOCUMENT_NOT_FOUND, f"Document {document_id} not found")
+        return document
+
+    async def list(self, limit: int, offset: int, status: str | None) -> tuple[list[Document], int]:
+        return await self.repository.list(limit=limit, offset=offset, status=status)
+
+    async def delete(self, document_id: uuid.UUID) -> None:
+        """Cascades down to the chunks via ON DELETE CASCADE; raw/ is left
+        alone -- it is the source of truth, and the only way to re-ingest."""
+        document = await self.get(document_id)
+        await self.repository.delete(document)
 
 
 async def get_ingestion_service(

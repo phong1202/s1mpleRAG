@@ -51,6 +51,14 @@ class DocumentRepository:
     async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
         return await self.session.get(Document, document_id)
 
+    async def delete(self, document: Document) -> None:
+        """Flushes explicitly: Session.get() checks the identity map without
+        autoflushing first, unlike a select()/execute() query would, so a
+        get_by_id() for this same id later in the same request would
+        otherwise still see the pre-delete object."""
+        await self.session.delete(document)
+        await self.session.flush()
+
     async def list(self, limit: int, offset: int, status: str | None = None):
         query = select(Document)
         if status:

@@ -1,3 +1,5 @@
+import uuid
+
 from pydantic import BaseModel, ConfigDict, Field
 
 _SHA256_HEX = r"^[0-9a-f]{64}$"
@@ -30,9 +32,13 @@ class DocumentAccepted(BaseModel):
 
 
 class DocumentStatus(BaseModel):
+    # from_attributes lets this be built straight off the ORM model with
+    # model_validate(document) -- id stays a real UUID rather than a str
+    # because pydantic serialises it to a JSON string on its own; casting
+    # it by hand would just be undoing what this config already buys.
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: uuid.UUID
     filename: str
     status: str
     stage: str | None

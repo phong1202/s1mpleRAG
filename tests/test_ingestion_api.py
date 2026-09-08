@@ -120,3 +120,48 @@ async def test_an_object_that_was_never_uploaded_is_rejected(client):
     response = await client.post("/documents", json=payload)
 
     assert response.status_code == 404
+
+
+async def test_status_reports_the_pipeline_pointer(client, uploaded_pdf):
+    created = await client.post("/documents", json=uploaded_pdf)
+    document_id = created.json()["data"]["document_id"]
+
+    response = await client.get(f"/documents/{document_id}/status")
+
+    data = response.json()["data"]
+    assert data["status"] == "QUEUED"
+    assert data["stage"] is None
+    assert data["attempts"] == 0
+
+
+async def test_status_of_an_unknown_uuid_is_404(client):
+    response = await client.get(f"/documents/{uuid.uuid4()}/status")
+
+    assert response.status_code == 404
+
+
+async def test_a_malformed_uuid_is_422_not_500(client):
+    """id used to be an int4 range guard; now it's a uuid, but this still
+    has to come back as 422, not blow up in the driver."""
+    response = await client.get("/documents/not-a-uuid/status")
+
+    assert response.status_code == 422
+
+
+async def test_list_filters_by_status(client, uploaded_pdf):
+    await client.post("/documents", json=uploaded_pdf)
+
+    response = await client.get("/documents", params={"status": "QUEUED"})
+
+    data = response.json()["data"]
+    assert data["total"] >= 1
+    assert all(item["status"] == "QUEUED" for item in data["items"])
+
+
+async def test_delete_removes_the_document(client, uploaded_pdf):
+    created = await client.post("/documents", json=uploaded_pdf)
+    document_id = created.json()["data"]["document_id"]
+
+    await client.delete(f"/documents/{document_id}")
+
+    assert (await client.get(f"/documents/{document_id}/status")).status_code == 404
