@@ -28,6 +28,7 @@ Mọi task đều ngầm chịu các ràng buộc dưới đây. Giá trị ché
 - **Phát hiện bản scan:** `total_text_chars / page_count < 100` → định tuyến **toàn bộ** tài liệu sang Docling.
 - **Giới hạn:** `MAX_FILE_SIZE_MB=50`, `MAX_PAGE_COUNT=500`, `MAX_CHUNKS_PER_DOC=5000`.
 - **Category — enum đóng, 8 giá trị:** `FINANCIAL` `LEGAL` `TECHNICAL` `MARKETING` `HR` `RESEARCH` `OPERATIONS` `OTHER`. Giá trị ngoài enum bị **từ chối và ghi log**, không lưu.
+- **Language — enum đóng, 3 giá trị:** `vi` `en` `other`. Detect một lần cho mỗi **parent** chunk ở S2, child kế thừa. Mọi thứ khác gom về `other`.
 - **Queue:** đúng hai — `cpu` (S1, S2, S5) và `llm` (S3, S4).
 - **Celery:** `result_backend=None`, `task_acks_late=True`, `task_reject_on_worker_lost=True`, `worker_prefetch_multiplier=1`.
 - **DB driver:** API `postgresql+asyncpg`, worker `postgresql+psycopg` (**sync**). Task worker là `def` thường — **không `asyncio.run()` ở bất kỳ đâu trong `worker/`**.
@@ -87,7 +88,7 @@ docling_service/               MỚI — container riêng
 tests/
   fixtures/generate.py         MỚI — sinh 6 PDF
   fixtures/*.pdf               MỚI — sinh ra, có commit
-alembic/versions/              MỚI — 1 revision
+alembic/versions/              MỚI — 2 revision (Task 8 schema, Task 8b cột retrieval)
 docker-compose.yml             SỬA — 2 service thành 8
 .env.example                   SỬA — thêm nhóm biến mới
 ```
@@ -1495,6 +1496,195 @@ Commit message đề xuất: `feat(db): replace CRUD schema with file entity and
 
 ---
 
+### Task 8b: Các cột chuẩn bị cho retrieval
+
+**Vì sao có task này.** Phase 2 cần ba thứ mà Phase 1 không dùng đến: tìm theo từ khoá chạy song song với vector, một corpus song ngữ mà nó phân biệt được, và một tool duyệt tài liệu nhìn thấy cấu trúc. Năm cột nullable làm được cả ba. Bốn trong số đó do S1 và S2 **sinh ra** — Task 13 và 14, cả hai chưa viết dòng nào — nên thêm bây giờ tốn một migration và khoảng mười dòng code stage. Thêm sau khi hai stage đó xong thì giá là **nạp lại toàn bộ corpus**, Docling và tất cả. Không có gì trong Phase 1a đọc các cột này, và mọi cột đều nullable: chuỗi stage vẫn xanh dù chúng có được điền hay không.
+
+**Files:**
+- Modify: `app/models/document.py`, `app/models/parent_chunk.py`, `app/models/child_chunk.py`
+- Create: `alembic/versions/<hash>_retrieval_readiness.py` (sinh bằng CLI, rồi sửa tay phần `tsv`)
+- Modify: `tests/test_schema.py`
+
+**Interfaces:**
+- Produces:
+  - `Document.title: str | None`, `Document.language: str | None`
+  - `ParentChunk.heading_path: str | None`, `ParentChunk.language: str | None`
+  - `ChildChunk.language: str | None`
+  - `child_chunks.tsv` — cột `GENERATED ... STORED` kiểu tsvector dựng trên `content`, có GIN index
+  - `ix_documents_title_fts` — GIN trên `title || filename`, để tra mờ tên tài liệu
+
+- [ ] **Step 1: Sửa assertion mà task này làm sai**
+
+`test_document_is_a_file_entity_not_a_title_content_pair` đang assert `not hasattr(doc, "title")`. Assertion đó nói về `title` của **CRUD**: do client gửi, unique, là business key. `title` mới ngược lại cả ba — là tên hiển thị trích từ PDF ở S1, nullable, không unique, client không bao giờ gửi. Giữ nửa `content`, thay nửa `title`:
+
+```python
+    assert not hasattr(doc, "content")
+    assert doc.title is None          # S1 điền, client không bao giờ gửi
+```
+
+- [ ] **Step 2: Viết test cho fail trước**
+
+```python
+# tests/test_schema.py — thêm vào cuối
+
+async def test_retrieval_columns_default_to_null(db_session):
+    """S1 và S2 điền các cột này. Phase 1a vẫn xanh khi chúng rỗng -- đó là
+    thứ giữ cho task này độc lập với Task 13 và 14."""
+    doc = Document(sha256_hash="c" * 64, filename="x.pdf", object_key="raw/x.pdf", size_bytes=1)
+    db_session.add(doc)
+    await db_session.flush()
+
+    parent = ParentChunk(
+        document_id=doc.id, chunk_index=0, content="x", token_count=1, page_start=1, page_end=1
+    )
+    db_session.add(parent)
+    await db_session.flush()
+
+    assert doc.title is None and doc.language is None
+    assert parent.heading_path is None and parent.language is None
+
+
+async def test_child_tsv_is_generated_and_follows_the_language(db_session):
+    """tsv là cột GENERATED: không stage nào quên cập nhật được, và không
+    stage nào được phép ghi vào. `language` chọn config -- đó là toàn bộ lý do
+    cột này không phải một `to_tsvector('english', ...)` phẳng."""
+    doc = Document(sha256_hash="d" * 64, filename="x.pdf", object_key="raw/x.pdf", size_bytes=1)
+    db_session.add(doc)
+    await db_session.flush()
+    parent = ParentChunk(
+        document_id=doc.id, chunk_index=0, content="x", token_count=1, page_start=1, page_end=1
+    )
+    db_session.add(parent)
+    await db_session.flush()
+
+    for index, language in enumerate(["en", "vi"]):
+        db_session.add(
+            ChildChunk(
+                document_id=doc.id, parent_id=parent.id, chunk_index=index,
+                content="Electronic invoices were issued", contextualized="ctx",
+                page_number=1, token_count=5, embedding=[0.0] * 1536, language=language,
+            )
+        )
+    await db_session.flush()
+
+    rows = (
+        await db_session.execute(
+            text("SELECT language, tsv::text FROM child_chunks ORDER BY chunk_index")
+        )
+    ).all()
+
+    # 'english' rút gọn: invoices -> invoic. 'simple' không rút gọn, và giữ
+    # lại mọi thứ mà danh sách stopword tiếng Anh sẽ vứt đi.
+    assert "invoic'" in rows[0][1] and "invoices" not in rows[0][1]
+    assert "invoices" in rows[1][1]
+```
+
+- [ ] **Step 3: Thêm cột vào models**
+
+```python
+# app/models/document.py — thêm sau page_count
+    # Tên hiển thị của file, trích ở S1: metadata PDF, rồi h1 đầu tiên, rồi
+    # filename. Router của Phase 2 khớp cách người dùng gọi tên ("tóm tắt
+    # Nghị định 123") vào đây, vì `2024-final-v3(1).pdf` không khớp với bất
+    # cứ thứ gì một người sẽ gõ.
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Ngôn ngữ chủ đạo: vi | en | other. Tập đóng, cùng kỷ luật với taxonomy
+    # category. S5 ghi, dựa trên các parent của nó.
+    language: Mapped[str | None] = mapped_column(Text, nullable=True)
+```
+
+```python
+# app/models/parent_chunk.py — thêm sau page_end
+    # "Chương II > Điều 19 > Khoản 2". S2 đang cầm sẵn thứ này trong tay lúc
+    # cắt theo heading; dựng lại sau nghĩa là chạy lại Docling trên toàn bộ
+    # corpus.
+    heading_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Detect ở đây, không phải ở child: 150 token là quá ít để nhận dạng ngôn
+    # ngữ đáng tin, và văn tiếng Việt lẫn thuật ngữ tiếng Anh chính là trường
+    # hợp làm nó sai.
+    language: Mapped[str | None] = mapped_column(Text, nullable=True)
+```
+
+```python
+# app/models/child_chunk.py — thêm sau category
+    # Kế thừa từ parent. Nó chọn text search config cho `tsv`, nên phải được
+    # gán thì cột sinh tự động mới có ý nghĩa.
+    language: Mapped[str | None] = mapped_column(Text, nullable=True)
+```
+
+`tsv` **cố ý không** được map trên `ChildChunk`. Database sở hữu nó và Phase 2 đọc bằng SQL thô; map nó vào sẽ dụ SQLAlchemy ghi vào một cột generated, và Postgres từ chối.
+
+- [ ] **Step 4: Sinh migration rồi sửa tay**
+
+```bash
+uv run alembic revision --autogenerate -m "retrieval readiness"
+```
+
+Autogenerate sinh ra năm lệnh `add_column` và không gì khác — nó không có ý kiến gì về cột generated hay GIN index trên biểu thức. Thêm tay:
+
+```python
+def upgrade() -> None:
+    # ... năm lệnh add_column do autogenerate sinh, giữ nguyên ...
+
+    # Cột GENERATED chứ không phải trigger: Postgres tự tính lại mỗi khi
+    # `content` hoặc `language` đổi, nên không stage nào quên được.
+    #
+    # Dạng hai tham số to_tsvector(regconfig, text) là IMMUTABLE. Dạng một
+    # tham số chỉ STABLE -- nó đọc default_text_search_config lúc chạy -- và
+    # Postgres từ chối nó trong cột generated. Truyền config tường minh không
+    # phải chuyện phong cách; đó là thứ làm cột này hợp lệ.
+    op.execute("""
+        ALTER TABLE child_chunks
+        ADD COLUMN tsv tsvector
+        GENERATED ALWAYS AS (
+            to_tsvector(
+                CASE WHEN language = 'en' THEN 'english'::regconfig
+                     ELSE 'simple'::regconfig END,
+                content
+            )
+        ) STORED
+    """)
+    op.create_index("ix_child_chunks_tsv", "child_chunks", ["tsv"], postgresql_using="gin")
+
+    # `content`, KHÔNG phải `contextualized`: câu ngữ cảnh là diễn giải của
+    # LLM. Nó thuộc về embedding, thứ tìm theo nghĩa. Một chỉ mục khớp mặt
+    # chữ dựng trên diễn giải sẽ trả về chunk cho những từ tài liệu chưa bao
+    # giờ viết, và trích dẫn khi đó trỏ vào một đoạn không chứa từ vừa tìm.
+    op.execute("""
+        CREATE INDEX ix_documents_title_fts ON documents USING gin (
+            to_tsvector('simple', coalesce(title, '') || ' ' || filename)
+        )
+    """)
+
+
+def downgrade() -> None:
+    op.execute("DROP INDEX IF EXISTS ix_documents_title_fts")
+    op.drop_index("ix_child_chunks_tsv", table_name="child_chunks")
+    op.execute("ALTER TABLE child_chunks DROP COLUMN tsv")
+    # ... năm lệnh drop_column do autogenerate sinh ...
+```
+
+- [ ] **Step 5: Chạy migration, và chuẩn bị sẵn phương án lui**
+
+```bash
+uv run alembic upgrade head
+```
+
+**Nếu Postgres từ chối cột** với `generation expression is not immutable`, nguyên nhân là biểu thức `CASE` trên `regconfig`. Đừng cố đấu — lui một bước rồi đi tiếp:
+
+1. Bỏ `CASE`: `to_tsvector('simple'::regconfig, content)`, không phân biệt. `'simple'` không bao giờ rút gọn từ, tiếng Anh mất một chút recall còn tiếng Việt không mất gì.
+2. Ghi rõ độ lệch đó vào docstring của migration, và xem lại ở R2 — lúc đó eval set đo được việc rút gọn từ tiếng Anh có đáng một cột thứ hai không, thay vì đoán.
+
+Kết cục nào cũng cho một bản build xanh. Bước này không được làm tắc task.
+
+- [ ] **Step 6: Chạy full suite** — PASS, 57 test (55 + 2).
+
+- [ ] **Step 7: Dừng và báo cáo**
+
+Commit message đề xuất: `feat(db): add retrieval-readiness columns for phase 2`
+
+---
+
 ### Task 9: API — presigned upload + đăng ký
 
 **Files:**
@@ -2156,6 +2346,7 @@ tức chạy lại đúng một stage, vô hại.
 """
 
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 
 from celery import chain
@@ -2175,6 +2366,11 @@ def _advance(document_id: str, status: str, stage: str | None = None, completed:
             document.stage = stage
         if completed:
             document.completed_at = datetime.now(timezone.utc)
+    # Ngôn ngữ chủ đạo, theo số lượng parent. Tài liệu song ngữ nhận bên nào
+    # chiếm nhiều hơn -- lọc ở tầng document chỉ là gợi ý thô, còn cột trên
+    # từng chunk mới là thứ retrieval thật sự đọc.
+    languages = [p["language"] for p in chunks["parents"] if p["language"]]
+    document.language = Counter(languages).most_common(1)[0][0] if languages else None
 
 
 @app.task(name="worker.stages.parse", bind=True, max_retries=3)
@@ -2576,8 +2772,9 @@ Commit message đề xuất: `feat(docling): add docling parsing service contain
 **Interfaces:**
 - Consumes: `ObjectStore`, `Settings.docling_url/.docling_page_timeout_s/.max_page_count`
 - Produces:
-  - `parse_document(object_key: str, store: ObjectStore, docling_url: str) -> dict` trả `{"page_count": int, "pages": [{"page": int, "markdown": str, "source": "pymupdf"|"docling", "confidence": float}]}`
+  - `parse_document(object_key: str, store: ObjectStore, docling_url: str) -> dict` trả `{"title": str | None, "page_count": int, "pages": [{"page": int, "markdown": str, "source": "pymupdf"|"docling", "confidence": float}]}`
   - `is_scanned(total_text_chars: int, page_count: int) -> bool`
+  - `extract_title(metadata: dict, pages: list[dict]) -> str | None` — điền `documents.title` (Task 8b)
   - Ngoại lệ: `AppException(ErrorCode.PDF_ENCRYPTED)`, `AppException(ErrorCode.PDF_TOO_LARGE)`
   - Checkpoint: `staging/{document_id}/parsed.json`
 
@@ -2590,7 +2787,7 @@ from pathlib import Path
 import pytest
 
 from app.exceptions import AppException, ErrorCode
-from worker.parsing import is_scanned, parse_document
+from worker.parsing import extract_title, is_scanned, parse_document
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -2603,6 +2800,17 @@ def test_scanned_detection_uses_chars_per_page():
 def test_scanned_detection_handles_zero_pages():
     """Chia cho 0 ở đây là một crash rất dễ xảy ra và rất khó truy."""
     assert is_scanned(total_text_chars=0, page_count=0) is True
+
+
+def test_title_falls_back_from_metadata_to_heading_to_first_line():
+    """`documents.title` của Task 8b. Thứ tự có ý nghĩa: metadata PDF là
+    nguồn duy nhất do tác giả cố ý ghi vào."""
+    pages = [{"markdown": "# Decree 123/2020\n\nbody"}]
+
+    assert extract_title({"title": "Annual Report 2024"}, pages) == "Annual Report 2024"
+    assert extract_title({}, pages) == "Decree 123/2020"
+    assert extract_title({}, [{"markdown": "\n\nNghi dinh so 123\n\nbody"}]) == "Nghi dinh so 123"
+    assert extract_title({}, []) is None
 
 
 def test_clean_text_is_parsed_by_pymupdf_alone(store, uploaded):
@@ -2752,7 +2960,39 @@ def parse_document(object_key: str, store: ObjectStore, docling_url: str | None)
             # và ghi log. Một trang kém còn hơn cả tài liệu chết.
             pages[page_number - 1]["confidence"] = 0.0
 
-    return {"page_count": document.page_count, "pages": pages}
+    return {
+        # Trích SAU khi đã hợp nhất docling: h1 thường chỉ tồn tại trên các
+        # trang mà docling đã dựng thành markdown.
+        "title": extract_title(document.metadata, pages),
+        "page_count": document.page_count,
+        "pages": pages,
+    }
+```
+
+Và hàm trích, đặt phía trên `parse_document`:
+
+```python
+_H1 = re.compile(r"^#\s+(.+)$", re.MULTILINE)
+
+
+def extract_title(metadata: dict, pages: list[dict]) -> str | None:
+    """Metadata PDF, rồi h1 đầu tiên, rồi dòng không rỗng đầu tiên của trang
+    một. Trả None khi PDF không có cả ba -- caller lui về filename, thứ duy
+    nhất chắc chắn tồn tại."""
+    title = (metadata or {}).get("title", "").strip()
+    if title:
+        return title
+
+    for page in pages:
+        found = _H1.search(page["markdown"])
+        if found:
+            return found.group(1).strip()
+
+    for line in (pages[0]["markdown"] if pages else "").splitlines():
+        if line.strip():
+            return line.strip()[:200]
+
+    return None
 ```
 
 - [ ] **Step 4: Nối vào stage**
@@ -2779,13 +3019,17 @@ def parse(self, document_id: str) -> str:
     store.put_json(key, result)
 
     with session_scope() as session:
-        session.get(Document, uuid.UUID(document_id)).page_count = result["page_count"]
+        document = session.get(Document, uuid.UUID(document_id))
+        document.page_count = result["page_count"]
+        # Filename là phương án lui cuối cùng và nó nằm ở đây, không nằm
+        # trong parser: `raw/{sha256}.pdf` là cái tên duy nhất parser thấy.
+        document.title = result["title"] or document.filename
 
     _advance(document_id, "PARSING", stage="PARSING")
     return document_id
 ```
 
-- [ ] **Step 5: Chạy test** → PASS, 6 test.
+- [ ] **Step 5: Chạy test** → PASS, 7 test.
 
 - [ ] **Step 6: Suite đầy đủ, rồi dừng**
 
@@ -2800,18 +3044,28 @@ Commit message đề xuất: `feat(worker): implement S1 parse stage`
 - Modify: `worker/stages.py`
 - Create: `tests/test_chunking.py`
 
+> **Task này mang theo một chỉnh sửa so với spec.** [Spec §6 S2](../system-design.md) ghi *"Parent chunks: 500–1000 tokens, split on markdown headings first, then paragraphs."* Phần interfaces bên dưới trước đây chỉ cắt theo số token — không có bước heading nào. Theo Global Constraints, **spec thắng**, nên cắt theo heading là một phần của task này. Và khi bộ cắt đã đi trên cây heading thì nó vốn đã cầm sẵn `heading_path` — thứ mà cột của Task 8b cần, và là thứ không dựng lại được về sau nếu không chạy lại Docling trên toàn corpus.
+
 **Interfaces:**
 - Consumes: `parsed.json`
 - Produces:
   - `sanitize(markdown: str) -> str`
-  - `chunk_document(parsed: dict) -> dict` trả `{"parents": [...], "children": [...]}`
+  - `split_sections(markdown: str) -> list[tuple[str, str]]` — `(heading_path, body)` theo thứ tự tài liệu
+  - `detect_language(text: str) -> str` — `vi | en | other`, tập đóng
+  - `chunk_document(parsed: dict) -> dict` trả `{"parents": [...], "children": [...]}`; parent mang `heading_path` và `language`, child kế thừa `language`
   - Checkpoint: `staging/{document_id}/chunks.json`
 
 - [ ] **Step 1: Viết test đỏ**
 
 ```python
 # tests/test_chunking.py
-from worker.chunking import chunk_document, count_tokens, sanitize
+from worker.chunking import (
+    chunk_document,
+    count_tokens,
+    detect_language,
+    sanitize,
+    split_sections,
+)
 
 
 def test_sanitize_collapses_blank_runs():
@@ -2872,11 +3126,56 @@ def test_parent_chunks_stay_within_the_token_band():
     parents = chunk_document(parsed)["parents"]
 
     assert all(500 <= p["token_count"] <= 1000 for p in parents[:-1])
+
+
+def test_split_sections_carries_the_heading_path():
+    """Đường dẫn heading là thứ cho phép tool duyệt của Phase 2 dựng mục lục.
+    Heading sâu hơn thì nối dài; heading nông hơn thì cắt bớt."""
+    markdown = "# Chuong II\n\nintro\n\n## Dieu 19\n\nbody\n\n# Chuong III\n\nmore"
+
+    paths = [path for path, _ in split_sections(markdown)]
+
+    assert paths == ["Chuong II", "Chuong II > Dieu 19", "Chuong III"]
+
+
+def test_split_sections_keeps_text_that_precedes_any_heading():
+    """Một trang toàn body không có heading nào không được biến mất. Đây là
+    trường hợp phổ biến với output PyMuPDF, vốn không có cấu trúc markdown."""
+    assert split_sections("just body text") == [("", "just body text")]
+
+
+def test_language_is_detected_on_the_parent_and_inherited_by_children():
+    """Detect một lần trên parent, không phải từng child: 150 token là quá ít
+    để phân loại đáng tin."""
+    parsed = {"page_count": 1, "pages": [
+        {"page": 1, "markdown": "# Invoices\n\n" + "The seller issues an invoice. " * 60,
+         "source": "pymupdf", "confidence": 1.0}
+    ]}
+
+    result = chunk_document(parsed)
+
+    assert result["parents"][0]["language"] == "en"
+    assert result["parents"][0]["heading_path"] == "Invoices"
+    assert {c["language"] for c in result["children"]} == {"en"}
+
+
+def test_unknown_languages_collapse_to_other():
+    """Tập đóng, cùng kỷ luật với taxonomy category: tập mở sẽ tích tụ 'vie',
+    'vi-VN' và 'vietnamese' trong vòng một tuần."""
+    assert detect_language("Lorem ipsum dolor sit amet consectetur") == "other"
 ```
 
 - [ ] **Step 2: Chạy để xác nhận đỏ.**
 
-- [ ] **Step 3: Viết implementation**
+- [ ] **Step 3: Thêm dependency nhận dạng ngôn ngữ**
+
+```bash
+uv add py3langid
+```
+
+Bản port thuần Python của langid, model nhúng sẵn trong package: không tải gì lúc import, không cần model server, mỗi lần gọi tính bằng micro giây. Đây là dependency mới duy nhất S2 cần, và nó nằm gọn trong ngân sách của queue `cpu`.
+
+- [ ] **Step 4: Viết implementation**
 
 ```python
 # worker/chunking.py
@@ -2886,6 +3185,7 @@ tốn vài mili giây.
 
 import re
 
+import py3langid as langid
 import tiktoken
 
 _ENCODER = tiktoken.get_encoding("cl100k_base")
@@ -2893,9 +3193,11 @@ _ENCODER = tiktoken.get_encoding("cl100k_base")
 PARENT_MIN, PARENT_MAX = 500, 1000
 CHILD_MIN, CHILD_MAX = 100, 200
 DROP_BELOW = 20
+LANGUAGES = {"vi", "en"}
 
 _FENCE = re.compile(r"```.*?```", re.DOTALL)
 _BLANK_RUN = re.compile(r"\n{3,}")
+_HEADING = re.compile(r"^(#{1,6})\s+(.+)$")
 
 
 def count_tokens(text: str) -> int:
@@ -2931,6 +3233,47 @@ def _split_by_tokens(text: str, target_max: int) -> list[str]:
     return chunks
 
 
+def split_sections(markdown: str) -> list[tuple[str, str]]:
+    """Cắt theo heading markdown, mang đường dẫn heading đi xuống theo cây.
+    Spec §6 S2 đặt heading trước đoạn văn vì ranh giới heading là ranh giới
+    ngữ nghĩa thật; còn một mốc đếm token là ranh giới tuỳ tiện.
+
+    Dòng heading được giữ lại trong phần thân mà nó mở ra: `heading_path` là
+    metadata, nhưng các từ trong heading cũng thuộc về `content` -- thứ mà
+    chỉ mục từ khoá đọc."""
+    sections: list[tuple[str, str]] = []
+    stack: list[str] = []
+    path, buffer = "", []
+
+    for line in markdown.splitlines():
+        found = _HEADING.match(line)
+        if not found:
+            buffer.append(line)
+            continue
+        if buffer:
+            sections.append((path, "\n".join(buffer).strip()))
+        level = len(found.group(1))
+        del stack[level - 1 :]                 # heading nông hơn thì cắt bớt
+        stack.append(found.group(2).strip())
+        path = " > ".join(stack)
+        buffer = [line]
+
+    if buffer:
+        sections.append((path, "\n".join(buffer).strip()))
+
+    # Phần văn bản trước heading đầu tiên giữ đường dẫn rỗng thay vì bị vứt
+    # -- output PyMuPDF không có heading nào, và đó là trường hợp phổ biến.
+    return [(path, body) for path, body in sections if body]
+
+
+def detect_language(text: str) -> str:
+    """Gọi một lần cho mỗi parent, child kế thừa. Một child 150 token là quá
+    ít để phân loại, và văn tiếng Việt lẫn thuật ngữ tiếng Anh chính là thứ
+    làm nó sai."""
+    code, _ = langid.classify(text)
+    return code if code in LANGUAGES else "other"
+
+
 def chunk_document(parsed: dict) -> dict:
     """chunk_index gán theo thứ tự tài liệu, tất định. Đó là khoá tự nhiên."""
     parents, children = [], []
@@ -2941,36 +3284,41 @@ def chunk_document(parsed: dict) -> dict:
         if not text:
             continue
 
-        for parent_text in _split_by_tokens(text, PARENT_MAX):
-            parent_tokens = count_tokens(parent_text)
-            if parent_tokens < DROP_BELOW:
-                continue
-            parents.append({
-                "chunk_index": parent_index,
-                "content": parent_text,
-                "token_count": parent_tokens,
-                "page_start": page["page"],
-                "page_end": page["page"],
-            })
-
-            for child_text in _split_by_tokens(parent_text, CHILD_MAX):
-                child_tokens = count_tokens(child_text)
-                if child_tokens < DROP_BELOW:
+        for heading_path, section in split_sections(text):
+            for parent_text in _split_by_tokens(section, PARENT_MAX):
+                parent_tokens = count_tokens(parent_text)
+                if parent_tokens < DROP_BELOW:
                     continue
-                children.append({
-                    "chunk_index": child_index,
-                    "parent_index": parent_index,
-                    "content": child_text,
-                    "token_count": child_tokens,
-                    "page_number": page["page"],
+                language = detect_language(parent_text)
+                parents.append({
+                    "chunk_index": parent_index,
+                    "content": parent_text,
+                    "token_count": parent_tokens,
+                    "page_start": page["page"],
+                    "page_end": page["page"],
+                    "heading_path": heading_path or None,
+                    "language": language,
                 })
-                child_index += 1
-            parent_index += 1
+
+                for child_text in _split_by_tokens(parent_text, CHILD_MAX):
+                    child_tokens = count_tokens(child_text)
+                    if child_tokens < DROP_BELOW:
+                        continue
+                    children.append({
+                        "chunk_index": child_index,
+                        "parent_index": parent_index,
+                        "content": child_text,
+                        "token_count": child_tokens,
+                        "page_number": page["page"],
+                        "language": language,
+                    })
+                    child_index += 1
+                parent_index += 1
 
     return {"parents": parents, "children": children}
 ```
 
-- [ ] **Step 4: Nối vào stage `structure`**
+- [ ] **Step 5: Nối vào stage `structure`**
 
 ```python
 # worker/stages.py — thay thân task structure
@@ -2992,9 +3340,9 @@ def structure(self, document_id: str) -> str:
     return document_id
 ```
 
-- [ ] **Step 5: Chạy test** → PASS, 6 test.
+- [ ] **Step 6: Chạy test** → PASS, 10 test (6 + 4).
 
-- [ ] **Step 6: Suite đầy đủ, rồi dừng**
+- [ ] **Step 7: Suite đầy đủ, rồi dừng**
 
 Commit message đề xuất: `feat(worker): implement S2 structure stage`
 
@@ -3531,7 +3879,15 @@ def persist_document(
             .values(document_id=document_id, **parent)
             .on_conflict_do_update(
                 index_elements=["document_id", "chunk_index"],
-                set_={"content": parent["content"], "token_count": parent["token_count"]},
+                # heading_path và language cũng được set lại: một lần nạp lại
+                # sau khi đổi chiến lược chunking không được để hàng dở dang,
+                # mang content mới dưới đường dẫn section cũ.
+                set_={
+                    "content": parent["content"],
+                    "token_count": parent["token_count"],
+                    "heading_path": parent["heading_path"],
+                    "language": parent["language"],
+                },
             )
             .returning(ParentChunk.id)
         )
@@ -3551,9 +3907,17 @@ def persist_document(
             token_count=child["token_count"],
             embedding=vectors[position],
             category=meta["category"],
+            # Kế thừa từ parent ở S2. Nó chọn text search config cho cột `tsv`
+            # sinh tự động, nên NULL ở đây làm chỉ mục từ khoá được dựng bằng
+            # bộ phân tích sai mà không có lỗi nào.
+            language=child["language"],
         ).on_conflict_do_update(
             index_elements=["document_id", "chunk_index"],
-            set_={"contextualized": contextualized, "embedding": vectors[position]},
+            set_={
+                "contextualized": contextualized,
+                "embedding": vectors[position],
+                "language": child["language"],
+            },
         )
         session.execute(statement)
 
@@ -3803,6 +4167,7 @@ Commit message đề xuất: `test: add similarity smoke test against the real p
 5. Chain đưa mọi fixture `QUEUED → COMPLETED`, trừ `encrypted.pdf` vào `DEAD_LETTER` **có lý do cụ thể**.
 6. `parent_chunks` và `child_chunks` có row với embedding 1536 chiều non-null; cột `embedding` trên `documents` không còn.
 7. Chạy lại một tài liệu đã COMPLETED → **không đổi row nào**.
-8. Similarity smoke test xếp đúng chunk lên đầu.
-9. Toàn bộ suite xanh; `ruff check .` sạch.
-10. **`app/core/` không tồn tại.**
+8. Mọi tài liệu COMPLETED có `title` và `language` non-null; parent của nó mang `language`, và parent thuộc section có heading mang `heading_path`. Đây là nền của Phase 2 — nếu chúng còn null sau một lượt chạy đầy đủ thì S1 hoặc S2 đang bỏ qua chúng trong im lặng.
+9. Similarity smoke test xếp đúng chunk lên đầu.
+10. Toàn bộ suite xanh; `ruff check .` sạch.
+11. **`app/core/` không tồn tại.**

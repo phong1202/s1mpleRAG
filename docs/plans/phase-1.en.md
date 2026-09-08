@@ -28,6 +28,7 @@ Every task implicitly carries these. Values copied verbatim from the spec.
 - **Scanned detection:** `total_text_chars / page_count < 100` → route the **whole** document to Docling.
 - **Limits:** `MAX_FILE_SIZE_MB=50`, `MAX_PAGE_COUNT=500`, `MAX_CHUNKS_PER_DOC=5000`.
 - **Category — closed enum, 8 values:** `FINANCIAL` `LEGAL` `TECHNICAL` `MARKETING` `HR` `RESEARCH` `OPERATIONS` `OTHER`. Off-enum values are **rejected and logged**, never stored.
+- **Language — closed enum, 3 values:** `vi` `en` `other`. Detected once per **parent** chunk at S2 and inherited by its children. Anything else collapses to `other`.
 - **Queues:** exactly two — `cpu` (S1, S2, S5) and `llm` (S3, S4).
 - **Celery:** `result_backend=None`, `task_acks_late=True`, `task_reject_on_worker_lost=True`, `worker_prefetch_multiplier=1`.
 - **DB drivers:** API `postgresql+asyncpg`, worker `postgresql+psycopg` (**sync**). Worker tasks are plain `def` — **no `asyncio.run()` anywhere under `worker/`**.
@@ -87,7 +88,7 @@ docling_service/               NEW — its own container
 tests/
   fixtures/generate.py         NEW — generates 6 PDFs
   fixtures/*.pdf               NEW — generated, committed
-alembic/versions/              NEW — 1 revision
+alembic/versions/              NEW — 2 revisions (Task 8 schema, Task 8b retrieval columns)
 docker-compose.yml             MODIFY — 2 services to 8
 .env.example                   MODIFY — new variable groups
 ```
@@ -1482,6 +1483,196 @@ Proposed commit message: `feat(db): replace CRUD schema with file entity and chu
 
 ---
 
+### Task 8b: Retrieval-readiness columns
+
+**Why this task exists.** Phase 2 needs three things Phase 1 has no use for: keyword search running beside the vectors, a bilingual corpus it can tell apart, and a document-browsing tool that can see structure. Five nullable columns make all three possible. Four of them are *produced* by S1 and S2 — Tasks 13 and 14, both still unwritten — so adding them now costs one migration and about ten lines of stage code. Adding them after those stages ship costs a full re-ingest, Docling included. Nothing in Phase 1a reads these columns, and every one is nullable: the chain runs green whether they are filled or not.
+
+**Files:**
+- Modify: `app/models/document.py`, `app/models/parent_chunk.py`, `app/models/child_chunk.py`
+- Create: `alembic/versions/<hash>_retrieval_readiness.py` (CLI-generated, then hand-edited for `tsv`)
+- Modify: `tests/test_schema.py`
+
+**Interfaces:**
+- Produces:
+  - `Document.title: str | None`, `Document.language: str | None`
+  - `ParentChunk.heading_path: str | None`, `ParentChunk.language: str | None`
+  - `ChildChunk.language: str | None`
+  - `child_chunks.tsv` — a `GENERATED ... STORED` tsvector over `content`, GIN-indexed
+  - `ix_documents_title_fts` — GIN over `title || filename`, for fuzzy document lookup
+
+- [ ] **Step 1: Fix the assertion this task invalidates**
+
+`test_document_is_a_file_entity_not_a_title_content_pair` asserts `not hasattr(doc, "title")`. That assertion was about the *CRUD* title: client-supplied, unique, a business key. The new `title` is the opposite of all three — a display name extracted from the PDF at S1, nullable, not unique, never supplied by a client. Keep the `content` half of the assertion, replace the title half:
+
+```python
+    assert not hasattr(doc, "content")
+    assert doc.title is None          # filled by S1, never supplied by a client
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+```python
+# tests/test_schema.py — append
+
+async def test_retrieval_columns_default_to_null(db_session):
+    """S1 and S2 fill these. Phase 1a stays green without them -- that is what
+    keeps this task independent of Tasks 13 and 14."""
+    doc = Document(sha256_hash="c" * 64, filename="x.pdf", object_key="raw/x.pdf", size_bytes=1)
+    db_session.add(doc)
+    await db_session.flush()
+
+    parent = ParentChunk(
+        document_id=doc.id, chunk_index=0, content="x", token_count=1, page_start=1, page_end=1
+    )
+    db_session.add(parent)
+    await db_session.flush()
+
+    assert doc.title is None and doc.language is None
+    assert parent.heading_path is None and parent.language is None
+
+
+async def test_child_tsv_is_generated_and_follows_the_language(db_session):
+    """The tsvector is a GENERATED column: no stage can forget to update it,
+    and no stage is allowed to write it. `language` picks the config, which is
+    the whole reason the column is not a plain `to_tsvector('english', ...)`."""
+    doc = Document(sha256_hash="d" * 64, filename="x.pdf", object_key="raw/x.pdf", size_bytes=1)
+    db_session.add(doc)
+    await db_session.flush()
+    parent = ParentChunk(
+        document_id=doc.id, chunk_index=0, content="x", token_count=1, page_start=1, page_end=1
+    )
+    db_session.add(parent)
+    await db_session.flush()
+
+    for index, language in enumerate(["en", "vi"]):
+        db_session.add(
+            ChildChunk(
+                document_id=doc.id, parent_id=parent.id, chunk_index=index,
+                content="Electronic invoices were issued", contextualized="ctx",
+                page_number=1, token_count=5, embedding=[0.0] * 1536, language=language,
+            )
+        )
+    await db_session.flush()
+
+    rows = (
+        await db_session.execute(
+            text("SELECT language, tsv::text FROM child_chunks ORDER BY chunk_index")
+        )
+    ).all()
+
+    # 'english' stems: invoices -> invoic. 'simple' does not, and keeps
+    # everything the English stopword list would have thrown away.
+    assert "invoic'" in rows[0][1] and "invoices" not in rows[0][1]
+    assert "invoices" in rows[1][1]
+```
+
+- [ ] **Step 3: Add the columns to the models**
+
+```python
+# app/models/document.py — add after page_count
+    # Display name for the file, extracted at S1: PDF metadata, then the first
+    # h1, then the filename. Phase 2's router matches user phrasing
+    # ("summarise Decree 123") against this, because `2024-final-v3(1).pdf`
+    # matches nothing a person would type.
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Dominant language: vi | en | other. Closed set, same discipline as the
+    # category taxonomy. Written by S5 from its parents.
+    language: Mapped[str | None] = mapped_column(Text, nullable=True)
+```
+
+```python
+# app/models/parent_chunk.py — add after page_end
+    # "Chương II > Điều 19 > Khoản 2". S2 holds this while it splits on
+    # headings; reconstructing it later means re-running Docling over the
+    # whole corpus.
+    heading_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Detected here, not on the child: 150 tokens is too little text to
+    # identify a language reliably, and Vietnamese prose carrying English
+    # technical terms is exactly the case that breaks it.
+    language: Mapped[str | None] = mapped_column(Text, nullable=True)
+```
+
+```python
+# app/models/child_chunk.py — add after category
+    # Inherited from the parent. Chooses the text search config for `tsv`,
+    # so it must be set for the generated column to mean anything.
+    language: Mapped[str | None] = mapped_column(Text, nullable=True)
+```
+
+`tsv` is deliberately **not** mapped on `ChildChunk`. The database owns it and Phase 2 reads it from raw SQL; mapping it would invite SQLAlchemy to try to write a generated column, which Postgres rejects.
+
+- [ ] **Step 4: Generate the migration, then hand-edit it**
+
+```bash
+uv run alembic revision --autogenerate -m "retrieval readiness"
+```
+
+Autogenerate produces the five `add_column` calls and nothing else — it has no opinion about generated columns or GIN indexes over expressions. Add those by hand:
+
+```python
+def upgrade() -> None:
+    # ... the five autogenerated add_column calls stay as generated ...
+
+    # A GENERATED column rather than a trigger: Postgres recomputes it
+    # whenever `content` or `language` changes, so no stage can forget to.
+    #
+    # The two-argument to_tsvector(regconfig, text) is IMMUTABLE. The
+    # one-argument form is only STABLE -- it reads default_text_search_config
+    # at runtime -- and Postgres refuses it in a generated column. Passing the
+    # config explicitly is not a style choice; it is what makes this legal.
+    op.execute("""
+        ALTER TABLE child_chunks
+        ADD COLUMN tsv tsvector
+        GENERATED ALWAYS AS (
+            to_tsvector(
+                CASE WHEN language = 'en' THEN 'english'::regconfig
+                     ELSE 'simple'::regconfig END,
+                content
+            )
+        ) STORED
+    """)
+    op.create_index("ix_child_chunks_tsv", "child_chunks", ["tsv"], postgresql_using="gin")
+
+    # `content`, not `contextualized`: the contextual sentence is an LLM
+    # paraphrase. It belongs in the embedding, which searches by meaning. A
+    # literal-match index built over a paraphrase returns chunks for words the
+    # document never wrote, and the citation then points at a passage that
+    # does not contain the search term.
+    op.execute("""
+        CREATE INDEX ix_documents_title_fts ON documents USING gin (
+            to_tsvector('simple', coalesce(title, '') || ' ' || filename)
+        )
+    """)
+
+
+def downgrade() -> None:
+    op.execute("DROP INDEX IF EXISTS ix_documents_title_fts")
+    op.drop_index("ix_child_chunks_tsv", table_name="child_chunks")
+    op.execute("ALTER TABLE child_chunks DROP COLUMN tsv")
+    # ... the five autogenerated drop_column calls ...
+```
+
+- [ ] **Step 5: Apply it, and have a fallback ready**
+
+```bash
+uv run alembic upgrade head
+```
+
+**If Postgres rejects the column** with `generation expression is not immutable`, the `CASE` over `regconfig` is the cause. Do not fight it — take the fallback and move on:
+
+1. Drop the `CASE`: `to_tsvector('simple'::regconfig, content)`, unconditionally. `'simple'` never stems, which costs English a little recall and costs Vietnamese nothing.
+2. Say so in the migration docstring, and revisit at R2 — by then the eval set can measure whether English stemming is worth a second column rather than a guess.
+
+Either outcome is a green build. This step must not stall the task.
+
+- [ ] **Step 6: Run the suite** — PASS, 57 tests (55 + 2).
+
+- [ ] **Step 7: Stop and report**
+
+Proposed commit message: `feat(db): add retrieval-readiness columns for phase 2`
+
+---
+
 ### Task 9: API — presigned upload and registration
 
 **Files:**
@@ -2544,8 +2735,9 @@ Proposed commit message: `feat(docling): add docling parsing service container`
 **Interfaces:**
 - Consumes: `ObjectStore`, `Settings.docling_url/.docling_page_timeout_s/.max_page_count`
 - Produces:
-  - `parse_document(object_key: str, store: ObjectStore, docling_url: str | None) -> dict` returning `{"page_count": int, "pages": [{"page": int, "markdown": str, "source": "pymupdf"|"docling", "confidence": float}]}`
+  - `parse_document(object_key: str, store: ObjectStore, docling_url: str | None) -> dict` returning `{"title": str | None, "page_count": int, "pages": [{"page": int, "markdown": str, "source": "pymupdf"|"docling", "confidence": float}]}`
   - `is_scanned(total_text_chars: int, page_count: int) -> bool`
+  - `extract_title(metadata: dict, pages: list[dict]) -> str | None` — fills `documents.title` (Task 8b)
   - Raises `AppException(ErrorCode.PDF_ENCRYPTED)`, `AppException(ErrorCode.PDF_TOO_LARGE)`
   - Checkpoint: `staging/{document_id}/parsed.json`
 
@@ -2556,7 +2748,7 @@ Proposed commit message: `feat(docling): add docling parsing service container`
 import pytest
 
 from app.exceptions import AppException, ErrorCode
-from worker.parsing import is_scanned, parse_document
+from worker.parsing import extract_title, is_scanned, parse_document
 
 
 def test_scanned_detection_uses_chars_per_page():
@@ -2567,6 +2759,17 @@ def test_scanned_detection_uses_chars_per_page():
 def test_scanned_detection_handles_zero_pages():
     """Division by zero here is easy to write and hard to trace."""
     assert is_scanned(total_text_chars=0, page_count=0) is True
+
+
+def test_title_falls_back_from_metadata_to_heading_to_first_line():
+    """Task 8b's `documents.title`. The order matters: PDF metadata is the
+    only source the author wrote on purpose."""
+    pages = [{"markdown": "# Decree 123/2020\n\nbody"}]
+
+    assert extract_title({"title": "Annual Report 2024"}, pages) == "Annual Report 2024"
+    assert extract_title({}, pages) == "Decree 123/2020"
+    assert extract_title({}, [{"markdown": "\n\nNghi dinh so 123\n\nbody"}]) == "Nghi dinh so 123"
+    assert extract_title({}, []) is None
 
 
 def test_clean_text_is_parsed_by_pymupdf_alone(store, uploaded):
@@ -2718,7 +2921,39 @@ def parse_document(object_key: str, store: ObjectStore, docling_url: str | None)
             # and log it. One weak page beats a dead document.
             pages[page_number - 1]["confidence"] = 0.0
 
-    return {"page_count": document.page_count, "pages": pages}
+    return {
+        # Extracted AFTER the docling merge: an h1 usually only exists on
+        # pages docling rendered to markdown.
+        "title": extract_title(document.metadata, pages),
+        "page_count": document.page_count,
+        "pages": pages,
+    }
+```
+
+And the extractor, above `parse_document`:
+
+```python
+_H1 = re.compile(r"^#\s+(.+)$", re.MULTILINE)
+
+
+def extract_title(metadata: dict, pages: list[dict]) -> str | None:
+    """PDF metadata, then the first h1, then the first non-blank line of page
+    one. Returns None when a PDF offers none of the three -- the caller falls
+    back to the filename, which is the only thing guaranteed to exist."""
+    title = (metadata or {}).get("title", "").strip()
+    if title:
+        return title
+
+    for page in pages:
+        found = _H1.search(page["markdown"])
+        if found:
+            return found.group(1).strip()
+
+    for line in (pages[0]["markdown"] if pages else "").splitlines():
+        if line.strip():
+            return line.strip()[:200]
+
+    return None
 ```
 
 - [ ] **Step 4: Wire it into the stage**
@@ -2745,13 +2980,17 @@ def parse(self, document_id: str) -> str:
     store.put_json(key, result)
 
     with session_scope() as session:
-        session.get(Document, uuid.UUID(document_id)).page_count = result["page_count"]
+        document = session.get(Document, uuid.UUID(document_id))
+        document.page_count = result["page_count"]
+        # The filename is the last fallback and it lives here, not in the
+        # parser: `raw/{sha256}.pdf` is the only name the parser can see.
+        document.title = result["title"] or document.filename
 
     _advance(document_id, "PARSING", stage="PARSING")
     return document_id
 ```
 
-- [ ] **Step 5: Run the tests** — PASS, 6 tests.
+- [ ] **Step 5: Run the tests** — PASS, 7 tests.
 
 - [ ] **Step 6: Full suite, then stop**
 
@@ -2766,19 +3005,23 @@ Proposed commit message: `feat(worker): implement S1 parse stage`
 - Modify: `worker/stages.py`
 - Create: `tests/test_chunking.py`
 
+> **This task carries a spec correction.** [Spec §6 S2](../system-design.md) says *"Parent chunks: 500–1000 tokens, split on markdown headings first, then paragraphs."* The interfaces below originally split by token count alone — no heading step. Per the Global Constraints, **the spec wins**, so heading-aware splitting is part of this task. Once the splitter is walking the heading tree it is already holding `heading_path`, which Task 8b's column needs and which cannot be reconstructed later without re-running Docling over the whole corpus.
+
 **Interfaces:**
 - Consumes: `parsed.json`
 - Produces:
   - `count_tokens(text: str) -> int`
   - `sanitize(markdown: str) -> str`
-  - `chunk_document(parsed: dict) -> dict` returning `{"parents": [...], "children": [...]}`
+  - `split_sections(markdown: str) -> list[tuple[str, str]]` — `(heading_path, body)` in document order
+  - `detect_language(text: str) -> str` — `vi | en | other`, closed set
+  - `chunk_document(parsed: dict) -> dict` returning `{"parents": [...], "children": [...]}`; parents carry `heading_path` and `language`, children inherit `language`
   - Checkpoint: `staging/{document_id}/chunks.json`
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_chunking.py
-from worker.chunking import chunk_document, sanitize
+from worker.chunking import chunk_document, detect_language, sanitize, split_sections
 
 
 def test_sanitize_collapses_blank_runs():
@@ -2840,11 +3083,56 @@ def test_parent_chunks_stay_within_the_token_band():
     parents = chunk_document(parsed)["parents"]
 
     assert all(500 <= p["token_count"] <= 1000 for p in parents[:-1])
+
+
+def test_split_sections_carries_the_heading_path():
+    """The path is what lets Phase 2's browse tool build an outline. A deeper
+    heading extends the path; a shallower one truncates it."""
+    markdown = "# Chuong II\n\nintro\n\n## Dieu 19\n\nbody\n\n# Chuong III\n\nmore"
+
+    paths = [path for path, _ in split_sections(markdown)]
+
+    assert paths == ["Chuong II", "Chuong II > Dieu 19", "Chuong III"]
+
+
+def test_split_sections_keeps_text_that_precedes_any_heading():
+    """A page of body text with no heading at all must not vanish. This is the
+    common case for PyMuPDF output, which has no markdown structure."""
+    assert split_sections("just body text") == [("", "just body text")]
+
+
+def test_language_is_detected_on_the_parent_and_inherited_by_children():
+    """Detected once per parent, not per child: 150 tokens is too little text
+    to classify reliably."""
+    parsed = {"page_count": 1, "pages": [
+        {"page": 1, "markdown": "# Invoices\n\n" + "The seller issues an invoice. " * 60,
+         "source": "pymupdf", "confidence": 1.0}
+    ]}
+
+    result = chunk_document(parsed)
+
+    assert result["parents"][0]["language"] == "en"
+    assert result["parents"][0]["heading_path"] == "Invoices"
+    assert {c["language"] for c in result["children"]} == {"en"}
+
+
+def test_unknown_languages_collapse_to_other():
+    """A closed set, same discipline as the category taxonomy: an open one
+    accumulates 'vie', 'vi-VN' and 'vietnamese' within a week."""
+    assert detect_language("Lorem ipsum dolor sit amet consectetur") == "other"
 ```
 
 - [ ] **Step 2: Run it to verify it fails.**
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 3: Add the language dependency**
+
+```bash
+uv add py3langid
+```
+
+A pure-Python port of langid with the model baked in: no download at import, no model server, microseconds per call. It is the only new dependency S2 needs, and it stays inside the `cpu` queue's budget.
+
+- [ ] **Step 4: Write the implementation**
 
 ```python
 # worker/chunking.py
@@ -2854,6 +3142,7 @@ costs milliseconds.
 
 import re
 
+import py3langid as langid
 import tiktoken
 
 _ENCODER = tiktoken.get_encoding("cl100k_base")
@@ -2861,9 +3150,11 @@ _ENCODER = tiktoken.get_encoding("cl100k_base")
 PARENT_MIN, PARENT_MAX = 500, 1000
 CHILD_MIN, CHILD_MAX = 100, 200
 DROP_BELOW = 20
+LANGUAGES = {"vi", "en"}
 
 _FENCE = re.compile(r"```.*?```", re.DOTALL)
 _BLANK_RUN = re.compile(r"\n{3,}")
+_HEADING = re.compile(r"^(#{1,6})\s+(.+)$")
 
 
 def count_tokens(text: str) -> int:
@@ -2899,6 +3190,48 @@ def _split_by_tokens(text: str, target_max: int) -> list[str]:
     return chunks
 
 
+def split_sections(markdown: str) -> list[tuple[str, str]]:
+    """Split on markdown headings, carrying the heading path down the tree.
+    Spec §6 S2 puts headings before paragraphs because a heading boundary is
+    a real semantic boundary; a token count is an arbitrary one.
+
+    The heading line stays in the body it opens: `heading_path` is metadata,
+    but the heading words also belong in `content`, which is what the keyword
+    index reads."""
+    sections: list[tuple[str, str]] = []
+    stack: list[str] = []
+    path, buffer = "", []
+
+    for line in markdown.splitlines():
+        found = _HEADING.match(line)
+        if not found:
+            buffer.append(line)
+            continue
+        if buffer:
+            sections.append((path, "\n".join(buffer).strip()))
+        level = len(found.group(1))
+        del stack[level - 1 :]                 # a shallower heading truncates
+        stack.append(found.group(2).strip())
+        path = " > ".join(stack)
+        buffer = [line]
+
+    if buffer:
+        sections.append((path, "\n".join(buffer).strip()))
+
+    # Text before the first heading keeps an empty path rather than being
+    # dropped -- PyMuPDF output has no headings at all, and that is the
+    # common case.
+    return [(path, body) for path, body in sections if body]
+
+
+def detect_language(text: str) -> str:
+    """Called once per parent and inherited by its children. A 150-token
+    child is too little text to classify, and Vietnamese prose carrying
+    English technical terms is exactly what it gets wrong."""
+    code, _ = langid.classify(text)
+    return code if code in LANGUAGES else "other"
+
+
 def chunk_document(parsed: dict) -> dict:
     """chunk_index is assigned in document order and is deterministic. That
     is the natural key."""
@@ -2910,36 +3243,41 @@ def chunk_document(parsed: dict) -> dict:
         if not text:
             continue
 
-        for parent_text in _split_by_tokens(text, PARENT_MAX):
-            parent_tokens = count_tokens(parent_text)
-            if parent_tokens < DROP_BELOW:
-                continue
-            parents.append({
-                "chunk_index": parent_index,
-                "content": parent_text,
-                "token_count": parent_tokens,
-                "page_start": page["page"],
-                "page_end": page["page"],
-            })
-
-            for child_text in _split_by_tokens(parent_text, CHILD_MAX):
-                child_tokens = count_tokens(child_text)
-                if child_tokens < DROP_BELOW:
+        for heading_path, section in split_sections(text):
+            for parent_text in _split_by_tokens(section, PARENT_MAX):
+                parent_tokens = count_tokens(parent_text)
+                if parent_tokens < DROP_BELOW:
                     continue
-                children.append({
-                    "chunk_index": child_index,
-                    "parent_index": parent_index,
-                    "content": child_text,
-                    "token_count": child_tokens,
-                    "page_number": page["page"],
+                language = detect_language(parent_text)
+                parents.append({
+                    "chunk_index": parent_index,
+                    "content": parent_text,
+                    "token_count": parent_tokens,
+                    "page_start": page["page"],
+                    "page_end": page["page"],
+                    "heading_path": heading_path or None,
+                    "language": language,
                 })
-                child_index += 1
-            parent_index += 1
+
+                for child_text in _split_by_tokens(parent_text, CHILD_MAX):
+                    child_tokens = count_tokens(child_text)
+                    if child_tokens < DROP_BELOW:
+                        continue
+                    children.append({
+                        "chunk_index": child_index,
+                        "parent_index": parent_index,
+                        "content": child_text,
+                        "token_count": child_tokens,
+                        "page_number": page["page"],
+                        "language": language,
+                    })
+                    child_index += 1
+                parent_index += 1
 
     return {"parents": parents, "children": children}
 ```
 
-- [ ] **Step 4: Wire it into the `structure` stage**
+- [ ] **Step 5: Wire it into the `structure` stage**
 
 ```python
 # worker/stages.py — replace the body of structure
@@ -2961,9 +3299,9 @@ def structure(self, document_id: str) -> str:
     return document_id
 ```
 
-- [ ] **Step 5: Run the tests** — PASS, 6 tests.
+- [ ] **Step 6: Run the tests** — PASS, 10 tests (6 + 4).
 
-- [ ] **Step 6: Full suite, then stop**
+- [ ] **Step 7: Full suite, then stop**
 
 Proposed commit message: `feat(worker): implement S2 structure stage`
 
@@ -3474,6 +3812,7 @@ def test_status_becomes_completed(seeded_document):
 """S5 — Persist. One transaction, sync Session. Always safe to re-run."""
 
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 
 from sqlalchemy.dialects.postgresql import insert
@@ -3499,7 +3838,15 @@ def persist_document(
             .values(document_id=document_id, **parent)
             .on_conflict_do_update(
                 index_elements=["document_id", "chunk_index"],
-                set_={"content": parent["content"], "token_count": parent["token_count"]},
+                # heading_path and language are re-set too: a re-ingest after a
+                # chunking change must not leave a row half-updated, carrying
+                # new content under the old section path.
+                set_={
+                    "content": parent["content"],
+                    "token_count": parent["token_count"],
+                    "heading_path": parent["heading_path"],
+                    "language": parent["language"],
+                },
             )
             .returning(ParentChunk.id)
         )
@@ -3519,9 +3866,17 @@ def persist_document(
             token_count=child["token_count"],
             embedding=vectors[position],
             category=meta["category"],
+            # Inherited from the parent at S2. It selects the text search
+            # config for the generated `tsv` column, so a NULL here leaves the
+            # keyword index built with the wrong analyzer and no error.
+            language=child["language"],
         ).on_conflict_do_update(
             index_elements=["document_id", "chunk_index"],
-            set_={"contextualized": contextualized, "embedding": vectors[position]},
+            set_={
+                "contextualized": contextualized,
+                "embedding": vectors[position],
+                "language": child["language"],
+            },
         )
         session.execute(statement)
 
@@ -3530,6 +3885,11 @@ def persist_document(
     document.status = "COMPLETED"
     document.stage = "PERSISTING"
     document.completed_at = datetime.now(timezone.utc)
+    # Dominant language, by parent count. A bilingual document gets whichever
+    # side carries more of it -- a document-level filter is a coarse hint, and
+    # the per-chunk column is what retrieval actually reads.
+    languages = [p["language"] for p in chunks["parents"] if p["language"]]
+    document.language = Counter(languages).most_common(1)[0][0] if languages else None
 ```
 
 - [ ] **Step 4: Wire it into the `persist` stage**
@@ -3770,6 +4130,7 @@ Proposed commit message: `test: add similarity smoke test against the real provi
 5. The chain drives every fixture `QUEUED → COMPLETED`, except `encrypted.pdf`, which lands in `DEAD_LETTER` **with a specific reason**.
 6. `parent_chunks` and `child_chunks` hold rows with non-null 1536-dimensional embeddings; `embedding` on `documents` no longer exists.
 7. Re-running a completed document changes no rows.
-8. The similarity smoke test ranks the expected chunk first.
-9. Full suite green; `ruff check .` clean.
-10. **`app/core/` does not exist.**
+8. Every completed document has a non-null `title` and `language`; its parents carry a `language`, and parents from headed sections carry a `heading_path`. These are what Phase 2 is built on — if they are null after a full run, S1 or S2 is silently skipping them.
+9. The similarity smoke test ranks the expected chunk first.
+10. Full suite green; `ruff check .` clean.
+11. **`app/core/` does not exist.**
