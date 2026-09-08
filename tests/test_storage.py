@@ -5,6 +5,7 @@ presigned URL hosts, which errors mean "absent", lifecycle behaviour -- are
 exactly the things a mock would answer according to our own assumptions.
 """
 
+import base64
 import hashlib
 import uuid
 from urllib.parse import urlparse
@@ -15,6 +16,13 @@ import pytest
 
 from app.config import get_settings
 from shared.storage import ObjectStore, get_public_store, get_store
+
+
+def _b64(sha256_hex: str) -> str:
+    """S3's checksum header wants the raw digest, base64-encoded -- not the
+    hex string. Mixing the two up is a 400 with a message that does not say
+    why."""
+    return base64.b64encode(bytes.fromhex(sha256_hex)).decode()
 
 
 @pytest.fixture
@@ -120,3 +128,43 @@ def test_a_presigned_url_actually_accepts_an_upload(store, key):
 
     assert response.status_code == 200
     assert store.get(key) == b"through the signed url"
+
+
+def test_presigned_put_with_a_checksum_accepts_matching_bytes(store, key):
+    payload = b"the real document bytes"
+    digest = hashlib.sha256(payload).hexdigest()
+
+    url = store.presigned_put(key, sha256_hex=digest)
+    response = httpx.put(url, content=payload, headers={"x-amz-checksum-sha256": _b64(digest)})
+
+    assert response.status_code == 200
+    assert store.get(key) == payload
+
+
+def test_presigned_put_with_a_checksum_rejects_mismatched_bytes(store, key):
+    """This is the whole point of binding the checksum: a URL signed for one
+    hash cannot be used to store different bytes under that name, so the
+    API never has to read the object back to verify it."""
+    digest = hashlib.sha256(b"the real document bytes").hexdigest()
+
+    url = store.presigned_put(key, sha256_hex=digest)
+    response = httpx.put(
+        url,
+        content=b"a different payload entirely",
+        headers={"x-amz-checksum-sha256": _b64(digest)},
+    )
+
+    assert response.status_code == 400
+    assert store.exists(key) is False
+
+
+def test_presigned_put_with_a_checksum_rejects_a_request_missing_the_header(store, key):
+    """The header is part of what got signed -- dropping it invalidates the
+    signature rather than merely skipping the check."""
+    digest = hashlib.sha256(b"the real document bytes").hexdigest()
+
+    url = store.presigned_put(key, sha256_hex=digest)
+    response = httpx.put(url, content=b"the real document bytes")
+
+    assert response.status_code == 400
+    assert store.exists(key) is False

@@ -4,6 +4,7 @@ boto3 rather than the MinIO SDK: MinIO speaks the S3 API, so moving to real
 S3 later is a change of endpoint rather than a rewrite of this file.
 """
 
+import base64
 import hashlib
 import json
 from functools import lru_cache
@@ -105,11 +106,21 @@ class ObjectStore:
     def get_json(self, key: str) -> dict:
         return json.loads(self.get(key))
 
-    def presigned_put(self, key: str, expires_in: int = 3600) -> str:
+    def presigned_put(self, key: str, expires_in: int = 3600, sha256_hex: str | None = None) -> str:
+        """Sign a PUT. When `sha256_hex` is given, it is bound into the
+        signature as a required `x-amz-checksum-sha256` header: S3 rejects
+        the upload if the header is missing (invalidates the signature) or
+        if the bytes received do not hash to it (integrity check on the
+        server side). That lets a caller trust an object's hash from its
+        upload alone -- no reading it back to verify.
+        """
         bucket, name = self._split(key)
+        params = {"Bucket": bucket, "Key": name}
+        if sha256_hex is not None:
+            params["ChecksumSHA256"] = base64.b64encode(bytes.fromhex(sha256_hex)).decode()
         return self._client.generate_presigned_url(
             "put_object",
-            Params={"Bucket": bucket, "Key": name},
+            Params=params,
             ExpiresIn=expires_in,
         )
 

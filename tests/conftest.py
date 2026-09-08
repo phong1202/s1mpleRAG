@@ -1,6 +1,8 @@
 import asyncio
+import hashlib
 import os
 import subprocess
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -11,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.app import create_app
 from app.config import get_settings
 from app.utils.database import get_session
+from shared.storage import get_public_store
 
 # Shared by any test that needs a complete, valid database config in the
 # environment -- e.g. one exercising Settings() directly rather than through
@@ -119,3 +122,28 @@ def db_env(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     for name, value in DB_ENV.items():
         monkeypatch.setenv(name, value)
+
+
+@pytest.fixture
+def uploaded_pdf():
+    """Puts a real fixture PDF straight into MinIO, bypassing the presigned
+    URL, and returns its register() payload. That isolates register()'s own
+    tests from upload-url's checksum mechanics, which get their own coverage
+    in test_storage.py and test_ingestion_api.py.
+
+    raw/ has no lifecycle rule (kept forever by design, for re-ingestion),
+    so the object is deleted here rather than left for cleanup that never
+    comes.
+    """
+    data = (Path(__file__).parent / "fixtures" / "clean_text.pdf").read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    key = f"raw/{digest}.pdf"
+    store = get_public_store()
+    store.put(key, data)
+    yield {
+        "object_key": key,
+        "filename": "clean_text.pdf",
+        "sha256": digest,
+        "size_bytes": len(data),
+    }
+    store.delete(key)
