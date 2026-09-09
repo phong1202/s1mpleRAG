@@ -794,3 +794,19 @@ Without it the flags are decoration and the eval ablation is fiction.
 - **Auth / multi-tenancy** — still no `tenant_id` on any table. Retrofitting touches every query in
   this document; decide before real users.
 - **Query result caching** — meaningless until the question distribution is known.
+- **Split `shared/llm.py`** — the two halves share one six-line helper and
+  nothing else. The worker uses `LLMProvider` and its implementations; the read
+  path uses `AsyncLLMProvider` and its own; neither touches the other's. Move
+  the async half to `app/core/llm.py`, the sync half to `worker/llm.py`, and
+  `_unit_vector_from` to `shared/vectors.py` — **after Phase 1 merges**.
+  Splitting earlier means moving a file the ingestion branch is actively
+  editing. The one argument against splitting at all: both `embed` methods must
+  L2-normalise, and adjacency is what makes that shared requirement visible.
+- **Enable ruff's `PLC0415`** (import-outside-top-level) — five violations exist
+  today, four of them in Phase 1 code, and two of those are deliberate: `openai`
+  is imported inside `__init__` so the module loads without the package present.
+  Turning the rule on means either fixing them or writing per-file ignores, and
+  that is a Phase 1 decision, not this branch's. Until then the working rule is:
+  a function-level import needs one of two reasons — deferring an optional
+  dependency, or breaking an import cycle. `import asyncio` inside a function
+  has neither.

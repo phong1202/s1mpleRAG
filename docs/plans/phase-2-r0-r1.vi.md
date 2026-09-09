@@ -502,38 +502,34 @@ async def test_stub_embeddings_are_deterministic_and_normalised():
 - [ ] **Step 4: Viết implementation**
 
 ```python
-# shared/llm.py — THÊM VÀO CUỐI. Không đụng LLMProvider, StubProvider,
-# OpenAIProvider hay get_provider: worker import những cái đó và test của
-# Phase 1 đã ghim hành vi của chúng.
-
-import hashlib
-import json
-import math
-from typing import Protocol, TypeVar
-
-from pydantic import BaseModel
+# shared/llm.py — CHỈ THÊM VÀO CUỐI.
+#
+# `hashlib`, `json`, `math`, `Protocol`, `get_settings` và `_unit_vector_from`
+# ĐÃ CÓ SẴN trong file này từ Phase 1. Khai báo lại sẽ fail ruff (F811). Chỉ
+# hai dòng import đổi; phần còn lại là mới:
+#
+#   from typing import Protocol      ->  from typing import Protocol, TypeVar
+#   + from pydantic import BaseModel     (khối riêng, phía trên app.config)
+# --- read path ---------------------------------------------------------------
+# Added beside the synchronous half above, never replacing it: the worker
+# imports LLMProvider, StubProvider and OpenAIProvider, and Phase 1's tests pin
+# their behaviour. `_unit_vector_from` is reused rather than redefined.
 
 T = TypeVar("T", bound=BaseModel)
 
 
 class AsyncLLMProvider(Protocol):
-    """Provider của đường đọc. Async vì nó chạy trong FastAPI, và theo schema
-    vì mọi node quyết định trả về một phán quyết có kiểu chứ không phải văn
-    xuôi."""
+    """The read path's provider. Async because it runs inside FastAPI, and
+    schema-driven because every decision node returns a typed verdict rather
+    than prose."""
 
     async def complete(self, messages: list[dict], schema: type[T]) -> T: ...
     async def embed_query(self, text: str) -> list[float]: ...
 
 
-def _unit_vector_from(text: str, dimensions: int) -> list[float]:
-    digest = hashlib.sha256(text.encode()).digest()
-    raw = [(digest[i % len(digest)] - 127.5) for i in range(dimensions)]
-    norm = math.sqrt(sum(x * x for x in raw)) or 1.0
-    return [x / norm for x in raw]
-
-
 class AsyncStubProvider:
-    """Tất định, offline, có kịch bản theo từng kiểu schema."""
+    """Deterministic, offline, scripted per schema type. This is what makes the
+    whole R0-R8 ladder testable with no API key."""
 
     def __init__(
         self,
@@ -546,7 +542,9 @@ class AsyncStubProvider:
 
     async def complete(self, messages: list[dict], schema: type[T]) -> T:
         self.calls.append((schema, messages))
-        queue = self._responses[schema]          # KeyError là chủ đích: xem test
+        # KeyError is deliberate: an unscripted schema must fail loudly rather
+        # than hand back a default a test would silently pass against.
+        queue = self._responses[schema]
         return queue.pop(0) if len(queue) > 1 else queue[0]
 
     async def embed_query(self, text: str) -> list[float]:
@@ -576,8 +574,8 @@ class AsyncOpenAIProvider:
             model=self._embed_model, input=[text], dimensions=self._dimensions
         )
         vector = response.data[0].embedding
-        # Chuẩn hoá L2: vector_ip_ops coi tích vô hướng là cosine, và index sẽ
-        # trả về hàng xóm sai, không báo lỗi, nếu bỏ qua bước này.
+        # L2-normalise: vector_ip_ops treats inner product as cosine, and the
+        # index returns wrong neighbours, with no error, if this is skipped.
         norm = math.sqrt(sum(x * x for x in vector)) or 1.0
         return [x / norm for x in vector]
 

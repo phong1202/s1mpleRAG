@@ -501,16 +501,18 @@ async def test_stub_embeddings_are_deterministic_and_normalised():
 - [ ] **Step 4: Write the implementation**
 
 ```python
-# shared/llm.py — APPEND. Do not touch LLMProvider, StubProvider,
-# OpenAIProvider or get_provider: the worker imports those and Phase 1's
-# tests pin their behaviour.
-
-import hashlib
-import json
-import math
-from typing import Protocol, TypeVar
-
-from pydantic import BaseModel
+# shared/llm.py — APPEND ONLY.
+#
+# `hashlib`, `json`, `math`, `Protocol`, `get_settings` and
+# `_unit_vector_from` ALREADY EXIST in this file from Phase 1. Redefining them
+# fails ruff (F811). Two import lines change; everything else is new:
+#
+#   from typing import Protocol      ->  from typing import Protocol, TypeVar
+#   + from pydantic import BaseModel     (its own block, above app.config)
+# --- read path ---------------------------------------------------------------
+# Added beside the synchronous half above, never replacing it: the worker
+# imports LLMProvider, StubProvider and OpenAIProvider, and Phase 1's tests pin
+# their behaviour. `_unit_vector_from` is reused rather than redefined.
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -524,15 +526,9 @@ class AsyncLLMProvider(Protocol):
     async def embed_query(self, text: str) -> list[float]: ...
 
 
-def _unit_vector_from(text: str, dimensions: int) -> list[float]:
-    digest = hashlib.sha256(text.encode()).digest()
-    raw = [(digest[i % len(digest)] - 127.5) for i in range(dimensions)]
-    norm = math.sqrt(sum(x * x for x in raw)) or 1.0
-    return [x / norm for x in raw]
-
-
 class AsyncStubProvider:
-    """Deterministic, offline, scripted per schema type."""
+    """Deterministic, offline, scripted per schema type. This is what makes the
+    whole R0-R8 ladder testable with no API key."""
 
     def __init__(
         self,
@@ -545,7 +541,9 @@ class AsyncStubProvider:
 
     async def complete(self, messages: list[dict], schema: type[T]) -> T:
         self.calls.append((schema, messages))
-        queue = self._responses[schema]          # KeyError is the point: see the test
+        # KeyError is deliberate: an unscripted schema must fail loudly rather
+        # than hand back a default a test would silently pass against.
+        queue = self._responses[schema]
         return queue.pop(0) if len(queue) > 1 else queue[0]
 
     async def embed_query(self, text: str) -> list[float]:
@@ -575,7 +573,7 @@ class AsyncOpenAIProvider:
             model=self._embed_model, input=[text], dimensions=self._dimensions
         )
         vector = response.data[0].embedding
-        # L2-normalise: vector_ip_ops treats inner product as cosine and the
+        # L2-normalise: vector_ip_ops treats inner product as cosine, and the
         # index returns wrong neighbours, with no error, if this is skipped.
         norm = math.sqrt(sum(x * x for x in vector)) or 1.0
         return [x / norm for x in vector]
