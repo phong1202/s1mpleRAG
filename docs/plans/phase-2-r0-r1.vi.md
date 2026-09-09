@@ -125,6 +125,7 @@ Các kiểu mà mọi bậc sau được viết dựa vào. Viết một lần; 
 union của tham chiếu."""
 
 import uuid
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -196,7 +197,7 @@ def test_refining_a_query_keeps_history_and_filters():
 def test_contracts_are_frozen():
     candidate = Candidate(source="vector", rank=1, score=0.5, text="x", ref=_doc_ref())
 
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         candidate.rank = 2
 
 
