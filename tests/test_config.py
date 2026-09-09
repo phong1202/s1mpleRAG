@@ -169,3 +169,30 @@ def test_minio_endpoint_env_var_overrides_the_parts(db_env, monkeypatch):
     settings = Settings(_env_file=None)
 
     assert settings.minio_endpoint == "https://s3.eu-west-1.amazonaws.com"
+
+
+def test_retrieval_defaults_are_r0_behaviour(db_env):
+    """Every stage flag ships off and the loop ships bounded at one: a fresh
+    checkout must behave as R0 even after R8 exists.
+
+    Read from the class defaults rather than get_settings(), because the claim
+    is about what the code ships with. A developer who flips a flag in their
+    own .env to try R2 must not fail this test."""
+    settings = Settings(_env_file=None)
+
+    assert settings.retrieval_max_iterations == 1
+    assert settings.retrieval_bm25_enabled is False
+    assert settings.retrieval_rerank_enabled is False
+    assert settings.retrieval_intent_enabled is False
+    assert settings.retrieval_router_enabled is False
+    assert settings.retrieval_reflect_enabled is False
+    assert settings.web_search_enabled is False
+
+
+def test_ef_search_is_at_least_twice_the_over_fetch(db_env):
+    """pgvector's default ef_search is 40. Asking for 50 neighbours from a
+    search queue of 40 returns a degraded tail and reports nothing, so the
+    relationship is asserted rather than assumed."""
+    settings = Settings(_env_file=None)
+
+    assert settings.retrieval_ef_search >= 2 * settings.retrieval_over_fetch
