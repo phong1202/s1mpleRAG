@@ -1,0 +1,386 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Luồng retrieval — agentic RAG",
+    "quality_profile": "showcase",
+    "output": "retrieval-flow.html",
+    "views": [
+      {
+        "id": "duong-chinh",
+        "label": "Đường chính",
+        "focus": [
+          "cauhoi",
+          "viet_lai",
+          "dinh_tuyen",
+          "vector",
+          "gop",
+          "cong",
+          "sinh",
+          "tra_loi"
+        ],
+        "note": "Một câu hỏi đi từ lúc được viết lại tới câu trả lời có trích dẫn."
+      },
+      {
+        "id": "vong-tu-sua",
+        "label": "Vòng tự sửa",
+        "focus": [
+          "dinh_tuyen",
+          "gop",
+          "cong"
+        ],
+        "note": "Cổng chấm ngữ cảnh đủ hay thiếu; thiếu thì quay lại định tuyến với truy vấn mới, tối đa 3 vòng."
+      },
+      {
+        "id": "hai-cach-tim",
+        "label": "Hai cách tìm",
+        "focus": [
+          "dinh_tuyen",
+          "vector",
+          "bm25",
+          "duyet",
+          "gop"
+        ],
+        "note": "Vector tìm theo nghĩa, từ khoá tìm theo mặt chữ. RRF gộp theo thứ hạng, không cộng điểm."
+      },
+      {
+        "id": "ranh-gioi-tin-cay",
+        "label": "Ranh giới tin cậy",
+        "focus": [
+          "cong",
+          "web",
+          "sinh",
+          "phan_tu"
+        ],
+        "note": "Kết quả web chỉ tới node sinh câu trả lời, không bao giờ quay lên viết lại hay định tuyến."
+      },
+      {
+        "id": "cho-llm-quyet-dinh",
+        "label": "Bốn chỗ LLM quyết định",
+        "focus": [
+          "viet_lai",
+          "dinh_tuyen",
+          "cong",
+          "phan_tu"
+        ],
+        "note": "Mỗi chỗ nhận một câu hỏi hẹp có schema. Node sinh câu trả lời là nơi duy nhất được trả lời."
+      }
+    ]
+  },
+  "layout": {
+    "mode": "grid",
+    "cols": 5,
+    "gapX": 88,
+    "gapY": 44,
+    "cellW": 186,
+    "cellH": 78
+  },
+  "components": [
+    {
+      "id": "cauhoi",
+      "type": "external",
+      "label": "Câu hỏi + lịch sử",
+      "sublabel": "POST /query",
+      "row": 1,
+      "col": 0,
+      "size": [
+        168,
+        62
+      ]
+    },
+    {
+      "id": "viet_lai",
+      "type": "backend",
+      "label": "① Viết lại · Ý định",
+      "sublabel": "gỡ tham chiếu · tách sub-query",
+      "tag": "R4",
+      "row": 1,
+      "col": 1,
+      "size": [
+        186,
+        62
+      ]
+    },
+    {
+      "id": "dinh_tuyen",
+      "type": "backend",
+      "label": "② Định tuyến",
+      "sublabel": "chọn 1 trong 4 chiến lược",
+      "tag": "R5",
+      "row": 1,
+      "col": 2,
+      "size": [
+        168,
+        62
+      ]
+    },
+    {
+      "id": "vector",
+      "type": "database",
+      "label": "Vector search",
+      "sublabel": "pgvector HNSW · 50 ứng viên",
+      "tag": "R0",
+      "row": 0,
+      "col": 3,
+      "size": [
+        180,
+        62
+      ]
+    },
+    {
+      "id": "bm25",
+      "type": "database",
+      "label": "Tìm theo từ khoá",
+      "sublabel": "GIN · ts_rank_cd · 50 ứng viên",
+      "tag": "R2",
+      "row": 1,
+      "col": 3,
+      "size": [
+        186,
+        62
+      ]
+    },
+    {
+      "id": "duyet",
+      "type": "database",
+      "label": "Duyệt tài liệu",
+      "sublabel": "đọc theo heading_path",
+      "tag": "R5",
+      "row": 2,
+      "col": 3,
+      "size": [
+        168,
+        62
+      ]
+    },
+    {
+      "id": "gop",
+      "type": "backend",
+      "label": "④⑤ Gộp · Rerank",
+      "sublabel": "RRF ~80 → giữ 10 → gom parent",
+      "tag": "R2 · R3",
+      "row": 1,
+      "col": 4,
+      "size": [
+        190,
+        62
+      ]
+    },
+    {
+      "id": "cong",
+      "type": "security",
+      "label": "⑥ Cổng đủ / thiếu",
+      "sublabel": "cộng dồn · tối đa 3 vòng",
+      "tag": "R6",
+      "row": 3,
+      "col": 2,
+      "size": [
+        168,
+        62
+      ]
+    },
+    {
+      "id": "web",
+      "type": "external",
+      "label": "Web search",
+      "sublabel": "Tavily · mặc định tắt",
+      "tag": "R8",
+      "row": 4,
+      "col": 1,
+      "size": [
+        168,
+        62
+      ]
+    },
+    {
+      "id": "sinh",
+      "type": "backend",
+      "label": "⑦ Sinh câu trả lời",
+      "sublabel": "nguồn đánh số → trích dẫn",
+      "tag": "R0",
+      "row": 4,
+      "col": 2,
+      "size": [
+        168,
+        62
+      ]
+    },
+    {
+      "id": "phan_tu",
+      "type": "security",
+      "label": "⑧ Kiểm bịa",
+      "sublabel": "cắt câu không có nguồn",
+      "tag": "R7",
+      "row": 4,
+      "col": 3,
+      "size": [
+        168,
+        62
+      ]
+    },
+    {
+      "id": "tra_loi",
+      "type": "frontend",
+      "label": "Câu trả lời + trích dẫn",
+      "sublabel": "document_id · số trang",
+      "row": 4,
+      "col": 4,
+      "size": [
+        180,
+        62
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Corpus — trích dẫn kiểm chứng được bằng SQL",
+      "wraps": [
+        "vector",
+        "bm25",
+        "duyet"
+      ],
+      "pad": 28
+    },
+    {
+      "kind": "security-group",
+      "label": "Không tin cậy — chỉ vào ⑦, không quay lên ① hay ②",
+      "wraps": [
+        "web"
+      ],
+      "pad": 26
+    }
+  ],
+  "connections": [
+    {
+      "id": "vao",
+      "from": "cauhoi",
+      "to": "viet_lai",
+      "variant": "default"
+    },
+    {
+      "id": "viet-tuyen",
+      "from": "viet_lai",
+      "to": "dinh_tuyen",
+      "label": "câu hỏi độc lập",
+      "variant": "emphasis"
+    },
+    {
+      "id": "tuyen-vector",
+      "from": "dinh_tuyen",
+      "to": "vector",
+      "label": "chạy song song",
+      "variant": "emphasis"
+    },
+    {
+      "id": "tuyen-bm25",
+      "from": "dinh_tuyen",
+      "to": "bm25",
+      "variant": "default"
+    },
+    {
+      "id": "tuyen-duyet",
+      "from": "dinh_tuyen",
+      "to": "duyet",
+      "label": "khi hỏi cả tài liệu",
+      "variant": "dashed"
+    },
+    {
+      "id": "vector-gop",
+      "from": "vector",
+      "to": "gop",
+      "variant": "default"
+    },
+    {
+      "id": "bm25-gop",
+      "from": "bm25",
+      "to": "gop",
+      "variant": "emphasis"
+    },
+    {
+      "id": "duyet-gop",
+      "from": "duyet",
+      "to": "gop",
+      "variant": "dashed"
+    },
+    {
+      "id": "gop-cong",
+      "from": "gop",
+      "to": "cong",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cong-lap",
+      "from": "cong",
+      "to": "dinh_tuyen",
+      "label": "thiếu → truy vấn tinh chỉnh",
+      "variant": "security"
+    },
+    {
+      "id": "cong-sinh",
+      "from": "cong",
+      "to": "sinh",
+      "label": "đủ",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 30
+    },
+    {
+      "id": "cong-web",
+      "from": "cong",
+      "to": "web",
+      "label": "hết vòng vẫn thiếu",
+      "variant": "dashed"
+    },
+    {
+      "id": "web-sinh",
+      "from": "web",
+      "to": "sinh",
+      "label": "khối không tin cậy",
+      "variant": "security",
+      "labelDy": 20
+    },
+    {
+      "id": "sinh-phan",
+      "from": "sinh",
+      "to": "phan_tu",
+      "variant": "default"
+    },
+    {
+      "id": "phan-tra",
+      "from": "phan_tu",
+      "to": "tra_loi",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Phễu thu hẹp",
+      "items": [
+        "100.000 chunk → vector 50 + từ khoá 50",
+        "RRF gộp, bỏ trùng → ~80 duy nhất",
+        "Rerank 80 cặp (~1,2 s) → giữ 10 → ~6 parent"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Bốn chỗ LLM quyết định",
+      "items": [
+        "① viết lại · ② định tuyến · ⑥ cổng · ⑧ kiểm bịa",
+        "⑦ là nơi duy nhất được trả lời câu hỏi",
+        "Node hỏng schema thì lui về no-op"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Ranh giới tin cậy",
+      "items": [
+        "Web chỉ tới ⑦, không quay lên ① hay ②",
+        "Context.untrusted là list riêng, không phải cờ",
+        "Trích dẫn web và tài liệu là hai kiểu khác nhau"
+      ]
+    }
+  ]
+}

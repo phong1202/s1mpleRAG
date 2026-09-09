@@ -7,3 +7,6 @@ venv/
 .env
 *.egg-info/
 .DS_Store
+
+# archify visual-check output: screenshots and probe logs, not sources
+docs/diagrams/*.visual-check.*
