@@ -723,8 +723,10 @@ to answer "is reranking worth it". Nothing extra is built for evaluation.
 
 ## 11. What Phase 1 must deliver
 
-Phase 2 cannot start until `phase-1` ships these. All of them are in the plan as of
-`78bfb53`; they are listed here so the dependency is explicit rather than remembered.
+**R2 and R5** cannot start until `phase-1` ships these. R0 and R1 need none of them — they
+need only the Phase 1 schema, which `phase-1` already carries, so the read path can be built and
+tested in parallel with the rest of ingestion. All four items are in the plan as of `78bfb53`; they
+are listed here so the dependency is explicit rather than remembered.
 
 | Needed by | Phase 1 item | Where |
 |---|---|---|

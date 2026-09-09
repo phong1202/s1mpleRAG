@@ -19,7 +19,7 @@ Mọi task đều ngầm mang những ràng buộc này. Giá trị chép nguyê
 - **Python** `>=3.12`; dependency thêm bằng `uv add` / `uv add --dev`, không bao giờ sửa tay `pyproject.toml`.
 - **Branch:** toàn bộ R0 và R1 nằm trên nhánh `phase-2`.
 - **Git:** KHÔNG chạy `git commit`, `git push`, `git merge`. Kết thúc mỗi task bằng dừng và báo cáo; chờ chỉ dẫn tường minh.
-- **Điều kiện tiên quyết:** `phase-1` phải merge trước. R0 đọc `documents`, `parent_chunks` và `child_chunks` với embedding thật bên trong. Trước đó, `phase-2` chỉ là tài liệu. **Sau khi `phase-1` merge vào `main`, rebase `phase-2` lên `main` rồi mới bắt đầu Task 1.**
+- **Điểm cắt nhánh: `phase-2` cắt từ `phase-1`**, vốn đã mang sẵn `shared/`, hai model `ParentChunk` và `ChildChunk`, cùng migration của chúng. Đó là mọi thứ Task 1 → 11 cần. **Mọi test trong plan này đều tự gieo dữ liệu của nó**, nên chúng cần schema và một Postgres đang chạy — không cần corpus đã nạp. Chỉ mục 1 của Definition of Done (hỏi một câu thật về một PDF đã nạp thật) mới đợi Phase 1 chạy xong, và chỉ việc gán nhãn ở Task 12 mới cần chính các file PDF của corpus — file, không phải pipeline. Rebase lên `phase-1` khi nó tiến, và lên `main` khi Phase 1 merge.
 - **Suite phải xanh ở cuối MỌI task.** `uv run pytest -q` và `uv run ruff check .` đều sạch.
 - **Phía API là async.** Mọi thứ dưới `app/core/` là `async def`. `LLMProvider` đồng bộ của worker không bị đụng vào; R0 thêm một Protocol thứ hai đứng cạnh.
 - **`ef_search` được đặt tường minh cho mỗi session** và phải `>= 2 x RETRIEVAL_OVER_FETCH`. Mặc định của pgvector là 40; xin 50 hàng xóm từ một hàng đợi rộng 40 sẽ làm phần đuôi kém đi trong im lặng.

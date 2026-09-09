@@ -19,7 +19,7 @@ Every task implicitly carries these. Values copied verbatim from the spec.
 - **Python** `>=3.12`; dependencies via `uv add` / `uv add --dev`, never by hand-editing `pyproject.toml`.
 - **Branch:** all of R0 and R1 land on branch `phase-2`.
 - **Git:** do NOT run `git commit`, `git push`, or `git merge`. End each task by stopping and reporting; wait for an explicit instruction.
-- **Prerequisite:** `phase-1` must be merged first. R0 reads `documents`, `parent_chunks` and `child_chunks` with real embeddings in them. Until then, `phase-2` is documentation only. **After `phase-1` merges to `main`, rebase `phase-2` onto `main` before starting Task 1.**
+- **Branch point: `phase-2` is cut from `phase-1`**, which already carries `shared/`, the `ParentChunk` and `ChildChunk` models, and their migration. That is everything Tasks 1 → 11 need. **Every test in this plan seeds its own rows**, so they require the schema and a running Postgres — not an ingested corpus. Only Definition of Done item 1 (asking a real question about a real ingested PDF) waits for Phase 1 to finish running, and only Task 12's labelling needs the corpus PDFs themselves — the files, not the pipeline. Rebase onto `phase-1` as it advances, and onto `main` once Phase 1 merges.
 - **The suite must be green at the end of EVERY task.** `uv run pytest -q` and `uv run ruff check .` both clean.
 - **The API side is async.** Everything under `app/core/` is `async def`. The worker's synchronous `LLMProvider` is not touched; R0 adds a second Protocol beside it.
 - **`ef_search` is set explicitly per session** and must be `>= 2 x RETRIEVAL_OVER_FETCH`. pgvector's default is 40; asking for 50 neighbours from a queue of 40 silently degrades the tail.
