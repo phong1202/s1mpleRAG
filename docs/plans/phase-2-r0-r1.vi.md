@@ -610,10 +610,14 @@ Một cơ chế phục vụ hai mục đích: triển khai thang dần, và cấ
 ```python
 # tests/test_config.py — thêm vào cuối
 
-def test_retrieval_defaults_are_r0_behaviour():
+def test_retrieval_defaults_are_r0_behaviour(db_env):
     """Mọi cờ giai đoạn ship ở trạng thái tắt và vòng lặp ship với trần bằng
-    một. Một bản checkout mới phải chạy như R0 kể cả khi R8 đã tồn tại."""
-    settings = get_settings()
+    một. Một bản checkout mới phải chạy như R0 kể cả khi R8 đã tồn tại.
+
+    Đọc từ default của class chứ không phải get_settings(), vì điều được khẳng
+    định là code ship ra sao. Một người bật cờ trong .env của họ để thử R2
+    không được làm test này đỏ."""
+    settings = Settings(_env_file=None)
 
     assert settings.retrieval_max_iterations == 1
     assert settings.retrieval_bm25_enabled is False
@@ -624,11 +628,11 @@ def test_retrieval_defaults_are_r0_behaviour():
     assert settings.web_search_enabled is False
 
 
-def test_ef_search_is_at_least_twice_the_over_fetch():
+def test_ef_search_is_at_least_twice_the_over_fetch(db_env):
     """ef_search mặc định của pgvector là 40. Xin 50 hàng xóm từ hàng đợi rộng
     40 sẽ trả về phần đuôi kém đi mà không báo gì, nên quan hệ này được assert
     chứ không phải giả định."""
-    settings = get_settings()
+    settings = Settings(_env_file=None)
 
     assert settings.retrieval_ef_search >= 2 * settings.retrieval_over_fetch
 ```

@@ -123,6 +123,26 @@ class Settings(BaseSettings):
     rl_embed_rpm: int = 3_000
     rl_embed_tpm: int = 1_000_000
 
+    # --- Retrieval (Phase 2) ---
+    retrieval_top_k: int = 10
+    retrieval_over_fetch: int = 50          # per source, before fusion
+    retrieval_ef_search: int = 100          # MUST be >= 2 x over_fetch
+    retrieval_rrf_k: int = 60
+    retrieval_rerank_keep: int = 10
+    context_token_budget: int = 8000
+
+    # --- Stage flags ---
+    # One mechanism, two purposes: these roll the R0 -> R8 ladder out, and they
+    # are the ablation switches eval/run.py flips to answer "is this stage
+    # worth keeping". Every one ships off, so a fresh checkout behaves as R0.
+    retrieval_max_iterations: int = 1        # R6 raises this to 3
+    retrieval_bm25_enabled: bool = False     # R2
+    retrieval_rerank_enabled: bool = False   # R3
+    retrieval_intent_enabled: bool = False   # R4
+    retrieval_router_enabled: bool = False   # R5
+    retrieval_reflect_enabled: bool = False  # R7
+    web_search_enabled: bool = False         # R8
+
     @model_validator(mode="after")
     def _require_complete_database_config(self) -> "Settings":
         if self.database_url_override:
