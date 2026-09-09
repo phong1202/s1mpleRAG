@@ -10,7 +10,9 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypeVar
+
+from pydantic import BaseModel
 
 from app.config import get_settings
 
@@ -116,3 +118,79 @@ class OpenAIProvider:
 
 def get_provider() -> LLMProvider:
     return OpenAIProvider() if get_settings().llm_provider == "openai" else StubProvider()
+
+
+# --- read path ---------------------------------------------------------------
+# Added beside the synchronous half above, never replacing it: the worker
+# imports LLMProvider, StubProvider and OpenAIProvider, and Phase 1's tests pin
+# their behaviour. `_unit_vector_from` is reused rather than redefined.
+
+T = TypeVar("T", bound=BaseModel)
+
+
+class AsyncLLMProvider(Protocol):
+    """The read path's provider. Async because it runs inside FastAPI, and
+    schema-driven because every decision node returns a typed verdict rather
+    than prose."""
+
+    async def complete(self, messages: list[dict], schema: type[T]) -> T: ...
+    async def embed_query(self, text: str) -> list[float]: ...
+
+
+class AsyncStubProvider:
+    """Deterministic, offline, scripted per schema type. This is what makes the
+    whole R0-R8 ladder testable with no API key."""
+
+    def __init__(
+        self,
+        responses: dict[type, list] | None = None,
+        dimensions: int = 1536,
+    ) -> None:
+        self._responses = {k: list(v) for k, v in (responses or {}).items()}
+        self._dimensions = dimensions
+        self.calls: list[tuple[type, list[dict]]] = []
+
+    async def complete(self, messages: list[dict], schema: type[T]) -> T:
+        self.calls.append((schema, messages))
+        # KeyError is deliberate: an unscripted schema must fail loudly rather
+        # than hand back a default a test would silently pass against.
+        queue = self._responses[schema]
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    async def embed_query(self, text: str) -> list[float]:
+        return _unit_vector_from(text, self._dimensions)
+
+
+class AsyncOpenAIProvider:
+    def __init__(self) -> None:
+        from openai import AsyncOpenAI
+
+        settings = get_settings()
+        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self._chat_model = settings.openai_chat_model
+        self._embed_model = settings.openai_embed_model
+        self._dimensions = settings.embed_dimensions
+
+    async def complete(self, messages: list[dict], schema: type[T]) -> T:
+        response = await self._client.chat.completions.create(
+            model=self._chat_model,
+            messages=messages,
+            response_format={"type": "json_object"},
+        )
+        return schema.model_validate(json.loads(response.choices[0].message.content))
+
+    async def embed_query(self, text: str) -> list[float]:
+        response = await self._client.embeddings.create(
+            model=self._embed_model, input=[text], dimensions=self._dimensions
+        )
+        vector = response.data[0].embedding
+        # L2-normalise: vector_ip_ops treats inner product as cosine, and the
+        # index returns wrong neighbours, with no error, if this is skipped.
+        norm = math.sqrt(sum(x * x for x in vector)) or 1.0
+        return [x / norm for x in vector]
+
+
+def get_async_provider() -> AsyncLLMProvider:
+    if get_settings().llm_provider == "openai":
+        return AsyncOpenAIProvider()
+    return AsyncStubProvider(dimensions=get_settings().embed_dimensions)
