@@ -72,6 +72,16 @@ class IngestionService:
         )
         if document is None:
             raise AppException(ErrorCode.DOCUMENT_ALREADY_INGESTED)
+
+        # Publish ONLY when a row came back. That rule is what makes
+        # enqueue exactly-once per file, with no distributed lock.
+        #
+        # launch() publishes over kombu, a synchronous network call with no
+        # async integration -- the same class of blocking call store.exists()
+        # was in Task 9, wrapped the same way.
+        from worker.stages import launch
+
+        await asyncio.to_thread(launch, str(document.id))
         return document
 
     async def get(self, document_id: uuid.UUID) -> Document:

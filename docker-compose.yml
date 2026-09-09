@@ -97,11 +97,17 @@ services:
     env_file:
       - .env
     environment:
-      # Container-to-container: the service name and the internal port 5432,
-      # not the host's DB_HOST/DB_PORT. Environment entries beat env_file, and
-      # env vars beat the bind-mounted .env inside the container.
+      # Container-to-container: service names and internal ports, not the
+      # host-view values .env holds for running things directly on the
+      # host. Environment entries beat env_file, and env vars beat the
+      # bind-mounted .env inside the container.
       DB_HOST: db
       DB_PORT: 5432
+      MINIO_HOST: minio
+      MINIO_PORT: 9000
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "${PORT:-8000}:8000"
     volumes:
@@ -109,6 +115,54 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  worker-cpu:
+    build: .
+    command: celery -A worker.celery_app worker -Q cpu -c 8 -l info
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      MINIO_HOST: minio
+      MINIO_PORT: 9000
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/code
+
+  worker-llm:
+    build: .
+    command: celery -A worker.celery_app worker -Q llm -c 20 -l info
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      MINIO_HOST: minio
+      MINIO_PORT: 9000
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/code
 
 volumes:
   pgdata:

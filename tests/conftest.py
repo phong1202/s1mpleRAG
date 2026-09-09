@@ -147,3 +147,37 @@ def uploaded_pdf():
         "size_bytes": len(data),
     }
     store.delete(key)
+
+
+@pytest.fixture
+def seeded_document(uploaded_pdf):
+    """A real, committed Document row, seeded through the worker's own sync
+    engine rather than the async `db_session` the rest of the suite uses.
+
+    The chain a stage-chain test launches runs outside this test's request
+    cycle entirely -- worker/db.py's session_scope commits for real, so the
+    row has to already be visible there before the chain starts, and this
+    fixture has to clean up for real afterward since nothing rolls it back.
+    """
+    from types import SimpleNamespace
+
+    from app.models.document import Document
+    from worker.db import session_scope
+
+    with session_scope() as session:
+        doc = Document(
+            sha256_hash=uploaded_pdf["sha256"],
+            filename=uploaded_pdf["filename"],
+            object_key=uploaded_pdf["object_key"],
+            size_bytes=uploaded_pdf["size_bytes"],
+        )
+        session.add(doc)
+        session.flush()
+        doc_id = doc.id
+
+    yield SimpleNamespace(id=doc_id)
+
+    with session_scope() as session:
+        obj = session.get(Document, doc_id)
+        if obj is not None:
+            session.delete(obj)
