@@ -55,13 +55,14 @@ app/core/                          ★ MỚI — đường đọc, chỉ phía A
   deps.py                          ráp các stage từ cờ config (Task 8)
   retrievers/
     base.py                        Retriever Protocol (Task 5)
-    vector.py                      R0 — embed, search, nở thành parent (Task 5)
+    vector.py                      R0 — embed, search, xếp hạng child (Task 5)
   stages/
     noops.py                       năm chỗ nối rỗng (Task 8)
+  parent_expander.py               R0 — gom child về parent (Task 4b)
   context_builder.py               cộng dồn, bỏ trùng, ngân sách token, tách untrusted (Task 6)
   generator.py                     nguồn đánh số, ánh xạ trích dẫn (Task 7)
 app/repositories/
-  chunk_repository.py              ★ MỚI — câu SQL DISTINCT ON (Task 4)
+  chunk_repository.py              ★ MỚI — tìm ở mức child + lấy parent (Task 4)
 app/schemas/query.py               ★ MỚI — request/response (Task 9)
 app/services/query_service.py      ★ MỚI — điều phối app/core/ (Task 9)
 app/controllers/query_controller.py ★ MỚI — POST /query (Task 9)
@@ -75,7 +76,9 @@ alembic/versions/                  ★ MỘT revision mới (Task 10)
 tests/
   test_contracts.py                Task 1
   test_async_llm_provider.py       Task 2
+  helpers.py                       dữ liệu seed dùng chung (Task 4)
   test_chunk_repository.py         Task 4
+  test_parent_expander.py          Task 4b
   test_vector_retriever.py         Task 5
   test_context_builder.py          Task 6
   test_generator.py                Task 7
@@ -691,41 +694,48 @@ Commit message đề xuất: `feat(config): add retrieval settings and stage fla
 
 ## Task 4: `app/repositories/chunk_repository.py`
 
-Câu truy vấn làm cho parent/child hoạt động, và hai cái bẫy nó đóng lại.
+Câu truy vấn nuôi mọi bước phía sau, và phép gom mà nó cố tình **không** làm.
 
 **Files:**
 - Create: `app/repositories/chunk_repository.py`
-- Create: `tests/test_chunk_repository.py`
+- Create: `tests/helpers.py`, `tests/test_chunk_repository.py`
 
 **Interfaces:**
 - Consumes: `AsyncSession`, `Settings.retrieval_ef_search`
-- Produces: `ChunkRepository(session).search(vector: list[float], over_fetch: int, top_k: int, filters: Filters) -> list[ParentHit]`, trong đó `ParentHit` có `parent_id`, `parent_content`, `child_id`, `child_content`, `page_number`, `distance`, `document_id`, `filename`
+- Produces:
+  - `ChunkRepository(session).search(vector: list[float], over_fetch: int, filters: Filters) -> list[ChildHit]`
+  - `ChunkRepository(session).fetch_parents(parent_ids: list[UUID]) -> dict[UUID, str]`
+
+> **Search trả về child, không phải parent.** Phép gom về parent là Task 4b, và nó chạy sau fusion
+> và rerank. Một cross-encoder chấm parent 700 token phải tìm câu liên quan duy nhất nằm giữa sáu
+> câu không liên quan; chấm child 150 token thì nó không đọc gì khác. Gom ở đây còn vứt đi mọi
+> child thua parent của mình trước khi fusion kịp có cơ hội cứu.
 
 - [ ] **Step 1: Viết test đỏ**
 
 ```python
-# tests/test_chunk_repository.py
-"""Chạy với pgvector thật. Thứ tự tương đồng, phép gom DISTINCT ON và việc lấy
-dư chính là những phần dễ sai trong im lặng nhất, nên không cái nào bị mock."""
+# tests/helpers.py
+"""Dữ liệu seed dùng chung cho các test retrieval.
+
+Nó nằm ở đây thay vì trong một test module vì search, parent expansion và
+retriever đều cần cùng một corpus, và việc một test module import helper riêng
+tư của test module khác sẽ vỡ ngay khi một trong hai bị đổi tên.
+"""
 
 import uuid
 
-import pytest
-
-from app.core.contracts import Filters
 from app.models import ChildChunk, Document, ParentChunk
-from app.repositories.chunk_repository import ChunkRepository
-
-pytestmark = pytest.mark.asyncio
 
 
-def _unit(index: int, dimensions: int = 1536) -> list[float]:
+def unit_vector(index: int, dimensions: int = 1536) -> list[float]:
     vector = [0.0] * dimensions
     vector[index] = 1.0
     return vector
 
 
-async def _seed(session, children_per_parent: int = 3, parents: int = 4):
+async def seed_chunks(session, children_per_parent: int = 3, parents: int = 4):
+    """`parents` parent, mỗi cái có `children_per_parent` child, đánh số liên
+    tiếp để child `i` là kết quả khớp duy nhất của unit_vector(i)."""
     document = Document(
         sha256_hash=uuid.uuid4().hex * 2,
         filename="decree.pdf",
@@ -757,51 +767,53 @@ async def _seed(session, children_per_parent: int = 3, parents: int = 4):
                     contextualized=f"ctx {index}",
                     page_number=p + 1,
                     token_count=150,
-                    embedding=_unit(index),
+                    embedding=unit_vector(index),
                     category="LEGAL",
                 )
             )
             index += 1
     await session.flush()
     return document
+```
+
+```python
+# tests/test_chunk_repository.py
+"""Chạy với pgvector thật. Thứ tự tương đồng và phép lấy dư chính là những phần
+dễ sai trong im lặng nhất, nên không cái nào bị mock."""
+
+import pytest
+
+from app.core.contracts import Filters
+from app.repositories.chunk_repository import ChunkRepository
+from tests.helpers import seed_chunks, unit_vector
+
+pytestmark = pytest.mark.asyncio
 
 
-async def test_search_returns_one_row_per_parent(db_session):
-    """Mười hai child gom về bốn parent. Không có DISTINCT ON thì cùng một
-    parent về ba lần và chiếm chỗ của phần còn lại trong ngữ cảnh."""
-    await _seed(db_session)
+async def test_search_returns_every_matching_child_not_one_per_parent(db_session):
+    """Search làm việc ở mức child. Gom ở đây sẽ đưa cho reranker những parent
+    700 token và vứt đi các child thua parent của chúng trước khi fusion kịp
+    cứu."""
+    await seed_chunks(db_session)
 
     hits = await ChunkRepository(db_session).search(
-        vector=_unit(0), over_fetch=50, top_k=10, filters=Filters()
+        vector=unit_vector(0), over_fetch=50, filters=Filters()
     )
 
-    assert len({hit.parent_id for hit in hits}) == len(hits) == 4
-
-
-async def test_search_keeps_the_best_matching_child_of_each_parent(db_session):
-    """DISTINCT ON giữ hàng ĐẦU TIÊN của mỗi nhóm theo thứ tự ORDER BY, nên
-    parent_id phải đứng đầu ORDER BY đó. Nếu không, Postgres giữ một child tuỳ
-    ý, trích dẫn trỏ sai trang, và không có gì báo lỗi."""
-    await _seed(db_session)
-
-    # child 2 là child thứ ba của parent 0 -- kết quả tốt nhất phải là child đó,
-    # không phải child 0 vốn chỉ tình cờ được chèn trước.
-    hits = await ChunkRepository(db_session).search(
-        vector=_unit(2), over_fetch=50, top_k=10, filters=Filters()
-    )
-
-    assert hits[0].child_content == "child 2"
+    assert len(hits) == 12
+    assert len({hit.parent_id for hit in hits}) == 4
 
 
 async def test_search_orders_by_similarity_not_insertion(db_session):
     """`<#>` là tích vô hướng ÂM: ASC là gần nhất trước. Viết DESC đảo ngược
     toàn bộ kết quả và không ném lỗi nào."""
-    await _seed(db_session)
+    await seed_chunks(db_session)
 
     hits = await ChunkRepository(db_session).search(
-        vector=_unit(6), over_fetch=50, top_k=10, filters=Filters()
+        vector=unit_vector(6), over_fetch=50, filters=Filters()
     )
 
+    assert hits[0].child_content == "child 6"
     assert hits[0].page_number == 3, "child 6 thuộc parent 2, trang 3"
     assert hits[0].distance <= hits[1].distance
 
@@ -811,35 +823,43 @@ async def test_over_fetch_takes_the_nearest_candidates_not_an_arbitrary_slice(db
     corpus thì mọi thứ tự đều trả về cùng một tập hàng và thứ tự của CTE
     candidates hoàn toàn không được kiểm. Chỉ điểm cắt hẹp hơn corpus mới
     chứng minh nó sắp gần nhất trước."""
-    await _seed(db_session)
+    await seed_chunks(db_session)
 
     hits = await ChunkRepository(db_session).search(
-        vector=_unit(6), over_fetch=1, top_k=10, filters=Filters()
+        vector=unit_vector(6), over_fetch=1, filters=Filters()
     )
 
     assert [hit.child_content for hit in hits] == ["child 6"]
 
 
-async def test_top_k_counts_parents_not_children(db_session):
-    """Gom sau LIMIT sẽ trả về ít hơn top_k parent. Việc lấy dư tồn tại để sau
-    khi gom vẫn đủ số lượng yêu cầu."""
-    await _seed(db_session, parents=4)
-
-    hits = await ChunkRepository(db_session).search(
-        vector=_unit(0), over_fetch=50, top_k=2, filters=Filters()
-    )
-
-    assert len(hits) == 2
-
-
 async def test_category_filter_narrows_the_candidate_pool(db_session):
-    await _seed(db_session)
+    await seed_chunks(db_session)
 
     hits = await ChunkRepository(db_session).search(
-        vector=_unit(0), over_fetch=50, top_k=10, filters=Filters(category="FINANCIAL")
+        vector=unit_vector(0), over_fetch=50, filters=Filters(category="FINANCIAL")
     )
 
     assert hits == []
+
+
+async def test_fetch_parents_returns_the_content_of_every_id(db_session):
+    """Một câu lệnh cho cả tập: phép expansion không được chạy một query cho
+    mỗi parent."""
+    await seed_chunks(db_session)
+    repository = ChunkRepository(db_session)
+    hits = await repository.search(
+        vector=unit_vector(0), over_fetch=50, filters=Filters()
+    )
+    parent_ids = list({hit.parent_id for hit in hits})
+
+    contents = await repository.fetch_parents(parent_ids)
+
+    assert set(contents) == set(parent_ids)
+    assert sorted(contents.values()) == ["parent 0", "parent 1", "parent 2", "parent 3"]
+
+
+async def test_fetch_parents_of_nothing_asks_the_database_nothing(db_session):
+    assert await ChunkRepository(db_session).fetch_parents([]) == {}
 ```
 
 - [ ] **Step 2: Chạy để xác nhận đỏ** — module chưa tồn tại.
@@ -848,7 +868,14 @@ async def test_category_filter_narrows_the_candidate_pool(db_session):
 
 ```python
 # app/repositories/chunk_repository.py
-"""Retrieval của R0. Chỉ đọc: module này không bao giờ ghi."""
+"""Retrieval của R0. Chỉ đọc: module này không bao giờ ghi.
+
+`search` trả về CHILD chứ không phải parent. Phép gom về parent là một bước
+riêng (app/core/parent_expander.py) chạy sau fusion và rerank, bởi vì một
+cross-encoder chấm parent 700 token phải tìm câu liên quan duy nhất nằm lẫn
+giữa sáu câu không liên quan, còn cũng model đó chấm child 150 token thì không
+đọc gì ngoài phần liên quan.
+"""
 
 import uuid
 from dataclasses import dataclass
@@ -863,9 +890,12 @@ from app.core.contracts import Filters
 # vào CAST(:qvec AS vector) khiến Postgres suy ra kiểu tham số là `vector`, mà
 # driver không có codec cho kiểu đó -- cast qua text là thứ giữ cho tham số vẫn
 # là một chuỗi thường.
+#
+# Phần ORDER BY và LIMIT nằm trong một CTE chỉ trên child_chunks: đưa join sang
+# documents lên trên chúng có thể làm mất index scan của HNSW.
 _SEARCH = text("""
 WITH candidates AS (
-  SELECT c.id, c.parent_id, c.page_number, c.content,
+  SELECT c.id, c.parent_id, c.document_id, c.page_number, c.content,
          c.embedding <#> CAST(CAST(:qvec AS text) AS vector) AS distance
   FROM   child_chunks c
   WHERE  (CAST(:category AS text) IS NULL OR c.category = CAST(:category AS text))
@@ -873,34 +903,27 @@ WITH candidates AS (
   -- ASC: <#> là tích vô hướng ÂM, nên gần nhất được sắp lên trước
   ORDER  BY c.embedding <#> CAST(CAST(:qvec AS text) AS vector)
   LIMIT  :over_fetch
-),
-best_per_parent AS (
-  SELECT DISTINCT ON (parent_id)
-         parent_id, distance, page_number, id AS child_id, content AS child_content
-  FROM   candidates
-  ORDER  BY parent_id, distance          -- parent_id PHẢI đứng đầu, nếu không
-)                                        -- một child tuỳ ý thắng nhóm, không báo lỗi
-SELECT p.id  AS parent_id,
-       p.content AS parent_content,
-       b.child_id, b.child_content, b.page_number, b.distance,
-       d.id AS document_id, d.filename
-FROM   best_per_parent b
-JOIN   parent_chunks p ON p.id = b.parent_id
-JOIN   documents      d ON d.id = p.document_id
-ORDER  BY b.distance
-LIMIT  :top_k
+)
+SELECT c.id AS child_id, c.parent_id, c.document_id, c.page_number,
+       c.content AS child_content, c.distance, d.filename
+FROM   candidates c
+JOIN   documents d ON d.id = c.document_id
+ORDER  BY c.distance
+""")
+
+_PARENTS = text("""
+SELECT id, content FROM parent_chunks WHERE id = ANY(CAST(:ids AS uuid[]))
 """)
 
 
 @dataclass(frozen=True)
-class ParentHit:
-    parent_id: uuid.UUID
-    parent_content: str
+class ChildHit:
     child_id: uuid.UUID
-    child_content: str
-    page_number: int
-    distance: float
+    parent_id: uuid.UUID
     document_id: uuid.UUID
+    page_number: int
+    child_content: str
+    distance: float
     filename: str
 
 
@@ -909,8 +932,8 @@ class ChunkRepository:
         self._session = session
 
     async def search(
-        self, vector: list[float], over_fetch: int, top_k: int, filters: Filters
-    ) -> list[ParentHit]:
+        self, vector: list[float], over_fetch: int, filters: Filters
+    ) -> list[ChildHit]:
         # ef_search mặc định của pgvector là 40. Lấy dư 50 từ hàng đợi rộng 40
         # làm phần đuôi kém đi trong im lặng, nên session đặt nó tường minh.
         # Dùng set_config chứ không phải SET LOCAL: SET là câu lệnh tiện ích và
@@ -927,17 +950,199 @@ class ChunkRepository:
                 "category": filters.category,
                 "document_id": filters.document_id,
                 "over_fetch": over_fetch,
-                "top_k": top_k,
             },
         )
-        return [ParentHit(**row) for row in rows.mappings()]
+        return [ChildHit(**row) for row in rows.mappings()]
+
+    async def fetch_parents(self, parent_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """Một câu lệnh cho cả tập. Lấy từng parent bên trong vòng lặp expansion
+        chính là N+1 kinh điển, và nó ẩn rất kỹ vì mỗi query lẻ đều nhanh."""
+        if not parent_ids:
+            return {}
+        rows = await self._session.execute(_PARENTS, {"ids": parent_ids})
+        return {row.id: row.content for row in rows}
 ```
 
 - [ ] **Step 4: Chạy test** — PASS, 6 test.
 
 - [ ] **Step 5: Suite đầy đủ, rồi dừng**
 
-Commit message đề xuất: `feat(core): add the parent-collapsing retrieval query`
+Commit message đề xuất: `feat(core): add the child-level retrieval query`
+
+---
+
+## Task 4b: `app/core/parent_expander.py`
+
+Phép gom mà Task 4 bỏ lại, tách thành một bước riêng.
+
+**Files:**
+- Create: `app/core/parent_expander.py`
+- Create: `tests/test_parent_expander.py`
+
+**Interfaces:**
+- Consumes: `ChunkRepository.fetch_parents`, `list[Candidate]`
+- Produces: `expand_parents(repository, candidates) -> list[Candidate]`
+
+Ba cái bẫy bước này đóng lại, cả ba đều im lặng:
+
+| Bẫy | Hậu quả |
+|---|---|
+| Giữ một child tuỳ ý của parent | Trích dẫn trỏ vào trang mà câu trả lời không đến từ đó |
+| Chạy một query cho mỗi parent | N+1, và mỗi query lẻ đều đủ nhanh để che giấu nó |
+| Giữ nguyên rank trước khi gom | Danh sách đọc thành 1, 4, 7 và báo với các bước sau rằng có ứng viên tốt hơn chúng không thấy |
+
+- [ ] **Step 1: Viết test đỏ**
+
+```python
+# tests/test_parent_expander.py
+"""Phép gom mà search ở Task 4 cố tình không làm."""
+
+from dataclasses import replace
+
+import pytest
+
+from app.core.contracts import Filters, Plan
+from app.core.parent_expander import expand_parents
+from app.core.retrievers.vector import VectorRetriever
+from app.repositories.chunk_repository import ChunkRepository
+from shared.llm import AsyncStubProvider
+from tests.helpers import seed_chunks
+
+pytestmark = pytest.mark.asyncio
+
+
+async def _candidates(session, query: str = "hoa don"):
+    retriever = VectorRetriever(session, AsyncStubProvider(dimensions=1536))
+    return await retriever.search(
+        Plan(strategy="VECTOR_ONLY", queries=(query,), filters=Filters())
+    )
+
+
+async def test_expansion_returns_one_candidate_per_parent(db_session):
+    """Mười hai child gom về bốn parent. Không có phép gom thì cùng một parent
+    về ba lần và chiếm chỗ của phần còn lại trong ngữ cảnh."""
+    await seed_chunks(db_session)
+    candidates = await _candidates(db_session)
+    assert len(candidates) == 12
+
+    expanded = await expand_parents(ChunkRepository(db_session), candidates)
+
+    assert len(expanded) == 4
+    assert len({c.ref.parent_id for c in expanded}) == 4
+
+
+async def test_expansion_swaps_child_text_for_parent_text(db_session):
+    """Child là thứ được chấm điểm; parent là thứ model đọc."""
+    await seed_chunks(db_session)
+    candidates = await _candidates(db_session)
+
+    expanded = await expand_parents(ChunkRepository(db_session), candidates)
+
+    assert {c.text for c in expanded} == {"parent 0", "parent 1", "parent 2", "parent 3"}
+
+
+async def test_the_best_ranked_child_wins_its_parent(db_session):
+    """Kẻ thắng phải là child xếp hạng cao nhất của parent đó, không phải cái
+    tình cờ đứng đầu theo thứ tự chèn. Lấy child khác sẽ trích dẫn một trang mà
+    câu trả lời không đến từ đó, và không có gì báo lỗi."""
+    await seed_chunks(db_session)
+    candidates = await _candidates(db_session)
+    best_parent = candidates[0].ref.parent_id
+    siblings = [c for c in candidates if c.ref.parent_id == best_parent]
+    assert len(siblings) == 3, "parent đứng đầu phải có anh em thua cuộc để loại"
+
+    expanded = await expand_parents(ChunkRepository(db_session), candidates)
+
+    assert expanded[0].ref.child_id == candidates[0].ref.child_id
+    assert expanded[0].ref.child_id not in {c.ref.child_id for c in siblings[1:]}
+
+
+async def test_the_citation_still_points_at_the_child(db_session):
+    """Độ chính xác của trích dẫn sống sót qua phép gom: phần text mở rộng ra
+    parent trong khi tham chiếu vẫn nằm ở child và trang của nó."""
+    await seed_chunks(db_session)
+    candidates = await _candidates(db_session)
+
+    expanded = await expand_parents(ChunkRepository(db_session), candidates)
+
+    assert expanded[0].ref == candidates[0].ref
+    assert expanded[0].text != candidates[0].text
+
+
+async def test_expanded_ranks_are_contiguous_from_one(db_session):
+    """Phép gom loại bớt phần tử. Giữ nguyên rank cũ sẽ nói với mọi bước sau
+    rằng còn những ứng viên tốt hơn mà chúng không nhìn thấy.
+
+    Đầu vào được sắp lại để cả ba child của một parent giữ rank 1-3: rank còn
+    sống khi đó là 1, 4, ... và chỉ việc đánh số lại mới làm chúng liền mạch.
+    Để nguyên thứ tự tự nhiên thì các kẻ thắng có thể tình cờ rơi đúng vào 1, 2,
+    3, 4, và test pass mà không khẳng định điều gì."""
+    await seed_chunks(db_session)
+    candidates = await _candidates(db_session)
+    crowded = candidates[0].ref.parent_id
+    siblings = [c for c in candidates if c.ref.parent_id == crowded]
+    others = [c for c in candidates if c.ref.parent_id != crowded]
+    reordered = [
+        replace(c, rank=rank) for rank, c in enumerate(siblings + others, start=1)
+    ]
+
+    expanded = await expand_parents(ChunkRepository(db_session), reordered)
+
+    assert [c.rank for c in expanded] == [1, 2, 3, 4]
+```
+
+- [ ] **Step 2: Chạy để xác nhận đỏ** — module chưa tồn tại.
+
+- [ ] **Step 3: Viết implementation**
+
+```python
+# app/core/parent_expander.py
+"""Phép gom từ child về parent.
+
+Nó chạy SAU fusion và rerank chứ không nằm trong search. Các bước đó chấm điểm
+ứng viên so với câu hỏi, mà một child 150 token thì nói trọn vẹn về một chuyện,
+còn parent 700 token chứa nó thì phần lớn nói về sáu chuyện khác. Gom trước sẽ
+đưa cho reranker bản đã bị loãng, và vứt đi mọi child không thắng parent của nó
+trước khi có bất cứ thứ gì kịp cứu.
+"""
+
+import uuid
+from dataclasses import replace
+
+from app.core.contracts import Candidate, DocRef
+from app.repositories.chunk_repository import ChunkRepository
+
+
+async def expand_parents(
+    repository: ChunkRepository, candidates: list[Candidate]
+) -> list[Candidate]:
+    """Mỗi parent một candidate: text của parent, ref của child thắng cuộc.
+
+    `candidates` đến theo thứ tự rank, nên child đầu tiên của một parent xuất
+    hiện chính là cái tốt nhất, và page_number của child đó là thứ trích dẫn
+    trỏ tới. Giữ child khác sẽ trích một trang mà câu trả lời không đến từ đó,
+    và không có gì báo lỗi.
+    """
+    winners: dict[uuid.UUID, Candidate] = {}
+    for candidate in candidates:
+        if isinstance(candidate.ref, DocRef):
+            winners.setdefault(candidate.ref.parent_id, candidate)
+
+    contents = await repository.fetch_parents(list(winners))
+    # Rank được đánh lại vì phép gom loại bớt phần tử: một danh sách 1, 2, 5, 9
+    # sẽ nói với mọi bước sau rằng có những ứng viên tốt hơn mà chúng không
+    # nhìn thấy.
+    return [
+        replace(candidate, rank=position, text=contents[parent_id].strip())
+        for position, (parent_id, candidate) in enumerate(winners.items(), start=1)
+    ]
+```
+
+- [ ] **Step 4: Chạy test** — PASS, 5 test.
+
+- [ ] **Step 5: Suite đầy đủ, rồi dừng**
+
+Commit message đề xuất: `feat(core): add the parent expansion stage`
 
 ---
 
@@ -953,6 +1158,10 @@ Commit message đề xuất: `feat(core): add the parent-collapsing retrieval qu
   - `Retriever` Protocol: `source: Source`, `async def search(plan: Plan) -> list[Candidate]`
   - `VectorRetriever(session, provider)`
 
+Retriever trả về trọn danh sách đã xếp hạng, sâu `retrieval_over_fetch`. Nó **không** cắt xuống
+`retrieval_top_k`: quyết định đọc sâu bao nhiêu là việc của bên tiêu thụ, và tới R2 thì fusion cần
+đúng cái đuôi mà một nhát cắt ở 10 đã vứt đi.
+
 - [ ] **Step 1: Viết test đỏ**
 
 ```python
@@ -962,18 +1171,22 @@ import pytest
 from app.core.contracts import DocRef, Filters, Plan
 from app.core.retrievers.vector import VectorRetriever
 from shared.llm import AsyncStubProvider
+from tests.helpers import seed_chunks
 
 pytestmark = pytest.mark.asyncio
+
+
+def _retriever(session):
+    return VectorRetriever(session, AsyncStubProvider(dimensions=1536))
 
 
 async def test_candidates_are_ranked_from_one_within_the_source(db_session):
     """Rank tính theo từng nguồn, bắt đầu từ 1 và liền mạch. R2 chia cho
     (k + rank); rank bắt đầu từ 0 hoặc bị đứt quãng sẽ âm thầm làm lệch mọi
     điểm gộp."""
-    await _seed(db_session)          # dùng lại helper của tests/test_chunk_repository.py
-    retriever = VectorRetriever(db_session, AsyncStubProvider(dimensions=1536))
+    await seed_chunks(db_session)
 
-    candidates = await retriever.search(
+    candidates = await _retriever(db_session).search(
         Plan(strategy="VECTOR_ONLY", queries=("hoa don",), filters=Filters())
     )
 
@@ -983,12 +1196,10 @@ async def test_candidates_are_ranked_from_one_within_the_source(db_session):
 
 async def test_candidate_carries_a_doc_ref_with_the_child_page(db_session):
     """Độ chính xác của trích dẫn đến từ page_number của child, không phải
-    khoảng trang của parent. Một parent trải qua hai trang sẽ trích sai trang
-    nếu lấy từ parent."""
-    await _seed(db_session)
-    retriever = VectorRetriever(db_session, AsyncStubProvider(dimensions=1536))
+    khoảng trang của parent. Một parent trải qua hai trang sẽ trích sai trang."""
+    await seed_chunks(db_session)
 
-    candidates = await retriever.search(
+    candidates = await _retriever(db_session).search(
         Plan(strategy="VECTOR_ONLY", queries=("hoa don",), filters=Filters())
     )
 
@@ -997,11 +1208,24 @@ async def test_candidate_carries_a_doc_ref_with_the_child_page(db_session):
     assert candidates[0].text == candidates[0].text.strip()
 
 
-async def test_multiple_sub_queries_are_searched_and_merged(db_session):
-    """R4 sinh tối đa ba sub-query. R0 không bao giờ sinh, nhưng retriever phải
-    xử lý được list ngay từ bây giờ, nếu không R4 phải viết lại nó."""
-    await _seed(db_session)
-    retriever = VectorRetriever(db_session, AsyncStubProvider(dimensions=1536))
+async def test_scores_are_similarity_not_distance(db_session):
+    """`<#>` trả về tích vô hướng ÂM. Báo cáo nguyên xi sẽ khiến mọi phép sắp
+    xếp theo score giảm dần về sau trả về những kết quả tệ nhất trước."""
+    await seed_chunks(db_session)
+
+    candidates = await _retriever(db_session).search(
+        Plan(strategy="VECTOR_ONLY", queries=("hoa don",), filters=Filters())
+    )
+
+    assert candidates[0].score >= candidates[-1].score
+
+
+async def test_sub_queries_are_merged_without_duplicating_a_child(db_session):
+    """R4 sinh tối đa ba sub-query chồng lấn nhau rất nhiều. Không gộp thì một
+    chunk khớp với hai trong số đó sẽ về hai lần từ cùng một nguồn và được cộng
+    điểm hai lần trong fusion của R2."""
+    await seed_chunks(db_session)
+    retriever = _retriever(db_session)
 
     one = await retriever.search(
         Plan(strategy="VECTOR_ONLY", queries=("a",), filters=Filters())
@@ -1010,7 +1234,9 @@ async def test_multiple_sub_queries_are_searched_and_merged(db_session):
         Plan(strategy="VECTOR_ONLY", queries=("a", "b"), filters=Filters())
     )
 
-    assert len({c.ref.parent_id for c in two}) >= len({c.ref.parent_id for c in one})
+    assert len(one) == len(two) == 12, "cả hai truy vấn đều với tới toàn corpus"
+    assert len({c.ref.child_id for c in two}) == 12
+    assert [c.rank for c in two] == list(range(1, 13))
 ```
 
 - [ ] **Step 2: Chạy để xác nhận đỏ** — module chưa tồn tại.
@@ -1027,7 +1253,12 @@ from app.core.contracts import Candidate, Plan, Source
 class Retriever(Protocol):
     """Thêm một tool ở R2, R5 hay R8 nghĩa là thêm một class ở đây và đăng ký
     nó. Pipeline gọi mọi retriever đang bật một cách đồng thời và không bao giờ
-    biết có những cái nào."""
+    biết có những cái nào.
+
+    `source` là thuộc tính chứ không phải method vì pipeline cần gắn nhãn cho
+    một retriever TRƯỚC khi gọi nó -- để ghi trace, và để fusion biết nó đang
+    gộp bao nhiêu danh sách.
+    """
 
     source: Source
 
@@ -1037,50 +1268,59 @@ class Retriever(Protocol):
 ```python
 # app/core/retrievers/vector.py
 import asyncio
+import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.contracts import Candidate, DocRef, Plan
-from app.repositories.chunk_repository import ChunkRepository
+from app.core.contracts import Candidate, DocRef, Plan, Source
+from app.repositories.chunk_repository import ChildHit, ChunkRepository
 from shared.llm import AsyncLLMProvider
 
 
 class VectorRetriever:
-    source = "vector"
+    source: Source = "vector"
 
     def __init__(self, session: AsyncSession, provider: AsyncLLMProvider) -> None:
         self._repository = ChunkRepository(session)
         self._provider = provider
 
     async def search(self, plan: Plan) -> list[Candidate]:
-        settings = get_settings()
+        over_fetch = get_settings().retrieval_over_fetch
         vectors = await asyncio.gather(
             *(self._provider.embed_query(q) for q in plan.queries)
         )
 
-        best: dict[object, tuple[float, object]] = {}
+        best: dict[uuid.UUID, ChildHit] = {}
         for vector in vectors:
+            # Tuần tự, trong khi phần embed ở trên chạy đồng thời: chúng dùng
+            # chung một AsyncSession, và một connection không chạy được hai câu
+            # lệnh cùng lúc. Gather chúng sẽ ném "another operation is in
+            # progress".
             hits = await self._repository.search(
-                vector=vector,
-                over_fetch=settings.retrieval_over_fetch,
-                top_k=settings.retrieval_top_k,
-                filters=plan.filters,
+                vector=vector, over_fetch=over_fetch, filters=plan.filters
             )
             for hit in hits:
-                # Các sub-query chồng lấn nhau. Giữ mỗi parent một lần, ở
-                # khoảng cách tốt nhất, để rank vẫn liền mạch.
-                current = best.get(hit.parent_id)
-                if current is None or hit.distance < current[0]:
-                    best[hit.parent_id] = (hit.distance, hit)
+                # Các sub-query chồng lấn nhau theo thiết kế. Giữ mỗi child một
+                # lần, ở khoảng cách tốt nhất, chính là thứ ngăn một chunk được
+                # cộng điểm hai lần trong fusion của R2 chỉ vì nó khớp với hai
+                # cách diễn đạt của cùng một câu hỏi.
+                current = best.get(hit.child_id)
+                if current is None or hit.distance < current.distance:
+                    best[hit.child_id] = hit
 
-        ordered = sorted(best.values(), key=lambda pair: pair[0])
+        # Khử trùng trước, đánh rank sau. Đánh rank trước sẽ để lại lỗ hổng ở
+        # những chỗ bản trùng bị bỏ đi, mà R2 thì chia cho (k + rank).
+        ordered = sorted(best.values(), key=lambda hit: hit.distance)
         return [
             Candidate(
                 source="vector",
                 rank=position,
-                score=-distance,          # <#> bị phủ định; báo cáo độ tương đồng
-                text=hit.parent_content.strip(),
+                # <#> là tích vô hướng bị phủ định; báo cáo độ tương đồng thuần
+                # để một phép sắp xếp theo score về sau không âm thầm đảo ngược
+                # thứ tự.
+                score=-hit.distance,
+                text=hit.child_content.strip(),
                 ref=DocRef(
                     document_id=hit.document_id,
                     parent_id=hit.parent_id,
@@ -1089,11 +1329,11 @@ class VectorRetriever:
                     filename=hit.filename,
                 ),
             )
-            for position, (distance, hit) in enumerate(ordered, start=1)
+            for position, hit in enumerate(ordered, start=1)
         ]
 ```
 
-- [ ] **Step 4: Chạy test** — PASS, 3 test.
+- [ ] **Step 4: Chạy test** — PASS, 4 test.
 
 - [ ] **Step 5: Suite đầy đủ, rồi dừng**
 
@@ -1489,7 +1729,7 @@ Commit message đề xuất: `feat(core): add the answer generator and citation 
 **Interfaces:**
 - Consumes: mọi module từ Task 1 → 7
 - Produces:
-  - dataclass `Stages` với các field `rewrite`, `plan`, `retrieve`, `fuse`, `build_context`, `gate`, `generate`, `reflect`
+  - dataclass `Stages` với các field `rewrite`, `plan`, `retrieve`, `fuse`, `expand`, `build_context`, `gate`, `generate`, `reflect`
   - `build_stages(session, provider, settings) -> Stages` — đọc các cờ
   - `async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer`
 
@@ -1539,6 +1779,9 @@ def _stages(**overrides) -> Stages:
     async def retrieve(plan, trace):
         return [_candidate(f"passage for {plan.queries[0]}")]
 
+    async def expand(candidates, trace):
+        return candidates
+
     async def generate(query, context, trace):
         return "answer", ()
 
@@ -1547,6 +1790,7 @@ def _stages(**overrides) -> Stages:
         plan=noops.plan,
         retrieve=retrieve,
         fuse=noops.fuse,
+        expand=expand,
         build_context=noops.build_context_stage,
         gate=noops.gate,
         generate=generate,
@@ -1635,7 +1879,7 @@ async def test_every_stage_writes_one_trace_entry_per_pass():
 
     recorded = [n.node for n in result.trace.nodes]
     assert recorded == [
-        "rewrite", "plan", "retrieve", "fuse", "build_context", "gate",
+        "rewrite", "plan", "retrieve", "fuse", "expand", "build_context", "gate",
         "generate", "reflect",
     ]
 
@@ -1679,8 +1923,15 @@ async def plan(query: Query, trace: Trace) -> Plan:
 
 
 async def fuse(query: Query, candidates: list[Candidate], trace: Trace) -> list[Candidate]:
-    """R2 (RRF) và R3 (rerank) thay cái này."""
-    return candidates
+    """R2 (RRF) và R3 (rerank) thay cái này.
+
+    Nhát cắt độ sâu là việc thật, không phải no-op: retriever trả về sâu
+    over_fetch, và chỉ retrieval_top_k đầu bảng mới đáng nở ra thành parent.
+    Mọi phiên bản của stage này đều kết thúc bằng đúng nhát cắt đó.
+    """
+    from app.config import get_settings
+
+    return candidates[: get_settings().retrieval_top_k]
 
 
 def build_context_stage(previous: Context, candidates: list[Candidate], trace: Trace) -> Context:
@@ -1723,6 +1974,7 @@ class Stages:
     plan: Callable
     retrieve: Callable
     fuse: Callable
+    expand: Callable
     build_context: Callable
     gate: Callable
     generate: Callable
@@ -1769,6 +2021,7 @@ async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer:
         plan = await _run("plan", stages.plan, trace, query, trace)
         candidates = await _run("retrieve", stages.retrieve, trace, plan, trace)
         candidates = await _run("fuse", stages.fuse, trace, query, candidates, trace)
+        candidates = await _run("expand", stages.expand, trace, candidates, trace)
         context = await _run("build_context", stages.build_context, trace,
                              context, candidates, trace)
         verdict = await _run("gate", stages.gate, trace, query, context, trace)
@@ -1788,12 +2041,16 @@ async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer:
 """Dựng tập stage từ các cờ. Đây là nơi duy nhất biết bản triển khai đang đứng
 ở bậc nào của thang."""
 
+import asyncio
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core.generator import generate as _generate
+from app.core.parent_expander import expand_parents
 from app.core.pipeline import Stages
 from app.core.retrievers.vector import VectorRetriever
+from app.repositories.chunk_repository import ChunkRepository
 from app.core.stages import noops
 from shared.llm import AsyncLLMProvider
 
@@ -1803,12 +2060,16 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
     # R2 thêm BM25Retriever ở đây, R5 thêm BrowseRetriever, R8 thêm WebRetriever.
 
     async def retrieve(plan, trace):
-        import asyncio
-
+        # LƯU Ý cho R2: các retriever này dùng chung một AsyncSession, và gather
+        # hai cái cùng truy vấn database sẽ ném "another operation is in
+        # progress". R0 chỉ có một retriever nên gather hôm nay vẫn an toàn.
         results = await asyncio.gather(*(r.search(plan) for r in retrievers))
         trace.record("retrieve_detail", ms=0, per_source={r.source: len(x)
                                                           for r, x in zip(retrievers, results)})
         return [candidate for group in results for candidate in group]
+
+    async def expand(candidates, trace):
+        return await expand_parents(ChunkRepository(session), candidates)
 
     async def generate(query, context, trace):
         return await _generate(query, context, provider)
@@ -1818,6 +2079,7 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
         plan=noops.plan,
         retrieve=retrieve,
         fuse=noops.fuse,
+        expand=expand,
         build_context=noops.build_context_stage,
         gate=noops.gate,
         generate=generate,

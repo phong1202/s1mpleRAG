@@ -60,6 +60,9 @@ Settled. If the implementation disagrees with a row here, the implementation is 
 | 17 | Testing | `AsyncStubProvider` for every LLM node | The whole ladder is testable with no API key, exactly as Phase 1a is |
 | 18 | Primary metric | `recall@10`; `MRR` for ranking quality | One gold chunk per question makes `precision@10` structurally meaningless |
 | 19 | Eval set | **28 items, fixed at R1**, never grown mid-ladder | A set that changes between stages makes every before/after comparison meaningless |
+| 20 | Retrieval unit | **Candidates are children all the way to the expansion stage** | Fusion and the cross-encoder score a 150-token child that is entirely about one thing, not the 700-token parent containing it |
+| 21 | Parent expansion | Its own stage between `fuse` and `build_context` | Collapsing inside the SQL drops every child that lost its parent before fusion could rescue it, and `build_context` stays a pure unit |
+| 22 | Retriever depth | Retrievers return `over_fetch` deep and never truncate to `top_k` | How deep to read is the consumer's decision; the cut lives in `fuse`, which R2 and R3 replace |
 
 ---
 
