@@ -1348,10 +1348,40 @@ Cộng dồn qua các vòng, bỏ trùng, đánh số passage, cắt ở ranh gi
 **Files:**
 - Create: `app/core/context_builder.py`
 - Create: `tests/test_context_builder.py`
+- Modify: `pyproject.toml`, `uv.lock`, `Dockerfile`
 
 **Interfaces:**
 - Consumes: `Context`, `list[Candidate]`, `Settings.context_token_budget`
 - Produces: `build_context(previous: Context, candidates: list[Candidate], budget: int) -> Context`
+
+- [ ] **Step 0: Thêm bộ tách token**
+
+```
+uv add tiktoken
+```
+
+Ngân sách được tính bằng token, và số ký tự không phải là đại lượng thay thế được.
+`electronic invoice` dài 18 ký tự và tốn 3 token; `Nghị định 123/2020/NĐ-CP` dài 24 ký tự và tốn
+**15** token. Một corpus tiếng Việt tiêu ngân sách nhanh gấp khoảng 3,7 lần trên mỗi ký tự so với
+tiếng Anh, nên ước lượng kiểu `len(text) / 4` sẽ làm tràn context của model mà không có gì báo vì sao.
+
+`tiktoken.get_encoding()` tải bảng BPE 1,7 MB ở lần dùng đầu tiên và cache dưới thư mục tạm của hệ
+thống — nghĩa là một lời gọi mạng ngay lúc **import**, từ một container có thể không có đường ra
+Internet. Thay vào đó, nướng sẵn nó vào image:
+
+```dockerfile
+# Dockerfile -- ngay sau `RUN uv sync --frozen --no-dev`
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
+RUN mkdir -p "$TIKTOKEN_CACHE_DIR" \
+    && python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+```
+
+Nhớ thêm `/opt/tiktoken` vào dòng `chown -R appuser:appuser` đang có. Kiểm bằng
+`docker run --rm --network none <image> python -c "import app.core.context_builder"`.
+
+> Dùng đúng bản uv mà Dockerfile đã ghim (`ghcr.io/astral-sh/uv:0.12.7`). Bản uv cũ hơn sẽ viết lại
+> `uv.lock` về revision cũ và xoá khoảng 900 dòng metadata, biến một thay đổi 175 dòng thành xung
+> đột 2000 dòng với phase-1.
 
 - [ ] **Step 1: Viết test đỏ**
 
@@ -1359,8 +1389,8 @@ Cộng dồn qua các vòng, bỏ trùng, đánh số passage, cắt ở ranh gi
 # tests/test_context_builder.py
 import uuid
 
-from app.core.contracts import Candidate, Context, DocRef, WebRef
 from app.core.context_builder import build_context
+from app.core.contracts import Candidate, Context, DocRef, WebRef
 
 
 def _candidate(rank: int, text: str, source: str = "vector", parent=None) -> Candidate:
@@ -1390,8 +1420,8 @@ def test_context_accumulates_across_iterations():
 
 
 def test_the_same_parent_is_not_added_twice():
-    """Vòng hai lấy lại phần lớn kết quả của vòng một. Không bỏ trùng thì ngân
-    sách bị lấp đầy bằng bản sao."""
+    """Vòng hai tìm lại phần lớn những gì vòng một đã tìm. Không khử trùng thì
+    ngân sách đầy bằng các bản sao."""
     parent = uuid.uuid4()
     first = build_context(Context.empty(), [_candidate(1, "alpha", parent=parent)], 8000)
 
@@ -1401,8 +1431,8 @@ def test_the_same_parent_is_not_added_twice():
 
 
 def test_ordinals_are_stable_and_one_based():
-    """Generator in ra chính những con số này và ánh xạ trích dẫn ngược qua
-    chúng. Đánh số lại ở lượt hai sẽ trỏ lại toàn bộ trích dẫn."""
+    """Generator in các số này ra prompt rồi ánh xạ trích dẫn ngược qua chúng.
+    Đánh số lại ở lượt hai sẽ khiến mọi trích dẫn trỏ sai chỗ."""
     first = build_context(Context.empty(), [_candidate(1, "alpha")], 8000)
     second = build_context(first, [_candidate(1, "beta")], 8000)
 
@@ -1410,7 +1440,7 @@ def test_ordinals_are_stable_and_one_based():
 
 
 def test_the_budget_drops_whole_passages_never_truncates_one():
-    """Nửa đoạn văn tệ hơn là không có đoạn nào: model sẽ trả lời từ một câu mà
+    """Nửa đoạn văn tệ hơn không có đoạn văn: model trả lời dựa trên một câu mà
     mệnh đề điều kiện của nó đã bị cắt mất."""
     long_text = "word " * 400
 
@@ -1424,9 +1454,42 @@ def test_the_budget_drops_whole_passages_never_truncates_one():
     assert context.token_count <= 900
 
 
+def test_the_budget_stops_at_the_first_passage_that_does_not_fit():
+    """Một đoạn hạng thấp không được vượt lên trước đoạn hạng cao chỉ vì nó
+    ngắn hơn: thứ hạng là phán đoán về mức liên quan, độ dài thì không.
+
+    Ba đoạn có độ dài cố tình khác nhau. Nếu chúng dài bằng nhau thì cái không
+    vừa sẽ chỉ kéo theo những cái cũng không vừa, và "dừng lại" với "bỏ qua"
+    trở nên không phân biệt được."""
+    context = build_context(
+        Context.empty(),
+        [
+            _candidate(1, "a " * 300),  # 301 token, vừa
+            _candidate(2, "b " * 300),  # 301 token, không vừa
+            _candidate(3, "c " * 50),  # 51 token, vừa -- nhưng vẫn phải bị bỏ
+        ],
+        budget=500,
+    )
+
+    assert [p.ordinal for p in context.passages] == [1]
+
+
+def test_a_duplicate_never_ends_the_loop():
+    """Một passage đã được giữ thì không tốn gì, nên nó không được phép là thứ
+    làm vỡ ngân sách. Ở R6, vòng hai tìm lại phần lớn vòng một và các bản trùng
+    đó tới trước: tính tiền cho một cái sẽ khiến vòng hai không thêm được gì."""
+    parent = uuid.uuid4()
+    held = _candidate(1, "a " * 300, parent=parent)  # 301 token
+    first = build_context(Context.empty(), [held], budget=400)
+
+    second = build_context(first, [held, _candidate(2, "c " * 20)], budget=400)
+
+    assert [p.text for p in second.passages] == ["a " * 300, "c " * 20]
+
+
 def test_web_candidates_land_in_the_untrusted_list():
-    """R8 còn xa, nhưng phép tách này là cấu trúc. Nếu text từ web có thể lọt
-    vào `passages` thì bộ dựng prompt không còn cách nào giữ nó ra ngoài."""
+    """R8 còn xa, nhưng phép tách là cấu trúc. Nếu văn bản web lọt được vào
+    `passages` thì bên dựng prompt sẽ không còn cách nào giữ nó ra ngoài."""
     web = Candidate(
         source="web", rank=1, score=1.0, text="from the internet",
         ref=WebRef(url="https://example.test", title="Example"),
@@ -1444,17 +1507,20 @@ def test_web_candidates_land_in_the_untrusted_list():
 
 ```python
 # app/core/context_builder.py
-"""Biến các ứng viên đã xếp hạng thành ngữ cảnh prompt có ngân sách token.
+"""Biến danh sách candidate đã xếp hạng thành ngữ cảnh prompt có ngân sách token.
 
-Ổn định từ R0 tới R8. Điều duy nhất nó không bao giờ được làm là trộn passage
-tin cậy với không tin cậy, và điều duy nhất nó luôn phải làm là cộng dồn thay
-vì thay thế: vòng lặp của R6 phụ thuộc vào cả hai.
+Ổn định từ R0 tới R8. Điều nó không bao giờ được làm là trộn passage tin cậy với
+không tin cậy, và điều nó luôn phải làm là cộng dồn chứ không thay thế: vòng lặp
+của R6 phụ thuộc vào cả hai.
 """
 
 import tiktoken
 
 from app.core.contracts import Candidate, Context, DocRef, Passage, WebPassage
 
+# Nạp lúc import. Trong image nó đọc TIKTOKEN_CACHE_DIR do Dockerfile đổ sẵn lúc
+# build; nếu không thì lần gọi đầu tải về bảng BPE 1,7 MB và cache dưới thư mục
+# tạm của hệ thống.
 _ENCODER = tiktoken.get_encoding("cl100k_base")
 
 
@@ -1471,38 +1537,45 @@ def build_context(previous: Context, candidates: list[Candidate], budget: int) -
     used = previous.token_count
 
     for candidate in candidates:
-        cost = _count(candidate.text)
-        if used + cost > budget:
-            # Bỏ nguyên phần đuôi. Cắt giữa một passage tạo ra một câu thiếu
-            # mệnh đề điều kiện, và câu đó đọc như một sự thật.
+        ref = candidate.ref
+        seen = (
+            ref.parent_id in seen_parents
+            if isinstance(ref, DocRef)
+            else ref.url in seen_urls
+        )
+        if seen:
+            # Kiểm trước ngân sách, vì một passage đã giữ rồi thì không tốn gì
+            # và do đó không được phép là thứ kết thúc vòng lặp. Ở R6 vòng hai
+            # tìm lại phần lớn vòng một và các bản trùng đó tới trước, nếu không
+            # thì vòng hai sẽ chẳng thêm được gì cả.
             continue
 
-        if isinstance(candidate.ref, DocRef):
-            if candidate.ref.parent_id in seen_parents:
-                continue
-            seen_parents.add(candidate.ref.parent_id)
-            ordinal += 1
-            passages.append(Passage(ordinal=ordinal, text=candidate.text, ref=candidate.ref))
+        cost = _count(candidate.text)
+        if used + cost > budget:
+            # Dừng lại, chứ không nhảy tới một đoạn ngắn hơn. Cắt giữa đoạn tạo
+            # ra một câu thiếu mệnh đề điều kiện, và nó đọc như một sự thật; còn
+            # để một đoạn ngắn hơn, hạng thấp hơn vượt lên trước một đoạn dài là
+            # lấy "vừa chỗ" thay cho "liên quan" -- một phán đoán mà hàm này
+            # không có thông tin để đưa ra.
+            break
+
+        ordinal += 1
+        if isinstance(ref, DocRef):
+            seen_parents.add(ref.parent_id)
+            passages.append(Passage(ordinal=ordinal, text=candidate.text, ref=ref))
         else:
-            if candidate.ref.url in seen_urls:
-                continue
-            seen_urls.add(candidate.ref.url)
-            ordinal += 1
-            untrusted.append(
-                WebPassage(ordinal=ordinal, text=candidate.text, ref=candidate.ref)
-            )
+            seen_urls.add(ref.url)
+            untrusted.append(WebPassage(ordinal=ordinal, text=candidate.text, ref=ref))
         used += cost
 
     return Context(passages=tuple(passages), untrusted=tuple(untrusted), token_count=used)
 ```
 
-- [ ] **Step 4: Chạy test** — PASS, 5 test.
+- [ ] **Step 4: Chạy test** — PASS, 7 test.
 
 - [ ] **Step 5: Suite đầy đủ, rồi dừng**
 
 Commit message đề xuất: `feat(core): add the context builder`
-
----
 
 ## Task 7: `app/core/generator.py`
 

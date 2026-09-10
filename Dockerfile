@@ -22,9 +22,16 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
 COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --frozen --no-dev
 
+# The BPE table tiktoken needs is a 1.7 MB download it would otherwise fetch on
+# first import -- at runtime, from a container that may have no route out. Bake
+# it in instead, so importing the context builder never touches the network.
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
+RUN mkdir -p "$TIKTOKEN_CACHE_DIR" \
+    && python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+
 COPY . .
 
-RUN useradd --create-home appuser && chown -R appuser:appuser /code /opt/venv
+RUN useradd --create-home appuser && chown -R appuser:appuser /code /opt/venv /opt/tiktoken
 USER appuser
 
 EXPOSE 8000
