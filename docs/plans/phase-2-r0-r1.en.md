@@ -55,13 +55,14 @@ app/core/                          ★ NEW — the read path, API-side only
   deps.py                          assembles the stage callables from settings flags (Task 8)
   retrievers/
     base.py                        Retriever Protocol (Task 5)
-    vector.py                      R0 — embed, search, expand to parents (Task 5)
+    vector.py                      R0 — embed, search, rank children (Task 5)
   stages/
     noops.py                       the five no-op seams (Task 8)
+  parent_expander.py               R0 — collapse children to parents (Task 4b)
   context_builder.py               accumulate, dedupe, token budget, untrusted split (Task 6)
   generator.py                     numbered sources, citation mapping (Task 7)
 app/repositories/
-  chunk_repository.py              ★ NEW — the DISTINCT ON retrieval query (Task 4)
+  chunk_repository.py              ★ NEW — child-level search + parent fetch (Task 4)
 app/schemas/query.py               ★ NEW — request/response bodies (Task 9)
 app/services/query_service.py      ★ NEW — orchestrates app/core/ (Task 9)
 app/controllers/query_controller.py ★ NEW — POST /query (Task 9)
@@ -75,7 +76,9 @@ alembic/versions/                  ★ ONE new revision (Task 10)
 tests/
   test_contracts.py                Task 1
   test_async_llm_provider.py       Task 2
+  helpers.py                       shared seed data (Task 4)
   test_chunk_repository.py         Task 4
+  test_parent_expander.py          Task 4b
   test_vector_retriever.py         Task 5
   test_context_builder.py          Task 6
   test_generator.py                Task 7
@@ -690,42 +693,49 @@ Proposed commit message: `feat(config): add retrieval settings and stage flags`
 
 ## Task 4: `app/repositories/chunk_repository.py`
 
-The query that makes parent/child work, and the two traps it closes.
+The query that feeds every later stage, and the collapse it deliberately does **not** do.
 
 **Files:**
 - Create: `app/repositories/chunk_repository.py`
-- Create: `tests/test_chunk_repository.py`
+- Create: `tests/helpers.py`, `tests/test_chunk_repository.py`
 
 **Interfaces:**
 - Consumes: `AsyncSession`, `Settings.retrieval_ef_search`
-- Produces: `ChunkRepository(session).search(vector: list[float], over_fetch: int, top_k: int, filters: Filters) -> list[ParentHit]` where `ParentHit` is a row with `parent_id`, `parent_content`, `child_id`, `child_content`, `page_number`, `distance`, `document_id`, `filename`
+- Produces:
+  - `ChunkRepository(session).search(vector: list[float], over_fetch: int, filters: Filters) -> list[ChildHit]`
+  - `ChunkRepository(session).fetch_parents(parent_ids: list[UUID]) -> dict[UUID, str]`
+
+> **Search returns children, not parents.** The collapse to parents is Task 4b, and it runs after
+> fusion and reranking. A cross-encoder scoring a 700-token parent has to find the one relevant
+> sentence among six irrelevant ones; scoring the 150-token child it reads nothing else. Collapsing
+> here would also drop every child that lost its parent before fusion had a chance to rescue it.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
-# tests/test_chunk_repository.py
-"""Against real pgvector. The similarity ordering, the DISTINCT ON collapse
-and the over-fetch are precisely the parts most likely to be silently wrong,
-so none of them is mocked."""
+# tests/helpers.py
+"""Seed data shared by the retrieval tests.
+
+It lives here rather than in one of the test modules because the search, the
+parent expansion and the retriever all need the same corpus, and a test module
+importing another test module's private helper breaks the moment either is
+renamed.
+"""
 
 import uuid
 
-import pytest
-
-from app.core.contracts import Filters
 from app.models import ChildChunk, Document, ParentChunk
-from app.repositories.chunk_repository import ChunkRepository
-
-pytestmark = pytest.mark.asyncio
 
 
-def _unit(index: int, dimensions: int = 1536) -> list[float]:
+def unit_vector(index: int, dimensions: int = 1536) -> list[float]:
     vector = [0.0] * dimensions
     vector[index] = 1.0
     return vector
 
 
-async def _seed(session, children_per_parent: int = 3, parents: int = 4):
+async def seed_chunks(session, children_per_parent: int = 3, parents: int = 4):
+    """`parents` parents, each with `children_per_parent` children, numbered
+    consecutively so child `i` is the one and only match for unit_vector(i)."""
     document = Document(
         sha256_hash=uuid.uuid4().hex * 2,
         filename="decree.pdf",
@@ -757,52 +767,53 @@ async def _seed(session, children_per_parent: int = 3, parents: int = 4):
                     contextualized=f"ctx {index}",
                     page_number=p + 1,
                     token_count=150,
-                    embedding=_unit(index),
+                    embedding=unit_vector(index),
                     category="LEGAL",
                 )
             )
             index += 1
     await session.flush()
     return document
+```
+
+```python
+# tests/test_chunk_repository.py
+"""Against real pgvector. The similarity ordering and the over-fetch are
+precisely the parts most likely to be silently wrong, so neither is mocked."""
+
+import pytest
+
+from app.core.contracts import Filters
+from app.repositories.chunk_repository import ChunkRepository
+from tests.helpers import seed_chunks, unit_vector
+
+pytestmark = pytest.mark.asyncio
 
 
-async def test_search_returns_one_row_per_parent(db_session):
-    """Twelve children collapse to four parents. Without DISTINCT ON the same
-    parent would arrive three times and crowd out the rest of the context."""
-    await _seed(db_session)
+async def test_search_returns_every_matching_child_not_one_per_parent(db_session):
+    """Search is child-level. Collapsing here would hand the reranker 700-token
+    parents and drop the children that lost their parent before fusion could
+    rescue them."""
+    await seed_chunks(db_session)
 
     hits = await ChunkRepository(db_session).search(
-        vector=_unit(0), over_fetch=50, top_k=10, filters=Filters()
+        vector=unit_vector(0), over_fetch=50, filters=Filters()
     )
 
-    assert len({hit.parent_id for hit in hits}) == len(hits) == 4
-
-
-async def test_search_keeps_the_best_matching_child_of_each_parent(db_session):
-    """DISTINCT ON keeps the FIRST row per group in ORDER BY order, so
-    parent_id must lead that ORDER BY. If it does not, Postgres keeps an
-    arbitrary child, the citation points at the wrong page, and nothing
-    raises."""
-    await _seed(db_session)
-
-    # Child 2 is the third child of parent 0 -- the best match must be that
-    # child, not child 0, which merely happens to be inserted first.
-    hits = await ChunkRepository(db_session).search(
-        vector=_unit(2), over_fetch=50, top_k=10, filters=Filters()
-    )
-
-    assert hits[0].child_content == "child 2"
+    assert len(hits) == 12
+    assert len({hit.parent_id for hit in hits}) == 4
 
 
 async def test_search_orders_by_similarity_not_insertion(db_session):
     """`<#>` is NEGATIVE inner product: ASC is nearest first. Writing DESC
     reverses the entire result set and raises nothing."""
-    await _seed(db_session)
+    await seed_chunks(db_session)
 
     hits = await ChunkRepository(db_session).search(
-        vector=_unit(6), over_fetch=50, top_k=10, filters=Filters()
+        vector=unit_vector(6), over_fetch=50, filters=Filters()
     )
 
+    assert hits[0].child_content == "child 6"
     assert hits[0].page_number == 3, "child 6 lives on parent 2, page 3"
     assert hits[0].distance <= hits[1].distance
 
@@ -812,35 +823,43 @@ async def test_over_fetch_takes_the_nearest_candidates_not_an_arbitrary_slice(db
     than the corpus every ordering returns the same rows and the ordering of
     the candidates CTE is untested. Only a cut-off narrower than the corpus
     shows it sorts nearest-first."""
-    await _seed(db_session)
+    await seed_chunks(db_session)
 
     hits = await ChunkRepository(db_session).search(
-        vector=_unit(6), over_fetch=1, top_k=10, filters=Filters()
+        vector=unit_vector(6), over_fetch=1, filters=Filters()
     )
 
     assert [hit.child_content for hit in hits] == ["child 6"]
 
 
-async def test_top_k_counts_parents_not_children(db_session):
-    """Collapsing after LIMIT would return fewer than top_k parents. The
-    over-fetch exists so the collapse still yields the requested count."""
-    await _seed(db_session, parents=4)
-
-    hits = await ChunkRepository(db_session).search(
-        vector=_unit(0), over_fetch=50, top_k=2, filters=Filters()
-    )
-
-    assert len(hits) == 2
-
-
 async def test_category_filter_narrows_the_candidate_pool(db_session):
-    await _seed(db_session)
+    await seed_chunks(db_session)
 
     hits = await ChunkRepository(db_session).search(
-        vector=_unit(0), over_fetch=50, top_k=10, filters=Filters(category="FINANCIAL")
+        vector=unit_vector(0), over_fetch=50, filters=Filters(category="FINANCIAL")
     )
 
     assert hits == []
+
+
+async def test_fetch_parents_returns_the_content_of_every_id(db_session):
+    """One statement for the whole set: the expansion must not run a query per
+    parent."""
+    await seed_chunks(db_session)
+    repository = ChunkRepository(db_session)
+    hits = await repository.search(
+        vector=unit_vector(0), over_fetch=50, filters=Filters()
+    )
+    parent_ids = list({hit.parent_id for hit in hits})
+
+    contents = await repository.fetch_parents(parent_ids)
+
+    assert set(contents) == set(parent_ids)
+    assert sorted(contents.values()) == ["parent 0", "parent 1", "parent 2", "parent 3"]
+
+
+async def test_fetch_parents_of_nothing_asks_the_database_nothing(db_session):
+    assert await ChunkRepository(db_session).fetch_parents([]) == {}
 ```
 
 - [ ] **Step 2: Run it to verify it fails** — module does not exist.
@@ -849,7 +868,14 @@ async def test_category_filter_narrows_the_candidate_pool(db_session):
 
 ```python
 # app/repositories/chunk_repository.py
-"""R0 retrieval. Read-only: this module never writes."""
+"""R0 retrieval. Read-only: this module never writes.
+
+`search` returns CHILDREN, not parents. The collapse to parents is a separate
+step (app/core/parent_expander.py) that runs after fusion and reranking,
+because a cross-encoder scoring a 700-token parent has to find the one
+relevant sentence buried in six irrelevant ones, while the same model scoring
+the 150-token child reads nothing but the relevant text.
+"""
 
 import uuid
 from dataclasses import dataclass
@@ -864,9 +890,12 @@ from app.core.contracts import Filters
 # into CAST(:qvec AS vector) makes Postgres infer the parameter as `vector`,
 # and the driver has no codec for that type -- the cast through text is what
 # keeps the parameter a plain string.
+#
+# The ordering and the LIMIT stay inside a CTE over child_chunks alone: adding
+# the documents join above them can cost the HNSW index scan.
 _SEARCH = text("""
 WITH candidates AS (
-  SELECT c.id, c.parent_id, c.page_number, c.content,
+  SELECT c.id, c.parent_id, c.document_id, c.page_number, c.content,
          c.embedding <#> CAST(CAST(:qvec AS text) AS vector) AS distance
   FROM   child_chunks c
   WHERE  (CAST(:category AS text) IS NULL OR c.category = CAST(:category AS text))
@@ -874,34 +903,27 @@ WITH candidates AS (
   -- ASC: <#> is NEGATIVE inner product, so nearest sorts first
   ORDER  BY c.embedding <#> CAST(CAST(:qvec AS text) AS vector)
   LIMIT  :over_fetch
-),
-best_per_parent AS (
-  SELECT DISTINCT ON (parent_id)
-         parent_id, distance, page_number, id AS child_id, content AS child_content
-  FROM   candidates
-  ORDER  BY parent_id, distance          -- parent_id MUST lead, or an arbitrary
-)                                        -- child wins its group with no error
-SELECT p.id  AS parent_id,
-       p.content AS parent_content,
-       b.child_id, b.child_content, b.page_number, b.distance,
-       d.id AS document_id, d.filename
-FROM   best_per_parent b
-JOIN   parent_chunks p ON p.id = b.parent_id
-JOIN   documents      d ON d.id = p.document_id
-ORDER  BY b.distance
-LIMIT  :top_k
+)
+SELECT c.id AS child_id, c.parent_id, c.document_id, c.page_number,
+       c.content AS child_content, c.distance, d.filename
+FROM   candidates c
+JOIN   documents d ON d.id = c.document_id
+ORDER  BY c.distance
+""")
+
+_PARENTS = text("""
+SELECT id, content FROM parent_chunks WHERE id = ANY(CAST(:ids AS uuid[]))
 """)
 
 
 @dataclass(frozen=True)
-class ParentHit:
-    parent_id: uuid.UUID
-    parent_content: str
+class ChildHit:
     child_id: uuid.UUID
-    child_content: str
-    page_number: int
-    distance: float
+    parent_id: uuid.UUID
     document_id: uuid.UUID
+    page_number: int
+    child_content: str
+    distance: float
     filename: str
 
 
@@ -910,8 +932,8 @@ class ChunkRepository:
         self._session = session
 
     async def search(
-        self, vector: list[float], over_fetch: int, top_k: int, filters: Filters
-    ) -> list[ParentHit]:
+        self, vector: list[float], over_fetch: int, filters: Filters
+    ) -> list[ChildHit]:
         # pgvector's ef_search defaults to 40. Over-fetching 50 out of a queue
         # 40 wide degrades the tail silently, so the session sets it
         # explicitly. set_config rather than SET LOCAL: SET is a utility
@@ -928,17 +950,201 @@ class ChunkRepository:
                 "category": filters.category,
                 "document_id": filters.document_id,
                 "over_fetch": over_fetch,
-                "top_k": top_k,
             },
         )
-        return [ParentHit(**row) for row in rows.mappings()]
+        return [ChildHit(**row) for row in rows.mappings()]
+
+    async def fetch_parents(self, parent_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """One statement for the whole set. Fetching per parent inside the
+        expansion loop is the classic N+1, and it hides well because every
+        individual query is fast."""
+        if not parent_ids:
+            return {}
+        rows = await self._session.execute(_PARENTS, {"ids": parent_ids})
+        return {row.id: row.content for row in rows}
 ```
 
 - [ ] **Step 4: Run the tests** — PASS, 6 tests.
 
 - [ ] **Step 5: Full suite, then stop**
 
-Proposed commit message: `feat(core): add the parent-collapsing retrieval query`
+Proposed commit message: `feat(core): add the child-level retrieval query`
+
+---
+
+## Task 4b: `app/core/parent_expander.py`
+
+The collapse Task 4 left out, as its own stage.
+
+**Files:**
+- Create: `app/core/parent_expander.py`
+- Create: `tests/test_parent_expander.py`
+
+**Interfaces:**
+- Consumes: `ChunkRepository.fetch_parents`, `list[Candidate]`
+- Produces: `expand_parents(repository, candidates) -> list[Candidate]`
+
+The three traps this stage closes, all silent:
+
+| Trap | Consequence |
+|---|---|
+| Keeping an arbitrary child of a parent | The citation points at a page the answer did not come from |
+| Running one query per parent | N+1, and every individual query is fast enough to hide it |
+| Leaving the pre-collapse ranks | The list reads 1, 4, 7 and tells later stages there are better candidates they cannot see |
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_parent_expander.py
+"""The collapse that Task 4's search deliberately does not do."""
+
+from dataclasses import replace
+
+import pytest
+
+from app.core.contracts import Filters, Plan
+from app.core.parent_expander import expand_parents
+from app.core.retrievers.vector import VectorRetriever
+from app.repositories.chunk_repository import ChunkRepository
+from shared.llm import AsyncStubProvider
+from tests.helpers import seed_chunks
+
+pytestmark = pytest.mark.asyncio
+
+
+async def _candidates(session, query: str = "hoa don"):
+    retriever = VectorRetriever(session, AsyncStubProvider(dimensions=1536))
+    return await retriever.search(
+        Plan(strategy="VECTOR_ONLY", queries=(query,), filters=Filters())
+    )
+
+
+async def test_expansion_returns_one_candidate_per_parent(db_session):
+    """Twelve children collapse to four parents. Without the collapse the same
+    parent arrives three times and crowds out the rest of the context."""
+    await seed_chunks(db_session)
+    candidates = await _candidates(db_session)
+    assert len(candidates) == 12
+
+    expanded = await expand_parents(ChunkRepository(db_session), candidates)
+
+    assert len(expanded) == 4
+    assert len({c.ref.parent_id for c in expanded}) == 4
+
+
+async def test_expansion_swaps_child_text_for_parent_text(db_session):
+    """The child is what got scored; the parent is what the model reads."""
+    await seed_chunks(db_session)
+    candidates = await _candidates(db_session)
+
+    expanded = await expand_parents(ChunkRepository(db_session), candidates)
+
+    assert {c.text for c in expanded} == {"parent 0", "parent 1", "parent 2", "parent 3"}
+
+
+async def test_the_best_ranked_child_wins_its_parent(db_session):
+    """The winner must be the highest-ranked child of the parent, not whichever
+    one happens to be first in insertion order. Taking any other child cites a
+    page the answer did not come from, and nothing raises."""
+    await seed_chunks(db_session)
+    candidates = await _candidates(db_session)
+    best_parent = candidates[0].ref.parent_id
+    siblings = [c for c in candidates if c.ref.parent_id == best_parent]
+    assert len(siblings) == 3, "the top parent must have losing siblings to discard"
+
+    expanded = await expand_parents(ChunkRepository(db_session), candidates)
+
+    assert expanded[0].ref.child_id == candidates[0].ref.child_id
+    assert expanded[0].ref.child_id not in {c.ref.child_id for c in siblings[1:]}
+
+
+async def test_the_citation_still_points_at_the_child(db_session):
+    """Citation precision survives the collapse: the text widens to the parent
+    while the reference stays on the child and its page."""
+    await seed_chunks(db_session)
+    candidates = await _candidates(db_session)
+
+    expanded = await expand_parents(ChunkRepository(db_session), candidates)
+
+    assert expanded[0].ref == candidates[0].ref
+    assert expanded[0].text != candidates[0].text
+
+
+async def test_expanded_ranks_are_contiguous_from_one(db_session):
+    """The collapse removes entries. Leaving the original ranks would tell every
+    later stage there are better candidates it cannot see.
+
+    The input is reordered so all three children of one parent hold ranks 1-3:
+    the surviving ranks are then 1, 4, ... and only a reassignment makes them
+    contiguous. Left to the natural order the winners can land on 1, 2, 3, 4 by
+    chance, and the test passes while asserting nothing."""
+    await seed_chunks(db_session)
+    candidates = await _candidates(db_session)
+    crowded = candidates[0].ref.parent_id
+    siblings = [c for c in candidates if c.ref.parent_id == crowded]
+    others = [c for c in candidates if c.ref.parent_id != crowded]
+    reordered = [
+        replace(c, rank=rank) for rank, c in enumerate(siblings + others, start=1)
+    ]
+
+    expanded = await expand_parents(ChunkRepository(db_session), reordered)
+
+    assert [c.rank for c in expanded] == [1, 2, 3, 4]
+```
+
+- [ ] **Step 2: Run it to verify it fails** — module does not exist.
+
+- [ ] **Step 3: Write the implementation**
+
+```python
+# app/core/parent_expander.py
+"""The collapse from children to parents.
+
+It runs AFTER fusion and reranking rather than inside the search. Those stages
+score a candidate against the question, and a 150-token child is entirely about
+one thing while the 700-token parent containing it is mostly about six others.
+Collapsing first would hand the reranker the diluted version and throw away
+every child that did not win its parent before anything had a chance to rescue
+it.
+"""
+
+import uuid
+from dataclasses import replace
+
+from app.core.contracts import Candidate, DocRef
+from app.repositories.chunk_repository import ChunkRepository
+
+
+async def expand_parents(
+    repository: ChunkRepository, candidates: list[Candidate]
+) -> list[Candidate]:
+    """One candidate per parent: the parent's text, the winning child's ref.
+
+    `candidates` arrives rank-ordered, so the first child of a parent to appear
+    is its best one, and that child's page_number is what the citation points
+    at. Keeping any other child cites a page the answer did not come from, and
+    nothing raises.
+    """
+    winners: dict[uuid.UUID, Candidate] = {}
+    for candidate in candidates:
+        if isinstance(candidate.ref, DocRef):
+            winners.setdefault(candidate.ref.parent_id, candidate)
+
+    contents = await repository.fetch_parents(list(winners))
+    # Ranks are reassigned because the collapse removes entries: a list that
+    # went 1, 2, 5, 9 would tell every later stage there are better candidates
+    # it cannot see.
+    return [
+        replace(candidate, rank=position, text=contents[parent_id].strip())
+        for position, (parent_id, candidate) in enumerate(winners.items(), start=1)
+    ]
+```
+
+- [ ] **Step 4: Run the tests** — PASS, 5 tests.
+
+- [ ] **Step 5: Full suite, then stop**
+
+Proposed commit message: `feat(core): add the parent expansion stage`
 
 ---
 
@@ -952,7 +1158,11 @@ Proposed commit message: `feat(core): add the parent-collapsing retrieval query`
 - Consumes: `ChunkRepository`, `AsyncLLMProvider.embed_query`, `Plan`
 - Produces:
   - `Retriever` Protocol: `source: Source`, `async def search(plan: Plan) -> list[Candidate]`
-  - `VectorRetriever(repository, provider, settings)`
+  - `VectorRetriever(session, provider)`
+
+The retriever returns the whole ranked list, `retrieval_over_fetch` deep. It does not truncate to
+`retrieval_top_k`: deciding how deep to read is the consumer's job, and at R2 the fusion needs the
+tail that a cut at 10 would have thrown away.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -963,17 +1173,22 @@ import pytest
 from app.core.contracts import DocRef, Filters, Plan
 from app.core.retrievers.vector import VectorRetriever
 from shared.llm import AsyncStubProvider
+from tests.helpers import seed_chunks
 
 pytestmark = pytest.mark.asyncio
 
 
-async def test_candidates_are_ranked_from_one_within_the_source(db_session):
-    """Rank is per source, one-based and contiguous. R2 divides by (k + rank);
-    a zero-based or gapped rank silently distorts every fused score."""
-    await _seed(db_session)          # same helper as tests/test_chunk_repository.py
-    retriever = VectorRetriever(db_session, AsyncStubProvider(dimensions=1536))
+def _retriever(session):
+    return VectorRetriever(session, AsyncStubProvider(dimensions=1536))
 
-    candidates = await retriever.search(
+
+async def test_candidates_are_ranked_from_one_within_the_source(db_session):
+    """Rank is per source, starts at 1 and has no gaps. R2 divides by
+    (k + rank); a rank starting at 0 or skipping a number silently skews every
+    fused score."""
+    await seed_chunks(db_session)
+
+    candidates = await _retriever(db_session).search(
         Plan(strategy="VECTOR_ONLY", queries=("hoa don",), filters=Filters())
     )
 
@@ -982,12 +1197,11 @@ async def test_candidates_are_ranked_from_one_within_the_source(db_session):
 
 
 async def test_candidate_carries_a_doc_ref_with_the_child_page(db_session):
-    """Citation precision comes from the child's page_number, not the parent's
-    span. A parent crossing two pages would otherwise cite the wrong one."""
-    await _seed(db_session)
-    retriever = VectorRetriever(db_session, AsyncStubProvider(dimensions=1536))
+    """Citation accuracy comes from the child's page_number, not the parent's
+    page range. A parent spanning two pages cites the wrong one."""
+    await seed_chunks(db_session)
 
-    candidates = await retriever.search(
+    candidates = await _retriever(db_session).search(
         Plan(strategy="VECTOR_ONLY", queries=("hoa don",), filters=Filters())
     )
 
@@ -996,11 +1210,24 @@ async def test_candidate_carries_a_doc_ref_with_the_child_page(db_session):
     assert candidates[0].text == candidates[0].text.strip()
 
 
-async def test_multiple_sub_queries_are_searched_and_merged(db_session):
-    """R4 emits up to three sub-queries. R0 never does, but the retriever must
-    already handle the list or R4 has to rewrite it."""
-    await _seed(db_session)
-    retriever = VectorRetriever(db_session, AsyncStubProvider(dimensions=1536))
+async def test_scores_are_similarity_not_distance(db_session):
+    """`<#>` returns NEGATIVE inner product. Reporting it unchanged would make
+    any later sort by score descending return the worst matches first."""
+    await seed_chunks(db_session)
+
+    candidates = await _retriever(db_session).search(
+        Plan(strategy="VECTOR_ONLY", queries=("hoa don",), filters=Filters())
+    )
+
+    assert candidates[0].score >= candidates[-1].score
+
+
+async def test_sub_queries_are_merged_without_duplicating_a_child(db_session):
+    """R4 emits up to three sub-queries that overlap heavily. Without the merge
+    a chunk matched by two of them arrives twice from one source and scores
+    twice in R2's fusion."""
+    await seed_chunks(db_session)
+    retriever = _retriever(db_session)
 
     one = await retriever.search(
         Plan(strategy="VECTOR_ONLY", queries=("a",), filters=Filters())
@@ -1009,7 +1236,9 @@ async def test_multiple_sub_queries_are_searched_and_merged(db_session):
         Plan(strategy="VECTOR_ONLY", queries=("a", "b"), filters=Filters())
     )
 
-    assert len({c.ref.parent_id for c in two}) >= len({c.ref.parent_id for c in one})
+    assert len(one) == len(two) == 12, "both queries reach the whole corpus"
+    assert len({c.ref.child_id for c in two}) == 12
+    assert [c.rank for c in two] == list(range(1, 13))
 ```
 
 - [ ] **Step 2: Run it to verify it fails** — module does not exist.
@@ -1025,8 +1254,13 @@ from app.core.contracts import Candidate, Plan, Source
 
 class Retriever(Protocol):
     """Adding a tool at R2, R5 or R8 means adding a class here and registering
-    it. The pipeline calls every enabled retriever concurrently and never
-    learns which ones exist."""
+    it. The pipeline calls every enabled retriever concurrently and never knows
+    which ones exist.
+
+    `source` is an attribute rather than a method because the pipeline needs to
+    label a retriever before calling it -- for the trace, and so fusion knows
+    how many lists it is merging.
+    """
 
     source: Source
 
@@ -1036,50 +1270,57 @@ class Retriever(Protocol):
 ```python
 # app/core/retrievers/vector.py
 import asyncio
+import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.contracts import Candidate, DocRef, Plan
-from app.repositories.chunk_repository import ChunkRepository
+from app.core.contracts import Candidate, DocRef, Plan, Source
+from app.repositories.chunk_repository import ChildHit, ChunkRepository
 from shared.llm import AsyncLLMProvider
 
 
 class VectorRetriever:
-    source = "vector"
+    source: Source = "vector"
 
     def __init__(self, session: AsyncSession, provider: AsyncLLMProvider) -> None:
         self._repository = ChunkRepository(session)
         self._provider = provider
 
     async def search(self, plan: Plan) -> list[Candidate]:
-        settings = get_settings()
+        over_fetch = get_settings().retrieval_over_fetch
         vectors = await asyncio.gather(
             *(self._provider.embed_query(q) for q in plan.queries)
         )
 
-        best: dict[object, tuple[float, object]] = {}
+        best: dict[uuid.UUID, ChildHit] = {}
         for vector in vectors:
+            # Sequential where the embeddings above are concurrent: these share
+            # one AsyncSession, and one connection cannot run two statements at
+            # once. Gathering them raises "another operation is in progress".
             hits = await self._repository.search(
-                vector=vector,
-                over_fetch=settings.retrieval_over_fetch,
-                top_k=settings.retrieval_top_k,
-                filters=plan.filters,
+                vector=vector, over_fetch=over_fetch, filters=plan.filters
             )
             for hit in hits:
-                # Sub-queries overlap. Keep each parent once, at its best
-                # distance, so rank stays contiguous.
-                current = best.get(hit.parent_id)
-                if current is None or hit.distance < current[0]:
-                    best[hit.parent_id] = (hit.distance, hit)
+                # Sub-queries overlap by design. Keeping each child once, at its
+                # best distance, is what stops one chunk from scoring twice in
+                # R2's fusion merely because it matched two phrasings of the
+                # same question.
+                current = best.get(hit.child_id)
+                if current is None or hit.distance < current.distance:
+                    best[hit.child_id] = hit
 
-        ordered = sorted(best.values(), key=lambda pair: pair[0])
+        # Deduplicate first, rank second. Ranking first would leave gaps where
+        # duplicates were removed, and R2 divides by (k + rank).
+        ordered = sorted(best.values(), key=lambda hit: hit.distance)
         return [
             Candidate(
                 source="vector",
                 rank=position,
-                score=-distance,          # <#> is negated; report similarity
-                text=hit.parent_content.strip(),
+                # <#> is negated inner product; report plain similarity, so a
+                # later sort by score cannot silently invert the ordering.
+                score=-hit.distance,
+                text=hit.child_content.strip(),
                 ref=DocRef(
                     document_id=hit.document_id,
                     parent_id=hit.parent_id,
@@ -1088,11 +1329,11 @@ class VectorRetriever:
                     filename=hit.filename,
                 ),
             )
-            for position, (distance, hit) in enumerate(ordered, start=1)
+            for position, hit in enumerate(ordered, start=1)
         ]
 ```
 
-- [ ] **Step 4: Run the tests** — PASS, 3 tests.
+- [ ] **Step 4: Run the tests** — PASS, 4 tests.
 
 - [ ] **Step 5: Full suite, then stop**
 
@@ -1488,7 +1729,7 @@ Proposed commit message: `feat(core): add the answer generator and citation mapp
 **Interfaces:**
 - Consumes: every module from Tasks 1 → 7
 - Produces:
-  - `Stages` dataclass with fields `rewrite`, `plan`, `retrieve`, `fuse`, `build_context`, `gate`, `generate`, `reflect`
+  - `Stages` dataclass with fields `rewrite`, `plan`, `retrieve`, `fuse`, `expand`, `build_context`, `gate`, `generate`, `reflect`
   - `build_stages(session, provider, settings) -> Stages` — reads the flags
   - `async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer`
 
@@ -1538,6 +1779,9 @@ def _stages(**overrides) -> Stages:
     async def retrieve(plan, trace):
         return [_candidate(f"passage for {plan.queries[0]}")]
 
+    async def expand(candidates, trace):
+        return candidates
+
     async def generate(query, context, trace):
         return "answer", ()
 
@@ -1546,6 +1790,7 @@ def _stages(**overrides) -> Stages:
         plan=noops.plan,
         retrieve=retrieve,
         fuse=noops.fuse,
+        expand=expand,
         build_context=noops.build_context_stage,
         gate=noops.gate,
         generate=generate,
@@ -1633,7 +1878,7 @@ async def test_every_stage_writes_one_trace_entry_per_pass():
 
     recorded = [n.node for n in result.trace.nodes]
     assert recorded == [
-        "rewrite", "plan", "retrieve", "fuse", "build_context", "gate",
+        "rewrite", "plan", "retrieve", "fuse", "expand", "build_context", "gate",
         "generate", "reflect",
     ]
 
@@ -1676,8 +1921,15 @@ async def plan(query: Query, trace: Trace) -> Plan:
 
 
 async def fuse(query: Query, candidates: list[Candidate], trace: Trace) -> list[Candidate]:
-    """R2 (RRF) and R3 (rerank) replace this."""
-    return candidates
+    """R2 (RRF) and R3 (rerank) replace this.
+
+    The depth cut is real work, not a no-op: the retriever returns over_fetch
+    deep, and only the top retrieval_top_k are worth expanding into parents.
+    Every version of this stage ends with the same cut.
+    """
+    from app.config import get_settings
+
+    return candidates[: get_settings().retrieval_top_k]
 
 
 def build_context_stage(previous: Context, candidates: list[Candidate], trace: Trace) -> Context:
@@ -1720,6 +1972,7 @@ class Stages:
     plan: Callable
     retrieve: Callable
     fuse: Callable
+    expand: Callable
     build_context: Callable
     gate: Callable
     generate: Callable
@@ -1765,6 +2018,7 @@ async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer:
         plan = await _run("plan", stages.plan, trace, query, trace)
         candidates = await _run("retrieve", stages.retrieve, trace, plan, trace)
         candidates = await _run("fuse", stages.fuse, trace, query, candidates, trace)
+        candidates = await _run("expand", stages.expand, trace, candidates, trace)
         context = await _run("build_context", stages.build_context, trace,
                              context, candidates, trace)
         verdict = await _run("gate", stages.gate, trace, query, context, trace)
@@ -1784,12 +2038,16 @@ async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer:
 """Builds the stage set from the flags. This is the only place that knows
 which rung of the ladder the deployment is standing on."""
 
+import asyncio
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core.generator import generate as _generate
+from app.core.parent_expander import expand_parents
 from app.core.pipeline import Stages
 from app.core.retrievers.vector import VectorRetriever
+from app.repositories.chunk_repository import ChunkRepository
 from app.core.stages import noops
 from shared.llm import AsyncLLMProvider
 
@@ -1799,12 +2057,16 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
     # R2 appends BM25Retriever here, R5 BrowseRetriever, R8 WebRetriever.
 
     async def retrieve(plan, trace):
-        import asyncio
-
+        # NOTE for R2: these retrievers share one AsyncSession, and gathering
+        # two that both query the database raises "another operation is in
+        # progress". R0 has a single retriever, so the gather is safe today.
         results = await asyncio.gather(*(r.search(plan) for r in retrievers))
         trace.record("retrieve_detail", ms=0, per_source={r.source: len(x)
                                                           for r, x in zip(retrievers, results)})
         return [candidate for group in results for candidate in group]
+
+    async def expand(candidates, trace):
+        return await expand_parents(ChunkRepository(session), candidates)
 
     async def generate(query, context, trace):
         return await _generate(query, context, provider)
@@ -1814,6 +2076,7 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
         plan=noops.plan,
         retrieve=retrieve,
         fuse=noops.fuse,
+        expand=expand,
         build_context=noops.build_context_stage,
         gate=noops.gate,
         generate=generate,
