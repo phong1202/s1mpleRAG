@@ -1,0 +1,23 @@
+[project]
+name = "docling-service"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["fastapi", "uvicorn[standard]", "docling", "boto3", "torch>=2.2.2,<3.0.0", "torchvision"]
+
+[tool.uv]
+package = false
+
+# GPU build, pinned to what this machine's driver and GPU generation were
+# verified against: cu128 is the first PyTorch wheel index that ships
+# sm_120 (Blackwell) kernels natively -- cu124 loads and reports
+# cuda.is_available() too, but falls back to JIT-compiling PTX for this
+# card on first use instead of running a prebuilt kernel. torch/torchvision
+# only: docling and everything else still resolve from PyPI.
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

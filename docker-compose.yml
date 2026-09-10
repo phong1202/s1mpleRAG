@@ -92,6 +92,44 @@ services:
         {"Rules":[{"ID":"expire-staging-7d","Status":"Enabled","Expiration":{"Days":7},"Filter":{}}]}
         JSON
 
+  docling:
+    build: ./docling_service
+    environment:
+      # Container-internal, literal like the other services -- not
+      # MINIO_ENDPOINT, which is app/config.py's escape hatch for real S3
+      # and is unset by default; ${MINIO_ENDPOINT} here would resolve to
+      # an empty string.
+      MINIO_HOST: minio
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+    ports:
+      - "8100:8100"
+    volumes:
+      # Weights download once and are reused forever. The first run takes
+      # real time and LOOKS EXACTLY LIKE A HANG -- that is normal.
+      - doclingmodels:/models
+    healthcheck:
+      # Waits for the model to finish loading, not just for the port to
+      # open -- otherwise a worker fires requests at a service that isn't
+      # ready yet, and you end up debugging the wrong thing.
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,json;
+          assert json.load(urllib.request.urlopen('http://localhost:8100/health'))['models_loaded']"
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   api:
     build: .
     env_file:
@@ -133,11 +171,21 @@ services:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
       REDIS_URL: redis://redis:6379/0
+      # Only this worker calls Docling: S1 parse is the only stage that
+      # does, and it is routed to the cpu queue.
+      DOCLING_URL: http://docling:8100
     depends_on:
       db:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      # Not service_healthy: that would block worker-cpu -- which also
+      # runs structure/persist, neither touching Docling -- on the full
+      # model load every time. A parse task that lands before Docling is
+      # ready just retries with backoff, the same as any other transient
+      # failure.
+      docling:
+        condition: service_started
     volumes:
       - .:/code
 
@@ -167,3 +215,4 @@ services:
 volumes:
   pgdata:
   miniodata:
+  doclingmodels:
