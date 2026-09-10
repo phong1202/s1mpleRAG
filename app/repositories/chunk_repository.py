@@ -1,4 +1,11 @@
-"""R0 retrieval. Read-only: this module never writes."""
+"""R0 retrieval. Read-only: this module never writes.
+
+`search` returns CHILDREN, not parents. The collapse to parents is a separate
+step (app/core/parent_expander.py) that runs after fusion and reranking,
+because a cross-encoder scoring a 700-token parent has to find the one
+relevant sentence buried in six irrelevant ones, while the same model scoring
+the 150-token child reads nothing but the relevant text.
+"""
 
 import uuid
 from dataclasses import dataclass
@@ -13,9 +20,12 @@ from app.core.contracts import Filters
 # into CAST(:qvec AS vector) makes Postgres infer the parameter as `vector`,
 # and the driver has no codec for that type -- the cast through text is what
 # keeps the parameter a plain string.
+#
+# The ordering and the LIMIT stay inside a CTE over child_chunks alone: adding
+# the documents join above them can cost the HNSW index scan.
 _SEARCH = text("""
 WITH candidates AS (
-  SELECT c.id, c.parent_id, c.page_number, c.content,
+  SELECT c.id, c.parent_id, c.document_id, c.page_number, c.content,
          c.embedding <#> CAST(CAST(:qvec AS text) AS vector) AS distance
   FROM   child_chunks c
   WHERE  (CAST(:category AS text) IS NULL OR c.category = CAST(:category AS text))
@@ -23,34 +33,27 @@ WITH candidates AS (
   -- ASC: <#> is NEGATIVE inner product, so nearest sorts first
   ORDER  BY c.embedding <#> CAST(CAST(:qvec AS text) AS vector)
   LIMIT  :over_fetch
-),
-best_per_parent AS (
-  SELECT DISTINCT ON (parent_id)
-         parent_id, distance, page_number, id AS child_id, content AS child_content
-  FROM   candidates
-  ORDER  BY parent_id, distance          -- parent_id MUST lead, or an arbitrary
-)                                        -- child wins its group with no error
-SELECT p.id  AS parent_id,
-       p.content AS parent_content,
-       b.child_id, b.child_content, b.page_number, b.distance,
-       d.id AS document_id, d.filename
-FROM   best_per_parent b
-JOIN   parent_chunks p ON p.id = b.parent_id
-JOIN   documents      d ON d.id = p.document_id
-ORDER  BY b.distance
-LIMIT  :top_k
+)
+SELECT c.id AS child_id, c.parent_id, c.document_id, c.page_number,
+       c.content AS child_content, c.distance, d.filename
+FROM   candidates c
+JOIN   documents d ON d.id = c.document_id
+ORDER  BY c.distance
+""")
+
+_PARENTS = text("""
+SELECT id, content FROM parent_chunks WHERE id = ANY(CAST(:ids AS uuid[]))
 """)
 
 
 @dataclass(frozen=True)
-class ParentHit:
-    parent_id: uuid.UUID
-    parent_content: str
+class ChildHit:
     child_id: uuid.UUID
-    child_content: str
-    page_number: int
-    distance: float
+    parent_id: uuid.UUID
     document_id: uuid.UUID
+    page_number: int
+    child_content: str
+    distance: float
     filename: str
 
 
@@ -59,8 +62,8 @@ class ChunkRepository:
         self._session = session
 
     async def search(
-        self, vector: list[float], over_fetch: int, top_k: int, filters: Filters
-    ) -> list[ParentHit]:
+        self, vector: list[float], over_fetch: int, filters: Filters
+    ) -> list[ChildHit]:
         # pgvector's ef_search defaults to 40. Over-fetching 50 out of a queue
         # 40 wide degrades the tail silently, so the session sets it
         # explicitly. set_config rather than SET LOCAL: SET is a utility
@@ -77,7 +80,15 @@ class ChunkRepository:
                 "category": filters.category,
                 "document_id": filters.document_id,
                 "over_fetch": over_fetch,
-                "top_k": top_k,
             },
         )
-        return [ParentHit(**row) for row in rows.mappings()]
+        return [ChildHit(**row) for row in rows.mappings()]
+
+    async def fetch_parents(self, parent_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """One statement for the whole set. Fetching per parent inside the
+        expansion loop is the classic N+1, and it hides well because every
+        individual query is fast."""
+        if not parent_ids:
+            return {}
+        rows = await self._session.execute(_PARENTS, {"ids": parent_ids})
+        return {row.id: row.content for row in rows}
