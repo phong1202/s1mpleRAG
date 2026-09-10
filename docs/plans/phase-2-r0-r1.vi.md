@@ -699,7 +699,7 @@ Câu truy vấn làm cho parent/child hoạt động, và hai cái bẫy nó đ�
 
 **Interfaces:**
 - Consumes: `AsyncSession`, `Settings.retrieval_ef_search`
-- Produces: `ChunkRepository(session).search(vector: list[float], over_fetch: int, top_k: int, filters: Filters) -> list[ParentHit]`, trong đó `ParentHit` có `parent_id`, `document_id`, `child_id`, `filename`, `page_number`, `content`, `distance`
+- Produces: `ChunkRepository(session).search(vector: list[float], over_fetch: int, top_k: int, filters: Filters) -> list[ParentHit]`, trong đó `ParentHit` có `parent_id`, `parent_content`, `child_id`, `child_content`, `page_number`, `distance`, `document_id`, `filename`
 
 - [ ] **Step 1: Viết test đỏ**
 
@@ -747,7 +747,7 @@ async def _seed(session, children_per_parent: int = 3, parents: int = 4):
         )
         session.add(parent)
         await session.flush()
-        for c in range(children_per_parent):
+        for _ in range(children_per_parent):
             session.add(
                 ChildChunk(
                     document_id=document.id,
@@ -806,6 +806,20 @@ async def test_search_orders_by_similarity_not_insertion(db_session):
     assert hits[0].distance <= hits[1].distance
 
 
+async def test_over_fetch_takes_the_nearest_candidates_not_an_arbitrary_slice(db_session):
+    """Lấy dư là một LIMIT trên tập đã sắp xếp, nên khi over_fetch rộng hơn cả
+    corpus thì mọi thứ tự đều trả về cùng một tập hàng và thứ tự của CTE
+    candidates hoàn toàn không được kiểm. Chỉ điểm cắt hẹp hơn corpus mới
+    chứng minh nó sắp gần nhất trước."""
+    await _seed(db_session)
+
+    hits = await ChunkRepository(db_session).search(
+        vector=_unit(6), over_fetch=1, top_k=10, filters=Filters()
+    )
+
+    assert [hit.child_content for hit in hits] == ["child 6"]
+
+
 async def test_top_k_counts_parents_not_children(db_session):
     """Gom sau LIMIT sẽ trả về ít hơn top_k parent. Việc lấy dư tồn tại để sau
     khi gom vẫn đủ số lượng yêu cầu."""
@@ -836,6 +850,7 @@ async def test_category_filter_narrows_the_candidate_pool(db_session):
 # app/repositories/chunk_repository.py
 """Retrieval của R0. Chỉ đọc: module này không bao giờ ghi."""
 
+import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import text
@@ -844,14 +859,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.contracts import Filters
 
+# Vector truy vấn được bind dưới dạng text rồi cast ở phía server. Bind thẳng
+# vào CAST(:qvec AS vector) khiến Postgres suy ra kiểu tham số là `vector`, mà
+# driver không có codec cho kiểu đó -- cast qua text là thứ giữ cho tham số vẫn
+# là một chuỗi thường.
 _SEARCH = text("""
 WITH candidates AS (
   SELECT c.id, c.parent_id, c.page_number, c.content,
-         c.embedding <#> CAST(:qvec AS vector) AS distance
+         c.embedding <#> CAST(CAST(:qvec AS text) AS vector) AS distance
   FROM   child_chunks c
   WHERE  (CAST(:category AS text) IS NULL OR c.category = CAST(:category AS text))
     AND  (CAST(:document_id AS uuid) IS NULL OR c.document_id = CAST(:document_id AS uuid))
-  ORDER  BY c.embedding <#> CAST(:qvec AS vector)   -- ASC: <#> là tích vô hướng ÂM
+  -- ASC: <#> là tích vô hướng ÂM, nên gần nhất được sắp lên trước
+  ORDER  BY c.embedding <#> CAST(CAST(:qvec AS text) AS vector)
   LIMIT  :over_fetch
 ),
 best_per_parent AS (
@@ -874,13 +894,13 @@ LIMIT  :top_k
 
 @dataclass(frozen=True)
 class ParentHit:
-    parent_id: object
+    parent_id: uuid.UUID
     parent_content: str
-    child_id: object
+    child_id: uuid.UUID
     child_content: str
     page_number: int
     distance: float
-    document_id: object
+    document_id: uuid.UUID
     filename: str
 
 
@@ -893,9 +913,12 @@ class ChunkRepository:
     ) -> list[ParentHit]:
         # ef_search mặc định của pgvector là 40. Lấy dư 50 từ hàng đợi rộng 40
         # làm phần đuôi kém đi trong im lặng, nên session đặt nó tường minh.
+        # Dùng set_config chứ không phải SET LOCAL: SET là câu lệnh tiện ích và
+        # không nhận tham số bind. Đối số thứ ba là cờ LOCAL -- nó có hiệu lực
+        # đến hết transaction này.
         await self._session.execute(
-            text("SET LOCAL hnsw.ef_search = :ef"),
-            {"ef": get_settings().retrieval_ef_search},
+            text("SELECT set_config('hnsw.ef_search', :ef, true)"),
+            {"ef": str(get_settings().retrieval_ef_search)},
         )
         rows = await self._session.execute(
             _SEARCH,
@@ -910,7 +933,7 @@ class ChunkRepository:
         return [ParentHit(**row) for row in rows.mappings()]
 ```
 
-- [ ] **Step 4: Chạy test** — PASS, 5 test.
+- [ ] **Step 4: Chạy test** — PASS, 6 test.
 
 - [ ] **Step 5: Suite đầy đủ, rồi dừng**
 

@@ -698,7 +698,7 @@ The query that makes parent/child work, and the two traps it closes.
 
 **Interfaces:**
 - Consumes: `AsyncSession`, `Settings.retrieval_ef_search`
-- Produces: `ChunkRepository(session).search(vector: list[float], over_fetch: int, top_k: int, filters: Filters) -> list[ParentHit]` where `ParentHit` is a row with `parent_id`, `document_id`, `child_id`, `filename`, `page_number`, `content`, `distance`
+- Produces: `ChunkRepository(session).search(vector: list[float], over_fetch: int, top_k: int, filters: Filters) -> list[ParentHit]` where `ParentHit` is a row with `parent_id`, `parent_content`, `child_id`, `child_content`, `page_number`, `distance`, `document_id`, `filename`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -747,7 +747,7 @@ async def _seed(session, children_per_parent: int = 3, parents: int = 4):
         )
         session.add(parent)
         await session.flush()
-        for c in range(children_per_parent):
+        for _ in range(children_per_parent):
             session.add(
                 ChildChunk(
                     document_id=document.id,
@@ -807,6 +807,20 @@ async def test_search_orders_by_similarity_not_insertion(db_session):
     assert hits[0].distance <= hits[1].distance
 
 
+async def test_over_fetch_takes_the_nearest_candidates_not_an_arbitrary_slice(db_session):
+    """The over-fetch is a LIMIT on an ordered set, so with over_fetch wider
+    than the corpus every ordering returns the same rows and the ordering of
+    the candidates CTE is untested. Only a cut-off narrower than the corpus
+    shows it sorts nearest-first."""
+    await _seed(db_session)
+
+    hits = await ChunkRepository(db_session).search(
+        vector=_unit(6), over_fetch=1, top_k=10, filters=Filters()
+    )
+
+    assert [hit.child_content for hit in hits] == ["child 6"]
+
+
 async def test_top_k_counts_parents_not_children(db_session):
     """Collapsing after LIMIT would return fewer than top_k parents. The
     over-fetch exists so the collapse still yields the requested count."""
@@ -837,6 +851,7 @@ async def test_category_filter_narrows_the_candidate_pool(db_session):
 # app/repositories/chunk_repository.py
 """R0 retrieval. Read-only: this module never writes."""
 
+import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import text
@@ -845,14 +860,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.contracts import Filters
 
+# The query vector is bound as text and cast server-side. Binding it straight
+# into CAST(:qvec AS vector) makes Postgres infer the parameter as `vector`,
+# and the driver has no codec for that type -- the cast through text is what
+# keeps the parameter a plain string.
 _SEARCH = text("""
 WITH candidates AS (
   SELECT c.id, c.parent_id, c.page_number, c.content,
-         c.embedding <#> CAST(:qvec AS vector) AS distance
+         c.embedding <#> CAST(CAST(:qvec AS text) AS vector) AS distance
   FROM   child_chunks c
   WHERE  (CAST(:category AS text) IS NULL OR c.category = CAST(:category AS text))
     AND  (CAST(:document_id AS uuid) IS NULL OR c.document_id = CAST(:document_id AS uuid))
-  ORDER  BY c.embedding <#> CAST(:qvec AS vector)   -- ASC: <#> is NEGATIVE inner product
+  -- ASC: <#> is NEGATIVE inner product, so nearest sorts first
+  ORDER  BY c.embedding <#> CAST(CAST(:qvec AS text) AS vector)
   LIMIT  :over_fetch
 ),
 best_per_parent AS (
@@ -875,13 +895,13 @@ LIMIT  :top_k
 
 @dataclass(frozen=True)
 class ParentHit:
-    parent_id: object
+    parent_id: uuid.UUID
     parent_content: str
-    child_id: object
+    child_id: uuid.UUID
     child_content: str
     page_number: int
     distance: float
-    document_id: object
+    document_id: uuid.UUID
     filename: str
 
 
@@ -892,11 +912,14 @@ class ChunkRepository:
     async def search(
         self, vector: list[float], over_fetch: int, top_k: int, filters: Filters
     ) -> list[ParentHit]:
-        # pgvector's default ef_search is 40. Over-fetching 50 from a queue of
-        # 40 silently degrades the tail, so the session sets it explicitly.
+        # pgvector's ef_search defaults to 40. Over-fetching 50 out of a queue
+        # 40 wide degrades the tail silently, so the session sets it
+        # explicitly. set_config rather than SET LOCAL: SET is a utility
+        # statement and takes no bind parameters. The third argument is the
+        # LOCAL flag -- it lasts until the end of this transaction.
         await self._session.execute(
-            text("SET LOCAL hnsw.ef_search = :ef"),
-            {"ef": get_settings().retrieval_ef_search},
+            text("SELECT set_config('hnsw.ef_search', :ef, true)"),
+            {"ef": str(get_settings().retrieval_ef_search)},
         )
         rows = await self._session.execute(
             _SEARCH,
@@ -911,7 +934,7 @@ class ChunkRepository:
         return [ParentHit(**row) for row in rows.mappings()]
 ```
 
-- [ ] **Step 4: Run the tests** — PASS, 5 tests.
+- [ ] **Step 4: Run the tests** — PASS, 6 tests.
 
 - [ ] **Step 5: Full suite, then stop**
 
