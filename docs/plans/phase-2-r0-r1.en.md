@@ -1348,10 +1348,40 @@ Accumulate across iterations, deduplicate, number the passages, cut at a parent 
 **Files:**
 - Create: `app/core/context_builder.py`
 - Create: `tests/test_context_builder.py`
+- Modify: `pyproject.toml`, `uv.lock`, `Dockerfile`
 
 **Interfaces:**
 - Consumes: `Context`, `list[Candidate]`, `Settings.context_token_budget`
 - Produces: `build_context(previous: Context, candidates: list[Candidate], budget: int) -> Context`
+
+- [ ] **Step 0: Add the tokenizer**
+
+```
+uv add tiktoken
+```
+
+Token counts are what the budget is denominated in, and characters are not a proxy for them.
+`electronic invoice` is 18 characters and 3 tokens; `Nghị định 123/2020/NĐ-CP` is 24 characters and
+**15** tokens. A Vietnamese corpus spends the budget roughly 3.7x faster per character than an
+English one, so an estimate of `len(text) / 4` overruns the model's context and nothing says why.
+
+`tiktoken.get_encoding()` fetches a 1.7 MB BPE table on first use and caches it under the system
+temp directory — which means a network call at **import** time, from a container that may have no
+route out. Bake it into the image instead:
+
+```dockerfile
+# Dockerfile -- after `RUN uv sync --frozen --no-dev`
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
+RUN mkdir -p "$TIKTOKEN_CACHE_DIR" \
+    && python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+```
+
+Also add `/opt/tiktoken` to the existing `chown -R appuser:appuser` line. Verify with
+`docker run --rm --network none <image> python -c "import app.core.context_builder"`.
+
+> Use the uv pinned in the Dockerfile (`ghcr.io/astral-sh/uv:0.12.7`). An older uv rewrites
+> `uv.lock` to an older revision and strips ~900 lines of metadata, which turns a 175-line addition
+> into a 2000-line conflict with phase-1.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1359,8 +1389,8 @@ Accumulate across iterations, deduplicate, number the passages, cut at a parent 
 # tests/test_context_builder.py
 import uuid
 
-from app.core.contracts import Candidate, Context, DocRef, WebRef
 from app.core.context_builder import build_context
+from app.core.contracts import Candidate, Context, DocRef, WebRef
 
 
 def _candidate(rank: int, text: str, source: str = "vector", parent=None) -> Candidate:
@@ -1424,6 +1454,40 @@ def test_the_budget_drops_whole_passages_never_truncates_one():
     assert context.token_count <= 900
 
 
+def test_the_budget_stops_at_the_first_passage_that_does_not_fit():
+    """A lower-ranked passage must not overtake a higher-ranked one just for
+    being shorter: rank is a judgement about relevance, length is not.
+
+    The three passages have deliberately different lengths. Given equal ones,
+    whatever does not fit is followed only by things that also do not fit, and
+    stopping and skipping become indistinguishable."""
+    context = build_context(
+        Context.empty(),
+        [
+            _candidate(1, "a " * 300),  # 301 tokens, fits
+            _candidate(2, "b " * 300),  # 301 tokens, does not fit
+            _candidate(3, "c " * 50),  # 51 tokens, would fit -- must still be dropped
+        ],
+        budget=500,
+    )
+
+    assert [p.ordinal for p in context.passages] == [1]
+
+
+def test_a_duplicate_never_ends_the_loop():
+    """A passage already held costs nothing, so it must not be what trips the
+    budget. At R6 iteration two re-retrieves much of iteration one and those
+    duplicates arrive first: charging for one would leave the second pass
+    unable to add anything at all."""
+    parent = uuid.uuid4()
+    held = _candidate(1, "a " * 300, parent=parent)  # 301 tokens
+    first = build_context(Context.empty(), [held], budget=400)
+
+    second = build_context(first, [held, _candidate(2, "c " * 20)], budget=400)
+
+    assert [p.text for p in second.passages] == ["a " * 300, "c " * 20]
+
+
 def test_web_candidates_land_in_the_untrusted_list():
     """R8 is far off, but the split is structural. If web text could reach
     `passages`, the prompt builder would have no way to keep it out."""
@@ -1455,6 +1519,9 @@ import tiktoken
 
 from app.core.contracts import Candidate, Context, DocRef, Passage, WebPassage
 
+# Resolved at import. In the image this reads TIKTOKEN_CACHE_DIR, which the
+# Dockerfile fills at build time; otherwise the first call downloads a 1.7 MB
+# BPE table and caches it under the system temp directory.
 _ENCODER = tiktoken.get_encoding("cl100k_base")
 
 
@@ -1471,38 +1538,45 @@ def build_context(previous: Context, candidates: list[Candidate], budget: int) -
     used = previous.token_count
 
     for candidate in candidates:
-        cost = _count(candidate.text)
-        if used + cost > budget:
-            # Drop the tail whole. Truncating mid-passage produces a sentence
-            # whose qualifying clause is missing, which reads as fact.
+        ref = candidate.ref
+        seen = (
+            ref.parent_id in seen_parents
+            if isinstance(ref, DocRef)
+            else ref.url in seen_urls
+        )
+        if seen:
+            # Checked before the budget, because a passage already held costs
+            # nothing and so must not be what ends the loop. At R6 iteration two
+            # re-retrieves much of iteration one and those duplicates arrive
+            # first, which would otherwise leave the second pass adding nothing.
             continue
 
-        if isinstance(candidate.ref, DocRef):
-            if candidate.ref.parent_id in seen_parents:
-                continue
-            seen_parents.add(candidate.ref.parent_id)
-            ordinal += 1
-            passages.append(Passage(ordinal=ordinal, text=candidate.text, ref=candidate.ref))
+        cost = _count(candidate.text)
+        if used + cost > budget:
+            # Stop, rather than skip ahead to something shorter. Truncating
+            # mid-passage produces a sentence missing its qualifying clause,
+            # which reads as fact; and letting a shorter, lower-ranked passage
+            # overtake a longer one substitutes "fits" for "is relevant", a
+            # judgement this function has no information to make.
+            break
+
+        ordinal += 1
+        if isinstance(ref, DocRef):
+            seen_parents.add(ref.parent_id)
+            passages.append(Passage(ordinal=ordinal, text=candidate.text, ref=ref))
         else:
-            if candidate.ref.url in seen_urls:
-                continue
-            seen_urls.add(candidate.ref.url)
-            ordinal += 1
-            untrusted.append(
-                WebPassage(ordinal=ordinal, text=candidate.text, ref=candidate.ref)
-            )
+            seen_urls.add(ref.url)
+            untrusted.append(WebPassage(ordinal=ordinal, text=candidate.text, ref=ref))
         used += cost
 
     return Context(passages=tuple(passages), untrusted=tuple(untrusted), token_count=used)
 ```
 
-- [ ] **Step 4: Run the tests** — PASS, 5 tests.
+- [ ] **Step 4: Run the tests** — PASS, 7 tests.
 
 - [ ] **Step 5: Full suite, then stop**
 
 Proposed commit message: `feat(core): add the context builder`
-
----
 
 ## Task 7: `app/core/generator.py`
 
