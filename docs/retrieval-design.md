@@ -64,6 +64,7 @@ Settled. If the implementation disagrees with a row here, the implementation is 
 | 21 | Parent expansion | Its own stage between `fuse` and `build_context` | Collapsing inside the SQL drops every child that lost its parent before fusion could rescue it, and `build_context` stays a pure unit |
 | 22 | Retriever depth | Retrievers return `over_fetch` deep and never truncate to `top_k` | How deep to read is the consumer's decision; the cut lives in `fuse`, which R2 and R3 replace |
 | 23 | Token budget overflow | **Stop at the first passage that does not fit**, never skip ahead | Letting a shorter, lower-ranked passage overtake a longer one substitutes "fits" for "is relevant" |
+| 24 | Prompt language | **Instructions in English; the answer mirrors the question's language** | English instructions follow more reliably and cost fewer tokens; the pipeline reasons in English and only node ⑦ speaks the user's language |
 
 ---
 
