@@ -1858,14 +1858,19 @@ Commit message đề xuất: `feat(core): add the answer generator and citation 
   - `build_stages(session, provider, settings) -> Stages` — đọc các cờ
   - `async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer`
 
+> Vòng lặp quay lại từ `plan`, không phải `rewrite`, nên bước viết lại nằm **ngoài** vòng lặp.
+> Chính cổng đã viết ra truy vấn tinh chỉnh; cho bộ viết lại chạy đè lên nó có nguy cơ làm rơi
+> mất đúng từ khoá mà cổng vừa thêm. Ở R0 điều này vô hình — `rewrite` trả lại đầu vào — nên
+> test phải đếm số lần gọi chứ không soi nội dung truy vấn.
+
 - [ ] **Step 1: Viết test đỏ**
 
 ```python
 # tests/test_pipeline.py
-"""Năm chỗ nối rỗng là toàn bộ mục đích của R0. Một chỗ nối không ai chạy sẽ
-mục: chữ ký hàm trôi đi và không có gì phát hiện cho tới khi bậc cần nó xuất
-hiện, vài tháng sau. Các test này chạy cả tám chỗ nối ngay từ ngày đầu, với các
-hàm giả đứng thay cho những stage chưa tồn tại."""
+"""Năm chỗ nối rỗng chính là toàn bộ ý nghĩa của R0. Một chỗ nối không ai chạy
+sẽ mục: chữ ký trôi dần và không ai nhận ra cho tới khi bước cần nó xuất hiện,
+vài tháng sau. Các test này chạy cả chín chỗ nối ngay từ ngày đầu, với hàm giả
+đứng thế cho những bước chưa tồn tại."""
 
 import dataclasses
 import uuid
@@ -1875,13 +1880,9 @@ import pytest
 from app.core.contracts import (
     Answer,
     Candidate,
-    Context,
     DocRef,
-    Filters,
     GateVerdict,
-    Plan,
     Query,
-    Trace,
 )
 from app.core.pipeline import Stages, answer
 from app.core.stages import noops
@@ -1900,7 +1901,7 @@ def _candidate(text: str) -> Candidate:
 
 
 def _stages(**overrides) -> Stages:
-    """Cấu hình R0 với no-op thật, ghi đè được theo từng test."""
+    """Bộ dây R0 với no-op thật, ghi đè được theo từng test."""
     async def retrieve(plan, trace):
         return [_candidate(f"passage for {plan.queries[0]}")]
 
@@ -1925,8 +1926,8 @@ def _stages(**overrides) -> Stages:
 
 
 async def test_r0_runs_exactly_one_iteration():
-    """Tắt hết cờ thì vòng lặp phải chạy như R0: một lượt, không quyết định
-    cổng, không tinh chỉnh."""
+    """Mọi cờ tắt thì vòng lặp phải hành xử đúng như R0: một lượt, không có
+    quyết định của cổng, không tinh chỉnh."""
     seen = []
 
     async def counting_retrieve(plan, trace):
@@ -1943,7 +1944,7 @@ async def test_r0_runs_exactly_one_iteration():
 
 async def test_the_loop_runs_again_when_the_gate_says_insufficient():
     """Đây là test giữ cho R6 rẻ. Nếu nó pass ở R0 thì R6 chỉ là đổi một hằng
-    số và cắm một hàm -- không có gì cấu trúc."""
+    số và tráo một hàm -- không có gì thuộc về cấu trúc."""
     verdicts = [
         GateVerdict(sufficient=False, missing="thieu phan thay the",
                     refined_query="hoa don thay the"),
@@ -1962,13 +1963,38 @@ async def test_the_loop_runs_again_when_the_gate_says_insufficient():
         Query(text="cau hoi goc"), _stages(gate=gate, retrieve=retrieve), max_iterations=3
     )
 
-    assert seen == ["cau hoi goc", "hoa don thay the"], "lượt hai dùng truy vấn tinh chỉnh"
+    assert seen == ["cau hoi goc", "hoa don thay the"], "lượt hai dùng truy vấn đã tinh chỉnh"
+    assert result.trace.iterations == 2
+
+
+async def test_the_rewrite_runs_once_however_many_iterations():
+    """Vòng lặp quay lại từ `plan`, không phải `rewrite`: chính cổng đã viết ra
+    truy vấn tinh chỉnh, và cho bộ viết lại của R4 chạy đè lên nó có nguy cơ làm
+    rơi mất đúng từ khoá mà cổng vừa thêm. Ở R0 điều này vô hình vì rewrite trả
+    lại đúng đầu vào."""
+    verdicts = [GateVerdict(sufficient=False, refined_query="second"), GateVerdict(sufficient=True)]
+    rewritten = []
+
+    async def counting_rewrite(query, trace):
+        rewritten.append(query.text)
+        return query
+
+    async def gate(query, context, trace):
+        return verdicts.pop(0)
+
+    result = await answer(
+        Query(text="first"),
+        _stages(rewrite=counting_rewrite, gate=gate),
+        max_iterations=3,
+    )
+
+    assert rewritten == ["first"]
     assert result.trace.iterations == 2
 
 
 async def test_context_accumulates_across_iterations():
-    """Vòng hai phải cộng thêm vào vòng một, không thay thế nó."""
-    verdicts = [GateVerdict(sufficient=False, refined_query="second"), GateVerdict(True)]
+    """Lượt hai phải cộng vào lượt một, không phải thay thế nó."""
+    verdicts = [GateVerdict(sufficient=False, refined_query="second"), GateVerdict(sufficient=True)]
     captured = {}
 
     async def gate(query, context, trace):
@@ -1986,8 +2012,8 @@ async def test_context_accumulates_across_iterations():
 
 
 async def test_the_loop_answers_anyway_when_it_runs_out_of_iterations():
-    """Hết ngân sách không phải là lỗi. Một câu trả lời một phần hơn một mã
-    lỗi."""
+    """Hết ngân sách không phải là lỗi. Một câu trả lời chưa đầy đủ vẫn hơn một
+    mã lỗi."""
     async def always_insufficient(query, context, trace):
         return GateVerdict(sufficient=False, refined_query="again")
 
@@ -2010,8 +2036,8 @@ async def test_every_stage_writes_one_trace_entry_per_pass():
 
 
 async def test_a_failing_stage_degrades_to_its_no_op():
-    """Một node quyết định ném lỗi thì mất một năng lực, không bao giờ mất
-    request."""
+    """Một node quyết định ném lỗi thì mất đi một năng lực, không bao giờ mất
+    cả request."""
     async def broken_rewrite(query, trace):
         raise ValueError("model returned prose instead of json")
 
@@ -2021,6 +2047,17 @@ async def test_a_failing_stage_degrades_to_its_no_op():
 
     assert isinstance(result, Answer)
     assert any(n.detail.get("fallback") for n in result.trace.nodes)
+
+
+async def test_a_stage_without_a_no_op_is_allowed_to_fail_the_request():
+    """`retrieve`, `expand`, `build_context` và `generate` không có phiên bản
+    rỗng nào có nghĩa. Nuốt lỗi của chúng sẽ trả về một câu trả lời tự tin dựng
+    từ hư không."""
+    async def broken_retrieve(plan, trace):
+        raise RuntimeError("the database is gone")
+
+    with pytest.raises(RuntimeError):
+        await answer(Query(text="q"), _stages(retrieve=broken_retrieve), max_iterations=1)
 ```
 
 - [ ] **Step 2: Chạy để xác nhận đỏ** — module chưa tồn tại.
@@ -2029,12 +2066,13 @@ async def test_a_failing_stage_degrades_to_its_no_op():
 
 ```python
 # app/core/stages/noops.py
-"""Năm chỗ nối R0 để trống. Mỗi cái đồng thời là phương án lui mà bản triển
-khai thật của nó rơi về khi hỏng -- đó là lý do chúng được đặt tên chứ không
-viết thẳng vào pipeline."""
+"""Năm chỗ nối mà R0 để trống. Mỗi cái đồng thời là fallback mà bản cài đặt
+thật của nó lui về khi hỏng, và đó là lý do chúng được đặt tên thay vì viết
+thẳng vào pipeline."""
 
-from app.core.contracts import Candidate, Context, GateVerdict, Plan, Query, Trace
+from app.config import get_settings
 from app.core.context_builder import build_context as _build_context
+from app.core.contracts import Candidate, Context, GateVerdict, Plan, Query, Trace
 
 
 async def rewrite(query: Query, trace: Trace) -> Query:
@@ -2054,19 +2092,15 @@ async def fuse(query: Query, candidates: list[Candidate], trace: Trace) -> list[
     over_fetch, và chỉ retrieval_top_k đầu bảng mới đáng nở ra thành parent.
     Mọi phiên bản của stage này đều kết thúc bằng đúng nhát cắt đó.
     """
-    from app.config import get_settings
-
     return candidates[: get_settings().retrieval_top_k]
 
 
 def build_context_stage(previous: Context, candidates: list[Candidate], trace: Trace) -> Context:
-    from app.config import get_settings
-
     return _build_context(previous, candidates, get_settings().context_token_budget)
 
 
 async def gate(query: Query, context: Context, trace: Trace) -> GateVerdict:
-    """R6 thay cái này. Luôn đủ nghĩa là vòng lặp chạy một lần."""
+    """R6 thay cái này. Luôn "đủ" nghĩa là vòng lặp chạy đúng một lần."""
     return GateVerdict(sufficient=True)
 
 
@@ -2079,15 +2113,16 @@ async def reflect(answer, context: Context, trace: Trace):
 
 ```python
 # app/core/pipeline.py
-"""Đường đọc, từ đầu tới cuối. Viết ở R0 và giữ nguyên tới R8.
+"""Đường đọc, từ đầu tới cuối. Viết ở R0 và không đổi cho tới R8.
 
-R6 là `max_iterations` đi từ 1 lên 3 cộng một hàm thật trong `Stages.gate`.
-Không có gì ở đây phải dịch chuyển.
+R6 là `max_iterations` đi từ 1 lên 3 cộng một hàm thật ở `Stages.gate`. Không
+dòng nào ở đây nhúc nhích.
 """
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from app.core.contracts import Answer, Context, Query, Trace
 from app.core.stages import noops
@@ -2106,6 +2141,9 @@ class Stages:
     reflect: Callable
 
 
+# Chỉ những stage có phiên bản rỗng mang nghĩa. `retrieve`, `expand`,
+# `build_context` và `generate` vắng mặt có chủ đích: không có gì chúng trả về
+# mà lại không phải là một câu trả lời tự tin dựng từ hư không.
 _FALLBACKS = {
     "rewrite": noops.rewrite,
     "plan": noops.plan,
@@ -2118,16 +2156,17 @@ _FALLBACKS = {
 async def _run(name: str, stage: Callable, trace: Trace, *args) -> Any:
     """Đo thời gian stage, ghi lại, và lui về no-op khi hỏng.
 
-    Một node quyết định trả về văn xuôi thay vì JSON thì mất đúng cái năng lực
-    nó cung cấp. Nó không bao giờ được làm mất request -- hệ thống thoái lui về
-    hành vi R0.
+    Một node quyết định trả về văn xuôi thay vì JSON thì mất đi năng lực nó cung
+    cấp. Nó không bao giờ được làm mất cả request -- hệ thống thoái về R0.
     """
     started = time.perf_counter()
     try:
         result = stage(*args)
+        # Stage có thể là hàm đồng bộ: build_context là hàm thuần và chẳng được
+        # lợi gì khi biến thành coroutine.
         result = await result if hasattr(result, "__await__") else result
         fallback = False
-    except Exception as error:                       # noqa: BLE001 -- cố ý
+    except Exception as error:
         fallback_stage = _FALLBACKS.get(name)
         if fallback_stage is None:
             raise
@@ -2141,8 +2180,12 @@ async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer:
     trace = Trace()
     context = Context.empty()
 
+    # Nằm ngoài vòng lặp: vòng lặp quay lại từ `plan`. Chính cổng đã viết ra
+    # truy vấn tinh chỉnh, và cho bộ viết lại chạy đè lên nó có nguy cơ làm rơi
+    # mất đúng từ khoá mà cổng vừa thêm.
+    query = await _run("rewrite", stages.rewrite, trace, query, trace)
+
     for iteration in range(1, max_iterations + 1):
-        query = await _run("rewrite", stages.rewrite, trace, query, trace)
         plan = await _run("plan", stages.plan, trace, query, trace)
         candidates = await _run("retrieve", stages.retrieve, trace, plan, trace)
         candidates = await _run("fuse", stages.fuse, trace, query, candidates, trace)
@@ -2153,7 +2196,6 @@ async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer:
         trace.iterations = iteration
         if verdict.sufficient:
             break
-        # Vào lại ở `plan`, không phải `rewrite`: cổng đã viết sẵn truy vấn.
         query = query.refined(verdict.refined_query or query.text)
 
     text, citations = await _run("generate", stages.generate, trace, query, context, trace)
@@ -2164,7 +2206,7 @@ async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer:
 ```python
 # app/core/deps.py
 """Dựng tập stage từ các cờ. Đây là nơi duy nhất biết bản triển khai đang đứng
-ở bậc nào của thang."""
+ở bậc nào của cái thang."""
 
 import asyncio
 
@@ -2175,22 +2217,22 @@ from app.core.generator import generate as _generate
 from app.core.parent_expander import expand_parents
 from app.core.pipeline import Stages
 from app.core.retrievers.vector import VectorRetriever
-from app.repositories.chunk_repository import ChunkRepository
 from app.core.stages import noops
+from app.repositories.chunk_repository import ChunkRepository
 from shared.llm import AsyncLLMProvider
 
 
 def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Settings) -> Stages:
     retrievers = [VectorRetriever(session, provider)]
-    # R2 thêm BM25Retriever ở đây, R5 thêm BrowseRetriever, R8 thêm WebRetriever.
+    # R2 nối thêm BM25Retriever ở đây, R5 thêm BrowseRetriever, R8 thêm WebRetriever.
 
     async def retrieve(plan, trace):
         # LƯU Ý cho R2: các retriever này dùng chung một AsyncSession, và gather
         # hai cái cùng truy vấn database sẽ ném "another operation is in
         # progress". R0 chỉ có một retriever nên gather hôm nay vẫn an toàn.
         results = await asyncio.gather(*(r.search(plan) for r in retrievers))
-        trace.record("retrieve_detail", ms=0, per_source={r.source: len(x)
-                                                          for r, x in zip(retrievers, results)})
+        per_source = {r.source: len(x) for r, x in zip(retrievers, results, strict=True)}
+        trace.record("retrieve_detail", ms=0, per_source=per_source)
         return [candidate for group in results for candidate in group]
 
     async def expand(candidates, trace):
@@ -2212,7 +2254,7 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
     )
 ```
 
-- [ ] **Step 5: Chạy test** — PASS, 6 test.
+- [ ] **Step 5: Chạy test** — PASS, 8 test.
 
 - [ ] **Step 6: Suite đầy đủ, rồi dừng**
 
