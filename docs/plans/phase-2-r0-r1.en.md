@@ -1859,13 +1859,18 @@ Proposed commit message: `feat(core): add the answer generator and citation mapp
   - `build_stages(session, provider, settings) -> Stages` — reads the flags
   - `async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer`
 
+> Re-entry is at `plan`, not `rewrite`, so the rewrite runs **outside** the loop. The gate
+> writes the refined query itself; running the rewriter over it again risks dropping the very
+> term the gate added. At R0 this is invisible — `rewrite` returns its input — which is why
+> the test counts the calls rather than inspecting the query.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_pipeline.py
 """The five no-op seams are the whole point of R0. A seam nobody exercises
 rots: the signature drifts and nothing notices until the stage that needs it
-arrives, several months later. These tests exercise all eight seams from day
+arrives, several months later. These tests exercise all nine seams from day
 one, with fakes standing in for the stages that do not exist yet."""
 
 import dataclasses
@@ -1876,13 +1881,9 @@ import pytest
 from app.core.contracts import (
     Answer,
     Candidate,
-    Context,
     DocRef,
-    Filters,
     GateVerdict,
-    Plan,
     Query,
-    Trace,
 )
 from app.core.pipeline import Stages, answer
 from app.core.stages import noops
@@ -1967,9 +1968,33 @@ async def test_the_loop_runs_again_when_the_gate_says_insufficient():
     assert result.trace.iterations == 2
 
 
+async def test_the_rewrite_runs_once_however_many_iterations():
+    """Re-entry is at `plan`, not `rewrite`: the gate writes the refined query
+    itself, and running R4's rewriter over it again risks dropping the very
+    term the gate added. Invisible at R0, where rewrite returns its input."""
+    verdicts = [GateVerdict(sufficient=False, refined_query="second"), GateVerdict(sufficient=True)]
+    rewritten = []
+
+    async def counting_rewrite(query, trace):
+        rewritten.append(query.text)
+        return query
+
+    async def gate(query, context, trace):
+        return verdicts.pop(0)
+
+    result = await answer(
+        Query(text="first"),
+        _stages(rewrite=counting_rewrite, gate=gate),
+        max_iterations=3,
+    )
+
+    assert rewritten == ["first"]
+    assert result.trace.iterations == 2
+
+
 async def test_context_accumulates_across_iterations():
     """Iteration two must add to iteration one, not replace it."""
-    verdicts = [GateVerdict(sufficient=False, refined_query="second"), GateVerdict(True)]
+    verdicts = [GateVerdict(sufficient=False, refined_query="second"), GateVerdict(sufficient=True)]
     captured = {}
 
     async def gate(query, context, trace):
@@ -2020,6 +2045,17 @@ async def test_a_failing_stage_degrades_to_its_no_op():
 
     assert isinstance(result, Answer)
     assert any(n.detail.get("fallback") for n in result.trace.nodes)
+
+
+async def test_a_stage_without_a_no_op_is_allowed_to_fail_the_request():
+    """`retrieve`, `expand`, `build_context` and `generate` have no meaningful
+    empty version. Swallowing their failures would return a confident answer
+    built from nothing."""
+    async def broken_retrieve(plan, trace):
+        raise RuntimeError("the database is gone")
+
+    with pytest.raises(RuntimeError):
+        await answer(Query(text="q"), _stages(retrieve=broken_retrieve), max_iterations=1)
 ```
 
 - [ ] **Step 2: Run it to verify it fails** — module does not exist.
@@ -2032,8 +2068,9 @@ async def test_a_failing_stage_degrades_to_its_no_op():
 implementation degrades to when it fails, which is why they are named rather
 than inlined."""
 
-from app.core.contracts import Candidate, Context, GateVerdict, Plan, Query, Trace
+from app.config import get_settings
 from app.core.context_builder import build_context as _build_context
+from app.core.contracts import Candidate, Context, GateVerdict, Plan, Query, Trace
 
 
 async def rewrite(query: Query, trace: Trace) -> Query:
@@ -2053,14 +2090,10 @@ async def fuse(query: Query, candidates: list[Candidate], trace: Trace) -> list[
     deep, and only the top retrieval_top_k are worth expanding into parents.
     Every version of this stage ends with the same cut.
     """
-    from app.config import get_settings
-
     return candidates[: get_settings().retrieval_top_k]
 
 
 def build_context_stage(previous: Context, candidates: list[Candidate], trace: Trace) -> Context:
-    from app.config import get_settings
-
     return _build_context(previous, candidates, get_settings().context_token_budget)
 
 
@@ -2085,8 +2118,9 @@ Nothing here moves.
 """
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from app.core.contracts import Answer, Context, Query, Trace
 from app.core.stages import noops
@@ -2105,6 +2139,9 @@ class Stages:
     reflect: Callable
 
 
+# Only the stages with a meaningful empty version. `retrieve`, `expand`,
+# `build_context` and `generate` are absent on purpose: there is nothing they
+# could return that is not a confident answer built from nothing.
 _FALLBACKS = {
     "rewrite": noops.rewrite,
     "plan": noops.plan,
@@ -2123,9 +2160,11 @@ async def _run(name: str, stage: Callable, trace: Trace, *args) -> Any:
     started = time.perf_counter()
     try:
         result = stage(*args)
+        # Stages may be sync: build_context is a pure function and gains
+        # nothing from being a coroutine.
         result = await result if hasattr(result, "__await__") else result
         fallback = False
-    except Exception as error:                       # noqa: BLE001 -- deliberate
+    except Exception as error:
         fallback_stage = _FALLBACKS.get(name)
         if fallback_stage is None:
             raise
@@ -2139,8 +2178,12 @@ async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer:
     trace = Trace()
     context = Context.empty()
 
+    # Outside the loop: re-entry is at `plan`. The gate writes the refined
+    # query itself, and running the rewriter over it again risks dropping the
+    # very term the gate added.
+    query = await _run("rewrite", stages.rewrite, trace, query, trace)
+
     for iteration in range(1, max_iterations + 1):
-        query = await _run("rewrite", stages.rewrite, trace, query, trace)
         plan = await _run("plan", stages.plan, trace, query, trace)
         candidates = await _run("retrieve", stages.retrieve, trace, plan, trace)
         candidates = await _run("fuse", stages.fuse, trace, query, candidates, trace)
@@ -2151,7 +2194,6 @@ async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer:
         trace.iterations = iteration
         if verdict.sufficient:
             break
-        # Re-enter at `plan`, not `rewrite`: the gate already wrote the query.
         query = query.refined(verdict.refined_query or query.text)
 
     text, citations = await _run("generate", stages.generate, trace, query, context, trace)
@@ -2173,8 +2215,8 @@ from app.core.generator import generate as _generate
 from app.core.parent_expander import expand_parents
 from app.core.pipeline import Stages
 from app.core.retrievers.vector import VectorRetriever
-from app.repositories.chunk_repository import ChunkRepository
 from app.core.stages import noops
+from app.repositories.chunk_repository import ChunkRepository
 from shared.llm import AsyncLLMProvider
 
 
@@ -2187,8 +2229,8 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
         # two that both query the database raises "another operation is in
         # progress". R0 has a single retriever, so the gather is safe today.
         results = await asyncio.gather(*(r.search(plan) for r in retrievers))
-        trace.record("retrieve_detail", ms=0, per_source={r.source: len(x)
-                                                          for r, x in zip(retrievers, results)})
+        per_source = {r.source: len(x) for r, x in zip(retrievers, results, strict=True)}
+        trace.record("retrieve_detail", ms=0, per_source=per_source)
         return [candidate for group in results for candidate in group]
 
     async def expand(candidates, trace):
@@ -2210,7 +2252,7 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
     )
 ```
 
-- [ ] **Step 5: Run the tests** — PASS, 6 tests.
+- [ ] **Step 5: Run the tests** — PASS, 8 tests.
 
 - [ ] **Step 6: Full suite, then stop**
 
