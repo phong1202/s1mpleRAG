@@ -57,3 +57,12 @@ async def test_stub_embeddings_are_deterministic_and_normalised():
     assert first == second
     assert len(first) == 8
     assert abs(sum(x * x for x in first) - 1.0) < 1e-6
+
+async def test_script_replaces_the_queue_rather_than_appending_to_it():
+    """Two calls for the same schema must not leave the first response in front
+    of the second: a test that scripts an answer would get the previous test's."""
+    provider = AsyncStubProvider()
+    provider.script(Verdict, Verdict(sufficient=False))
+    provider.script(Verdict, Verdict(sufficient=True))
+
+    assert (await provider.complete([], Verdict)).sufficient is True

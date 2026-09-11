@@ -497,6 +497,15 @@ async def test_stub_embeddings_are_deterministic_and_normalised():
     assert first == second
     assert len(first) == 8
     assert abs(sum(x * x for x in first) - 1.0) < 1e-6
+
+async def test_script_replaces_the_queue_rather_than_appending_to_it():
+    """Two calls for the same schema must not leave the first response in front
+    of the second: a test that scripts an answer would get the previous test's."""
+    provider = AsyncStubProvider()
+    provider.script(Verdict, Verdict(sufficient=False))
+    provider.script(Verdict, Verdict(sufficient=True))
+
+    assert (await provider.complete([], Verdict)).sufficient is True
 ```
 
 - [ ] **Step 3: Run it to verify it fails** — `ImportError: cannot import name 'AsyncStubProvider'`
@@ -551,6 +560,16 @@ class AsyncStubProvider:
 
     async def embed_query(self, text: str) -> list[float]:
         return _unit_vector_from(text, self._dimensions)
+
+
+    def script(self, schema: type[T], *responses: T) -> None:
+        """Queue responses for a schema after construction.
+
+        The constructor copies its `responses` mapping, so a caller that builds
+        the provider before it knows what the provider must return -- a FastAPI
+        dependency override, for one -- has no other way in.
+        """
+        self._responses[schema] = list(responses)
 
 
 class AsyncOpenAIProvider:
@@ -2271,40 +2290,107 @@ Proposed commit message: `feat(core): add the retrieval pipeline and its no-op s
 - Consumes: `build_stages`, `answer`, the response envelope from Phase 1
 - Produces: `POST /query` with body `{question, top_k?, category?, document_id?}` returning `{code, message, data: {answer, citations, latency_ms}}`
 
+> The LLM provider is a `Depends`, not a call inside the service. A test cannot override what
+> a function fetches for itself, and with the stub raising `KeyError` on an unscripted schema
+> every request would be a 500. `top_k` is gone from the request body: nothing downstream
+> honours it, and a parameter that silently does nothing is worse than no parameter.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_query_api.py
+"""The HTTP edge of the read path. The LLM is injected rather than fetched, so
+each test scripts the answer it needs."""
+
 import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+
+from app.app import create_app
+from app.core.generator import Draft
+from app.utils.database import get_session
+from shared.llm import AsyncStubProvider, get_async_provider
+from tests.helpers import seed_chunks
 
 pytestmark = pytest.mark.asyncio
 
 
-async def test_query_returns_an_answer_with_citations(client, seeded_corpus):
+@pytest_asyncio.fixture
+async def query_client(db_session):
+    """A client over the rolled-back session whose LLM is a scripted stub.
+
+    `get_async_provider` is overridden, not monkeypatched: the route declares it
+    with Depends, which is the only reason a test can replace it at all.
+    """
+    provider = AsyncStubProvider(dimensions=1536)
+    app = create_app()
+
+    async def _session():
+        yield db_session
+
+    app.dependency_overrides[get_session] = _session
+    app.dependency_overrides[get_async_provider] = lambda: provider
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac, provider
+
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def seeded_corpus(db_session):
+    return await seed_chunks(db_session)
+
+
+async def test_query_returns_an_answer_with_citations(query_client, seeded_corpus):
+    client, provider = query_client
+    provider.script(Draft, Draft(answer="Lap hoa don dieu chinh [1]."))
+
     response = await client.post("/query", json={"question": "hoa don dien tu"})
 
     assert response.status_code == 200
     data = response.json()["data"]
     assert isinstance(data["answer"], str) and data["answer"]
+    assert data["citations"][0]["kind"] == "document"
     assert data["citations"][0]["page_number"] >= 1
-    assert "document_id" in data["citations"][0]
+    assert data["citations"][0]["document_id"]
     assert data["latency_ms"] >= 0
 
 
-async def test_an_empty_question_is_rejected_by_validation(client):
+async def test_an_empty_question_is_rejected_by_validation(query_client):
+    client, _ = query_client
+
     response = await client.post("/query", json={"question": "   "})
 
     assert response.status_code == 422
 
 
-async def test_a_question_with_no_matching_corpus_still_answers(client):
+async def test_a_question_with_no_matching_corpus_still_answers(query_client, seeded_corpus):
     """No results is not an error. The answer says so; the status stays 200."""
+    client, provider = query_client
+    provider.script(Draft, Draft(answer="Khong tim thay trong tai lieu."))
+
     response = await client.post(
         "/query", json={"question": "gi do", "category": "MARKETING"}
     )
 
     assert response.status_code == 200
     assert response.json()["data"]["citations"] == []
+
+
+async def test_the_filters_reach_the_retrieval_query(query_client, seeded_corpus):
+    """category and document_id are not decoration: they narrow the candidate
+    pool inside the SQL. Dropping them on the way through would widen every
+    filtered question to the whole corpus, silently."""
+    client, provider = query_client
+    provider.script(Draft, Draft(answer="Theo tai lieu [1]."))
+
+    matching = await client.post("/query", json={"question": "q", "category": "LEGAL"})
+    other = await client.post("/query", json={"question": "q", "category": "MARKETING"})
+
+    assert matching.json()["data"]["citations"] != []
+    assert other.json()["data"]["citations"] == []
 ```
 
 - [ ] **Step 2: Run it to verify it fails** — 404, route not registered.
@@ -2320,7 +2406,6 @@ from pydantic import BaseModel, Field, field_validator
 
 class QueryRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
-    top_k: int | None = Field(default=None, ge=1, le=50)
     category: str | None = None
     document_id: uuid.UUID | None = None
 
@@ -2333,8 +2418,14 @@ class QueryRequest(BaseModel):
 
 
 class CitationOut(BaseModel):
+    """The DocCitation | WebCitation union, flattened for JSON.
+
+    `kind` is what a client reads to know whether the reference can be checked:
+    a document and page can, a URL cannot.
+    """
+
     ordinal: int
-    kind: str                     # "document" | "web" -- the union, made explicit
+    kind: str
     document_id: uuid.UUID | None = None
     filename: str | None = None
     page_number: int | None = None
@@ -2362,12 +2453,16 @@ from app.core.contracts import DocCitation, Filters, Query
 from app.core.deps import build_stages
 from app.core.pipeline import answer as run_pipeline
 from app.schemas.query import CitationOut, QueryRequest, QueryResponse
-from shared.llm import get_async_provider
+from shared.llm import AsyncLLMProvider
 
 
 class QueryService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, provider: AsyncLLMProvider) -> None:
+        # The provider arrives from outside rather than from get_async_provider()
+        # here: a test cannot override what a function fetches for itself, and
+        # every stage from R4 on is an LLM call that tests must be able to script.
         self._session = session
+        self._provider = provider
 
     async def ask(self, payload: QueryRequest) -> QueryResponse:
         settings = get_settings()
@@ -2378,7 +2473,7 @@ class QueryService:
                 text=payload.question,
                 filters=Filters(category=payload.category, document_id=payload.document_id),
             ),
-            build_stages(self._session, get_async_provider(), settings),
+            build_stages(self._session, self._provider, settings),
             max_iterations=settings.retrieval_max_iterations,
         )
 
@@ -2409,18 +2504,23 @@ from app.schemas.query import QueryRequest, QueryResponse
 from app.schemas.response import ApiResponse
 from app.services.query_service import QueryService
 from app.utils.database import get_session
+from shared.llm import AsyncLLMProvider, get_async_provider
 
 router = APIRouter(tags=["query"])
 
 
 @router.post("/query", response_model=ApiResponse[QueryResponse])
-async def query(payload: QueryRequest, session: AsyncSession = Depends(get_session)):
-    return ApiResponse(data=await QueryService(session).ask(payload))
+async def query(
+    payload: QueryRequest,
+    session: AsyncSession = Depends(get_session),
+    provider: AsyncLLMProvider = Depends(get_async_provider),
+) -> ApiResponse[QueryResponse]:
+    return ApiResponse.ok(await QueryService(session, provider).ask(payload))
 ```
 
 Register it in `app/controllers/__init__.py` next to the existing routers.
 
-- [ ] **Step 5: Run the tests** — PASS, 3 tests.
+- [ ] **Step 5: Run the tests** — PASS, 4 tests.
 
 - [ ] **Step 6: Full suite, then stop**
 

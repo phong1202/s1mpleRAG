@@ -498,6 +498,16 @@ async def test_stub_embeddings_are_deterministic_and_normalised():
     assert first == second
     assert len(first) == 8
     assert abs(sum(x * x for x in first) - 1.0) < 1e-6
+
+async def test_script_replaces_the_queue_rather_than_appending_to_it():
+    """Hai lần gọi cho cùng một schema không được để phản hồi đầu nằm trước
+    phản hồi sau: một test viết kịch bản cho câu trả lời của mình sẽ nhận được
+    câu trả lời của test trước đó."""
+    provider = AsyncStubProvider()
+    provider.script(Verdict, Verdict(sufficient=False))
+    provider.script(Verdict, Verdict(sufficient=True))
+
+    assert (await provider.complete([], Verdict)).sufficient is True
 ```
 
 - [ ] **Step 3: Chạy để xác nhận đỏ** — `ImportError: cannot import name 'AsyncStubProvider'`
@@ -552,6 +562,16 @@ class AsyncStubProvider:
 
     async def embed_query(self, text: str) -> list[float]:
         return _unit_vector_from(text, self._dimensions)
+
+
+    def script(self, schema: type[T], *responses: T) -> None:
+        """Xếp hàng phản hồi cho một schema sau khi đã khởi tạo.
+
+        Constructor sao chép mapping `responses`, nên một bên dựng provider từ
+        trước khi biết nó phải trả về gì -- chẳng hạn một dependency override
+        của FastAPI -- không còn đường nào khác để vào.
+        """
+        self._responses[schema] = list(responses)
 
 
 class AsyncOpenAIProvider:
@@ -2273,41 +2293,108 @@ Commit message đề xuất: `feat(core): add the retrieval pipeline and its no-
 - Consumes: `build_stages`, `answer`, response envelope của Phase 1
 - Produces: `POST /query` với body `{question, top_k?, category?, document_id?}` trả `{code, message, data: {answer, citations, latency_ms}}`
 
+> Provider của LLM là một `Depends`, không phải một lời gọi bên trong service. Test không thể
+> ghi đè thứ mà một hàm tự đi lấy, và vì stub ném `KeyError` với schema chưa có kịch bản nên
+> mọi request sẽ thành 500. `top_k` đã bị bỏ khỏi request body: không bước nào phía sau tôn
+> trọng nó, mà một tham số im lặng không làm gì thì tệ hơn là không có tham số.
+
 - [ ] **Step 1: Viết test đỏ**
 
 ```python
 # tests/test_query_api.py
+"""Rìa HTTP của đường đọc. LLM được tiêm vào chứ không tự đi lấy, nên mỗi test
+tự viết kịch bản cho câu trả lời nó cần."""
+
 import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+
+from app.app import create_app
+from app.core.generator import Draft
+from app.utils.database import get_session
+from shared.llm import AsyncStubProvider, get_async_provider
+from tests.helpers import seed_chunks
 
 pytestmark = pytest.mark.asyncio
 
 
-async def test_query_returns_an_answer_with_citations(client, seeded_corpus):
+@pytest_asyncio.fixture
+async def query_client(db_session):
+    """Một client chạy trên session sẽ được rollback, với LLM là stub có kịch bản.
+
+    `get_async_provider` được ghi đè chứ không monkeypatch: route khai báo nó
+    bằng Depends, và đó là lý do duy nhất khiến một test thay được nó.
+    """
+    provider = AsyncStubProvider(dimensions=1536)
+    app = create_app()
+
+    async def _session():
+        yield db_session
+
+    app.dependency_overrides[get_session] = _session
+    app.dependency_overrides[get_async_provider] = lambda: provider
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac, provider
+
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def seeded_corpus(db_session):
+    return await seed_chunks(db_session)
+
+
+async def test_query_returns_an_answer_with_citations(query_client, seeded_corpus):
+    client, provider = query_client
+    provider.script(Draft, Draft(answer="Lap hoa don dieu chinh [1]."))
+
     response = await client.post("/query", json={"question": "hoa don dien tu"})
 
     assert response.status_code == 200
     data = response.json()["data"]
     assert isinstance(data["answer"], str) and data["answer"]
+    assert data["citations"][0]["kind"] == "document"
     assert data["citations"][0]["page_number"] >= 1
-    assert "document_id" in data["citations"][0]
+    assert data["citations"][0]["document_id"]
     assert data["latency_ms"] >= 0
 
 
-async def test_an_empty_question_is_rejected_by_validation(client):
+async def test_an_empty_question_is_rejected_by_validation(query_client):
+    client, _ = query_client
+
     response = await client.post("/query", json={"question": "   "})
 
     assert response.status_code == 422
 
 
-async def test_a_question_with_no_matching_corpus_still_answers(client):
-    """Không có kết quả không phải là lỗi. Câu trả lời nói vậy; status vẫn
-    200."""
+async def test_a_question_with_no_matching_corpus_still_answers(query_client, seeded_corpus):
+    """Không có kết quả không phải là lỗi. Câu trả lời nói rõ điều đó; status
+    vẫn là 200."""
+    client, provider = query_client
+    provider.script(Draft, Draft(answer="Khong tim thay trong tai lieu."))
+
     response = await client.post(
         "/query", json={"question": "gi do", "category": "MARKETING"}
     )
 
     assert response.status_code == 200
     assert response.json()["data"]["citations"] == []
+
+
+async def test_the_filters_reach_the_retrieval_query(query_client, seeded_corpus):
+    """category và document_id không phải đồ trang trí: chúng thu hẹp tập ứng
+    viên ngay trong SQL. Đánh rơi chúng trên đường đi sẽ âm thầm mở rộng mọi câu
+    hỏi có lọc ra toàn bộ corpus."""
+    client, provider = query_client
+    provider.script(Draft, Draft(answer="Theo tai lieu [1]."))
+
+    matching = await client.post("/query", json={"question": "q", "category": "LEGAL"})
+    other = await client.post("/query", json={"question": "q", "category": "MARKETING"})
+
+    assert matching.json()["data"]["citations"] != []
+    assert other.json()["data"]["citations"] == []
 ```
 
 - [ ] **Step 2: Chạy để xác nhận đỏ** — 404, route chưa đăng ký.
@@ -2323,7 +2410,6 @@ from pydantic import BaseModel, Field, field_validator
 
 class QueryRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
-    top_k: int | None = Field(default=None, ge=1, le=50)
     category: str | None = None
     document_id: uuid.UUID | None = None
 
@@ -2336,8 +2422,14 @@ class QueryRequest(BaseModel):
 
 
 class CitationOut(BaseModel):
+    """Union DocCitation | WebCitation, làm phẳng cho JSON.
+
+    `kind` là thứ client đọc để biết tham chiếu có kiểm chứng được không: một
+    tài liệu kèm số trang thì được, một URL thì không.
+    """
+
     ordinal: int
-    kind: str                     # "document" | "web" -- union, làm rõ ra ngoài API
+    kind: str
     document_id: uuid.UUID | None = None
     filename: str | None = None
     page_number: int | None = None
@@ -2365,12 +2457,16 @@ from app.core.contracts import DocCitation, Filters, Query
 from app.core.deps import build_stages
 from app.core.pipeline import answer as run_pipeline
 from app.schemas.query import CitationOut, QueryRequest, QueryResponse
-from shared.llm import get_async_provider
+from shared.llm import AsyncLLMProvider
 
 
 class QueryService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, provider: AsyncLLMProvider) -> None:
+        # Provider đến từ bên ngoài thay vì gọi get_async_provider() ở đây: test
+        # không ghi đè được thứ mà một hàm tự đi lấy, và từ R4 trở đi mọi stage
+        # đều là một lời gọi LLM mà test phải viết được kịch bản.
         self._session = session
+        self._provider = provider
 
     async def ask(self, payload: QueryRequest) -> QueryResponse:
         settings = get_settings()
@@ -2381,7 +2477,7 @@ class QueryService:
                 text=payload.question,
                 filters=Filters(category=payload.category, document_id=payload.document_id),
             ),
-            build_stages(self._session, get_async_provider(), settings),
+            build_stages(self._session, self._provider, settings),
             max_iterations=settings.retrieval_max_iterations,
         )
 
@@ -2412,18 +2508,23 @@ from app.schemas.query import QueryRequest, QueryResponse
 from app.schemas.response import ApiResponse
 from app.services.query_service import QueryService
 from app.utils.database import get_session
+from shared.llm import AsyncLLMProvider, get_async_provider
 
 router = APIRouter(tags=["query"])
 
 
 @router.post("/query", response_model=ApiResponse[QueryResponse])
-async def query(payload: QueryRequest, session: AsyncSession = Depends(get_session)):
-    return ApiResponse(data=await QueryService(session).ask(payload))
+async def query(
+    payload: QueryRequest,
+    session: AsyncSession = Depends(get_session),
+    provider: AsyncLLMProvider = Depends(get_async_provider),
+) -> ApiResponse[QueryResponse]:
+    return ApiResponse.ok(await QueryService(session, provider).ask(payload))
 ```
 
 Đăng ký nó trong `app/controllers/__init__.py`, cạnh các router đang có.
 
-- [ ] **Step 5: Chạy test** — PASS, 3 test.
+- [ ] **Step 5: Chạy test** — PASS, 4 test.
 
 - [ ] **Step 6: Suite đầy đủ, rồi dừng**
 

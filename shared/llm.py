@@ -160,6 +160,15 @@ class AsyncStubProvider:
     async def embed_query(self, text: str) -> list[float]:
         return _unit_vector_from(text, self._dimensions)
 
+    def script(self, schema: type[T], *responses: T) -> None:
+        """Queue responses for a schema after construction.
+
+        The constructor copies its `responses` mapping, so a caller that builds
+        the provider before it knows what the provider must return -- a FastAPI
+        dependency override, for one -- has no other way in.
+        """
+        self._responses[schema] = list(responses)
+
 
 class AsyncOpenAIProvider:
     def __init__(self) -> None:
