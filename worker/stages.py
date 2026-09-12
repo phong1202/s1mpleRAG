@@ -122,6 +122,19 @@ def parse(self, document_id: str) -> str:
 @app.task(name="worker.stages.structure", bind=True, max_retries=5)
 def structure(self, document_id: str) -> str:
     try:
+        from shared.storage import get_store
+        from worker.chunking import chunk_document
+
+        store = get_store()
+        key = f"staging/{document_id}/chunks.json"
+        if store.exists(key):  # checkpoint skip
+            _advance(document_id, "STRUCTURING", stage="STRUCTURING")
+            return document_id
+
+        _advance(document_id, "STRUCTURING")
+        parsed = store.get_json(f"staging/{document_id}/parsed.json")
+        store.put_json(key, chunk_document(parsed))
+
         _advance(document_id, "STRUCTURING", stage="STRUCTURING")
         return document_id
     except AppException as exc:
