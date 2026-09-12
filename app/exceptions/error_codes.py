@@ -17,6 +17,7 @@ class ErrorCode(Enum):
     DOCUMENT_NOT_FOUND = (404, "Document not found")
     DOCUMENT_ALREADY_INGESTED = (409, "Document already ingested")
     PDF_ENCRYPTED = (422, "PDF is encrypted and cannot be parsed")
+    PDF_MALFORMED = (422, "PDF is corrupted and cannot be parsed")
     PDF_TOO_LARGE = (413, "PDF exceeds the size or page limit")
     HASH_MISMATCH = (400, "Uploaded object does not match the supplied hash")
 

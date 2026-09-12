@@ -181,3 +181,31 @@ def seeded_document(uploaded_pdf):
         obj = session.get(Document, doc_id)
         if obj is not None:
             session.delete(obj)
+
+
+@pytest.fixture
+def store():
+    from app.config import get_settings
+    from shared.storage import ObjectStore
+
+    return ObjectStore(endpoint=get_settings().minio_public_url)
+
+
+@pytest.fixture
+def uploaded(store):
+    """Uploads a named fixture PDF to MinIO and returns its object_key,
+    cleaning up every key it created afterward -- raw/ has no lifecycle
+    rule, so nothing else ever removes these."""
+    uploaded_keys: list[str] = []
+
+    def _upload(name: str) -> str:
+        data = (Path(__file__).parent / "fixtures" / name).read_bytes()
+        key = f"raw/{hashlib.sha256(data).hexdigest()}.pdf"
+        store.put(key, data)
+        uploaded_keys.append(key)
+        return key
+
+    yield _upload
+
+    for key in uploaded_keys:
+        store.delete(key)

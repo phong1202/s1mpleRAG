@@ -12,6 +12,8 @@ import uuid
 import httpx
 import pytest
 
+from shared.storage import get_public_store
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -59,25 +61,30 @@ async def test_the_full_upload_and_register_flow_against_real_minio(client):
     )
     target = url_response.json()["data"]
 
-    put_response = httpx.put(
-        target["upload_url"],
-        content=payload,
-        headers={"x-amz-checksum-sha256": _b64(digest)},
-    )
-    assert put_response.status_code == 200
+    try:
+        put_response = httpx.put(
+            target["upload_url"],
+            content=payload,
+            headers={"x-amz-checksum-sha256": _b64(digest)},
+        )
+        assert put_response.status_code == 200
 
-    register_response = await client.post(
-        "/documents",
-        json={
-            "object_key": target["object_key"],
-            "filename": "report.pdf",
-            "sha256": digest,
-            "size_bytes": len(payload),
-        },
-    )
+        register_response = await client.post(
+            "/documents",
+            json={
+                "object_key": target["object_key"],
+                "filename": "report.pdf",
+                "sha256": digest,
+                "size_bytes": len(payload),
+            },
+        )
 
-    assert register_response.status_code == 202
-    assert register_response.json()["data"]["status"] == "QUEUED"
+        assert register_response.status_code == 202
+        assert register_response.json()["data"]["status"] == "QUEUED"
+    finally:
+        # This test puts a real object in MinIO via a real PUT -- unlike
+        # the rest of the suite's DB writes, nothing rolls that back.
+        get_public_store().delete(target["object_key"])
 
 
 async def test_register_returns_202_and_a_queued_document(client, uploaded_pdf):

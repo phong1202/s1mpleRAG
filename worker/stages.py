@@ -23,7 +23,12 @@ MAX_ATTEMPTS = 3
 
 # Permanent: the file will never parse, so retrying only burns time and
 # hides the real reason.
-PERMANENT = {ErrorCode.PDF_ENCRYPTED, ErrorCode.PDF_TOO_LARGE, ErrorCode.HASH_MISMATCH}
+PERMANENT = {
+    ErrorCode.PDF_ENCRYPTED,
+    ErrorCode.PDF_MALFORMED,
+    ErrorCode.PDF_TOO_LARGE,
+    ErrorCode.HASH_MISMATCH,
+}
 
 
 def _advance(
@@ -71,7 +76,38 @@ def stage_failed(document_id: str, stage: str, exc: BaseException) -> bool:
 @app.task(name="worker.stages.parse", bind=True, max_retries=3)
 def parse(self, document_id: str) -> str:
     try:
+        # Imports live inside the try, not above it: an import failure here
+        # is exactly as real a stage failure as anything else in the body,
+        # and outside the try it would bypass stage_failed() entirely --
+        # observed directly while wiring this in, where a document stuck at
+        # QUEUED forever with attempts=0 and no last_error, because the
+        # exception never reached either except clause.
+        from app.config import get_settings
+        from shared.storage import get_store
+        from worker.parsing import parse_document
+
+        store = get_store()
+        key = f"staging/{document_id}/parsed.json"
+        if store.exists(key):  # checkpoint skip
+            _advance(document_id, "PARSING", stage="PARSING")
+            return document_id
+
         _advance(document_id, "PARSING")
+        with session_scope() as session:
+            document = session.get(Document, uuid.UUID(document_id))
+            object_key = document.object_key
+
+        result = parse_document(object_key, store, get_settings().docling_url)
+        store.put_json(key, result)
+
+        with session_scope() as session:
+            document = session.get(Document, uuid.UUID(document_id))
+            document.page_count = result["page_count"]
+            # Filename is the last-resort fallback and it lives here, not
+            # in the parser: raw/{sha256}.pdf is the only name the parser
+            # ever sees.
+            document.title = result["title"] or document.filename
+
         _advance(document_id, "PARSING", stage="PARSING")
         return document_id
     except AppException as exc:

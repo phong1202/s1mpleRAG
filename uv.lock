@@ -1209,6 +1209,7 @@ dependencies = [
     { name = "boto3" },
     { name = "celery" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "kombu" },
     { name = "openai" },
     { name = "pgvector" },
@@ -1222,7 +1223,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pypdf" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1237,6 +1237,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.43.87" },
     { name = "celery", specifier = ">=5.6.3" },
     { name = "fastapi" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "kombu", specifier = ">=5.6.2" },
     { name = "openai", specifier = ">=3.8.0" },
     { name = "pgvector" },
@@ -1250,7 +1251,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx" },
     { name = "pypdf", specifier = ">=6.16.2" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
