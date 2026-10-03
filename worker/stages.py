@@ -14,12 +14,21 @@ from celery import chain
 
 from app.exceptions import AppException, ErrorCode
 from app.models.document import Document
+
+# Top-level, unlike each stage's own imports: an except clause naming it is
+# evaluated whenever an exception reaches it, so it must already be bound.
+from shared.rate_limiter import RateLimited
 from worker.celery_app import app
 from worker.db import session_scope
 
 STAGES = ["PARSING", "STRUCTURING", "ENRICHING", "EMBEDDING", "PERSISTING"]
 
 MAX_ATTEMPTS = 3
+
+# request.retries also counts rate-limit deferrals in the stages that have
+# them, so an uncapped 2**retries would make one transient error after a
+# dozen deferrals wait over an hour.
+MAX_BACKOFF_S = 300
 
 # Permanent: the file will never parse, so retrying only burns time and
 # hides the real reason.
@@ -28,6 +37,9 @@ PERMANENT = {
     ErrorCode.PDF_MALFORMED,
     ErrorCode.PDF_TOO_LARGE,
     ErrorCode.HASH_MISMATCH,
+    # Config-driven, not document-driven: a batch that costs more than the
+    # whole rate limit bucket costs exactly as much on every retry.
+    ErrorCode.RATE_LIMIT_UNSATISFIABLE,
 }
 
 
@@ -146,18 +158,63 @@ def structure(self, document_id: str) -> str:
         raise self.retry(exc=exc, countdown=2**self.request.retries) from exc
 
 
-@app.task(name="worker.stages.enrich", bind=True, max_retries=3)
+# max_retries=None: Celery's retry budget would otherwise be spent by
+# rate-limit deferrals, which are not failures. MAX_ATTEMPTS, enforced by
+# stage_failed(), stays the ceiling for real ones.
+@app.task(name="worker.stages.enrich", bind=True, max_retries=None)
 def enrich(self, document_id: str) -> str:
     try:
+        from app.config import get_settings
+        from shared.llm import get_provider
+        from shared.storage import get_store
+        from worker.enrichment import enrich_chunks
+
+        store = get_store()
+        key = f"staging/{document_id}/enriched.json"
+        if store.exists(key):  # checkpoint skip
+            _advance(document_id, "ENRICHING", stage="ENRICHING")
+            return document_id
+
+        _advance(document_id, "ENRICHING")
+        chunks = store.get_json(f"staging/{document_id}/chunks.json")
+        # chunk_index plays the "id" role in the provider contract -- it is
+        # deterministic, so a rerun asks about exactly the same id set.
+        children = [{**c, "id": c["chunk_index"]} for c in chunks["children"]]
+
+        # Left behind on success for the staging bucket's 7-day expiry:
+        # deleting it here would add a failure point after the real
+        # checkpoint is already written.
+        partial_key = f"staging/{document_id}/enriched.partial.json"
+        done = store.get_json(partial_key)["chunks"] if store.exists(partial_key) else []
+
+        try:
+            enriched = enrich_chunks(
+                children,
+                provider=get_provider(),
+                batch_size=get_settings().enrich_batch_size,
+                done=done,
+            )
+        except RateLimited as exc:
+            # Saved here, inside the outer try, and not in its RateLimited
+            # handler: a storage failure while saving must still reach
+            # stage_failed() like any other, not escape from a handler.
+            store.put_json(partial_key, {"chunks": exc.partial})
+            raise
+        store.put_json(key, {"chunks": enriched})
+
         _advance(document_id, "ENRICHING", stage="ENRICHING")
         return document_id
     except AppException as exc:
         stage_failed(document_id, "ENRICHING", exc)
         raise
+    except RateLimited as exc:
+        # Must come before `except Exception`. Not a failure: nothing is
+        # recorded, and this is the one and only retry published for it.
+        raise self.retry(exc=exc, countdown=exc.countdown) from exc
     except Exception as exc:
         if stage_failed(document_id, "ENRICHING", exc):
             raise
-        raise self.retry(exc=exc, countdown=2**self.request.retries) from exc
+        raise self.retry(exc=exc, countdown=min(2**self.request.retries, MAX_BACKOFF_S)) from exc
 
 
 @app.task(name="worker.stages.embed", bind=True, max_retries=3)

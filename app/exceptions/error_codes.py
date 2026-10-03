@@ -21,6 +21,9 @@ class ErrorCode(Enum):
     PDF_TOO_LARGE = (413, "PDF exceeds the size or page limit")
     HASH_MISMATCH = (400, "Uploaded object does not match the supplied hash")
 
+    # --- Rate limiting ---
+    RATE_LIMIT_UNSATISFIABLE = (500, "Batch cost exceeds the rate limit bucket's capacity")
+
     def __init__(self, status: int, message: str) -> None:
         self.status = status
         self.message = message

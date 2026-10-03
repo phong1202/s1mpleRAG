@@ -131,3 +131,111 @@ def test_retries_stop_at_the_attempt_ceiling_not_at_max_retries(seeded_document,
     document = reload(seeded_document.id)
     assert document.status == "DEAD_LETTER"
     assert document.failed_stage == "STRUCTURING"
+
+
+@pytest.fixture
+def staged_chunks(seeded_document):
+    """chunks.json for seeded_document, as S2 would have left it -- enrich's
+    input: 60 children, three batches at the default size of 20. Cleaned up
+    for real, along with whatever enrich writes."""
+    from shared.storage import get_store
+
+    store = get_store()
+    prefix = f"staging/{seeded_document.id}"
+    children = [{"chunk_index": i, "content": f"body {i}", "token_count": 50} for i in range(60)]
+    store.put_json(f"{prefix}/chunks.json", {"parents": [], "children": children})
+    yield seeded_document
+    for name in ("chunks.json", "enriched.json", "enriched.partial.json"):
+        store.delete(f"{prefix}/{name}")
+
+
+def test_a_rate_limited_enrich_is_deferred_not_counted_as_a_failure(staged_chunks, monkeypatch):
+    """Being rate limited is the limiter doing its job, not an error. It
+    used to land in the stage's generic `except Exception` -- Celery's Retry
+    is an Exception -- so every deferral cost an attempt (three deferrals
+    dead-lettered a perfectly healthy document) and published a second
+    retry on top of the first, running the rest of the chain twice."""
+    from worker import enrichment, stages
+
+    calls = {"n": 0}
+
+    class WaitOnceBucket:
+        def acquire(self, tokens: int = 1) -> tuple[bool, int]:
+            calls["n"] += 1
+            return (False, 50) if calls["n"] == 1 else (True, 0)
+
+    monkeypatch.setattr(enrichment, "get_bucket", lambda name: WaitOnceBucket())
+
+    stages.enrich.apply(args=(str(staged_chunks.id),)).get()
+
+    document = reload(staged_chunks.id)
+    assert document.attempts == 0
+    assert document.last_error is None
+    assert document.failed_stage is None
+    assert document.stage == "ENRICHING"
+
+
+def test_enrich_stops_at_the_attempt_ceiling_with_no_celery_cap(seeded_document, monkeypatch):
+    """enrich runs with max_retries=None, so that rate-limit deferrals never
+    eat into a retry budget. That leaves MAX_ATTEMPTS as the only thing
+    stopping a real failure from retrying forever -- so it gets its own
+    test rather than borrowing structure's."""
+    from worker import stages
+
+    calls = {"n": 0}
+
+    def flaky_advance(*args, **kwargs):
+        calls["n"] += 1
+        raise ConnectionError("simulated transient failure")
+
+    monkeypatch.setattr(stages, "_advance", flaky_advance)
+
+    with pytest.raises(ConnectionError):
+        stages.enrich.apply(args=(str(seeded_document.id),)).get()
+
+    assert calls["n"] == stages.MAX_ATTEMPTS
+
+    document = reload(seeded_document.id)
+    assert document.status == "DEAD_LETTER"
+    assert document.failed_stage == "ENRICHING"
+
+
+def test_a_mid_document_deferral_resumes_instead_of_starting_over(staged_chunks, monkeypatch):
+    """A deferral used to throw away every batch already enriched -- results
+    lived only in memory until the end -- so the retry sent them all again,
+    paying twice; and under steady contention, where each attempt only has
+    room for the same first few batches, the document never finished at
+    all. What a deferred run paid for is saved before the requeue, and the
+    retry skips it."""
+    from collections import Counter
+
+    import shared.llm
+    from shared.llm import StubProvider
+    from shared.storage import get_store
+    from worker import enrichment, stages
+
+    sent = Counter()
+
+    class CountingStub(StubProvider):
+        def enrich(self, chunks):
+            sent.update(c["id"] for c in chunks)
+            return super().enrich(chunks)
+
+    monkeypatch.setattr(shared.llm, "get_provider", lambda: CountingStub())
+
+    acquires = {"n": 0}
+
+    class WaitAtTheThirdBatch:
+        def acquire(self, tokens: int = 1) -> tuple[bool, int]:
+            acquires["n"] += 1  # two per batch: chat_rpm, then chat_tpm
+            return (False, 50) if acquires["n"] == 5 else (True, 0)
+
+    monkeypatch.setattr(enrichment, "get_bucket", lambda name: WaitAtTheThirdBatch())
+
+    stages.enrich.apply(args=(str(staged_chunks.id),)).get()
+
+    assert len(sent) == 60
+    assert set(sent.values()) == {1}, "a chunk was sent to the LLM more than once"
+
+    enriched = get_store().get_json(f"staging/{staged_chunks.id}/enriched.json")["chunks"]
+    assert [c["id"] for c in enriched] == list(range(60))

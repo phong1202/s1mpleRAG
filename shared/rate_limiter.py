@@ -19,6 +19,23 @@ from app.config import get_settings
 # every call, so only abandoned keys expire.
 _IDLE_TTL_MS = 3_600_000
 
+
+class RateLimited(Exception):
+    """The bucket said "wait", not "no". Raised instead of calling Celery's
+    retry() from inside the work itself: retry() raises Celery's Retry, an
+    Exception subclass, which a stage's generic `except Exception` swallowed
+    -- recording a failed attempt, then publishing a second retry, so each
+    deferral doubled the task. Only the stage task turns this into a retry.
+
+    `partial` carries whatever the deferred run already paid for, so the
+    stage can save it and the retry resume rather than start over."""
+
+    def __init__(self, countdown: float, partial: list | None = None) -> None:
+        super().__init__(f"rate limited, retry in {countdown:.2f}s")
+        self.countdown = countdown
+        self.partial = partial
+
+
 # KEYS[1] = bucket key; ARGV = capacity, refill_per_sec, tokens
 #
 # The clock is read inside the script with TIME rather than passed in. Taking
