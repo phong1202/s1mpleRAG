@@ -82,6 +82,16 @@ def prepare_test_database() -> None:
     worker.db.SessionLocal.configure(bind=worker.db.engine)
 
 
+@pytest.fixture(autouse=True)
+def stub_llm_provider(request, monkeypatch):
+    """Every test runs on StubProvider whatever .env selects, unless marked
+    real_llm. Switching .env to openai for a real run would otherwise send
+    every chain-launching test to the paid API on each `pytest`, and break
+    the ones that rely on the stub answering the same way twice."""
+    if request.node.get_closest_marker("real_llm") is None:
+        monkeypatch.setattr(get_settings(), "llm_provider", "stub")
+
+
 @pytest_asyncio.fixture
 async def db_session():
     """A session inside a transaction that is always rolled back.

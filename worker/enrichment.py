@@ -52,32 +52,37 @@ def enrich_chunks(
     out: dict[int, dict] = {r["id"]: r for r in done or []}
     pending = [c for c in children if c["id"] not in out]
 
-    for start in range(0, len(pending), batch_size):
-        batch = pending[start : start + batch_size]
-        estimated_tokens = (
-            sum(c["token_count"] for c in batch) if "token_count" in batch[0] else len(batch) * 150
-        )
-        try:
-            acquire_or_defer([("chat_rpm", 1), ("chat_tpm", estimated_tokens)])
-        except RateLimited as exc:
-            exc.partial = list(out.values())
-            raise
-
-        results = provider.enrich(batch)
-        wanted = {c["id"] for c in batch}
-        for item in results:
-            if item.id in wanted:
-                out[item.id] = _normalise(item)
-
-        for missing_id in validate_batch(batch, results):
-            single = next(c for c in batch if c["id"] == missing_id)
-            for _ in range(SOLO_ATTEMPTS):
-                retry = provider.enrich([single])
-                if retry and retry[0].id == missing_id:
-                    out[missing_id] = _normalise(retry[0])
-                    break
-            else:
-                # Failed alone twice: empty context, and move on.
-                out[missing_id] = {"id": missing_id, "context": "", "category": "OTHER"}
+    try:
+        for start in range(0, len(pending), batch_size):
+            _enrich_batch(pending[start : start + batch_size], provider, out)
+    except RateLimited as exc:
+        # Whether the local limiter or the provider's own 429 said wait:
+        # hand back everything already paid for, so the retry resumes.
+        exc.partial = list(out.values())
+        raise
 
     return [out[c["id"]] for c in children]
+
+
+def _enrich_batch(batch: list[dict], provider: LLMProvider, out: dict[int, dict]) -> None:
+    estimated_tokens = (
+        sum(c["token_count"] for c in batch) if "token_count" in batch[0] else len(batch) * 150
+    )
+    acquire_or_defer([("chat_rpm", 1), ("chat_tpm", estimated_tokens)])
+
+    results = provider.enrich(batch)
+    wanted = {c["id"] for c in batch}
+    for item in results:
+        if item.id in wanted:
+            out[item.id] = _normalise(item)
+
+    for missing_id in validate_batch(batch, results):
+        single = next(c for c in batch if c["id"] == missing_id)
+        for _ in range(SOLO_ATTEMPTS):
+            retry = provider.enrich([single])
+            if retry and retry[0].id == missing_id:
+                out[missing_id] = _normalise(retry[0])
+                break
+        else:
+            # Failed alone twice: empty context, and move on.
+            out[missing_id] = {"id": missing_id, "context": "", "category": "OTHER"}

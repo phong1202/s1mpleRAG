@@ -87,6 +87,26 @@ async def test_hnsw_index_uses_inner_product(db_session):
     assert "vector_ip_ops" in defs
 
 
+async def test_the_inner_product_search_actually_goes_through_the_hnsw_index(db_session):
+    """An index existing is not an index being used: an opclass that does
+    not match the query's operator leaves Postgres no choice but a
+    sequential scan, whose results are exact -- so ranking-based checks pass
+    either way, and only production-sized tables would ever show the
+    difference, as latency. Sequential scans are switched off here so that
+    a mismatch shows up in the plan instead."""
+    await db_session.execute(text("SET LOCAL enable_seqscan = off"))
+    vector = "[" + ",".join(["1"] + ["0"] * 1535) + "]"
+
+    plan = await db_session.execute(
+        text(
+            "EXPLAIN SELECT id FROM child_chunks ORDER BY embedding <#> CAST(:v AS vector) LIMIT 3"
+        ),
+        {"v": vector},
+    )
+
+    assert "ix_child_chunks_embedding_hnsw" in " ".join(row[0] for row in plan)
+
+
 async def test_document_status_is_constrained_to_the_known_set(db_session):
     """status is a closed set of nine values used across every later stage
     task -- QUEUED through DEAD_LETTER. Nothing in Python enforces that; a

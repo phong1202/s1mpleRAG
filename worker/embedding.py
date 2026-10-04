@@ -52,24 +52,28 @@ def embed_chunks(
     go in order. Those texts are skipped, not embedded again."""
     vectors: list[list[float]] = list(done or [])
 
-    for start in range(len(vectors), len(texts), batch_size):
-        batch = texts[start : start + batch_size]
-        # Counted, not guessed: len(text)//4 covers only ~48% of the real
-        # token count of Vietnamese with diacritics, which would let real
-        # usage overshoot the quota roughly twofold.
-        tokens = sum(count_tokens(t) for t in batch)
-        try:
-            acquire_or_defer([("embed_rpm", 1), ("embed_tpm", tokens)])
-        except RateLimited as exc:
-            exc.partial = vectors
-            raise
-
-        result = provider.embed(batch)
-
-        assert len(result) == len(batch), f"got {len(result)} vectors for {len(batch)} texts"
-        assert all(len(v) == DIMENSIONS for v in result), "wrong dimension"
-        assert all(all(math.isfinite(x) for x in v) for v in result), "non-finite value"
-        assert_normalised(result)
-
-        vectors.extend(result)
+    try:
+        for start in range(len(vectors), len(texts), batch_size):
+            vectors.extend(_embed_batch(texts[start : start + batch_size], provider))
+    except RateLimited as exc:
+        # Whether the local limiter or the provider's own 429 said wait:
+        # hand back the vectors already paid for, so the retry resumes.
+        exc.partial = vectors
+        raise
     return vectors
+
+
+def _embed_batch(batch: list[str], provider: LLMProvider) -> list[list[float]]:
+    # Counted, not guessed: len(text)//4 covers only ~48% of the real token
+    # count of Vietnamese with diacritics, which would let real usage
+    # overshoot the quota roughly twofold.
+    tokens = sum(count_tokens(t) for t in batch)
+    acquire_or_defer([("embed_rpm", 1), ("embed_tpm", tokens)])
+
+    result = provider.embed(batch)
+
+    assert len(result) == len(batch), f"got {len(result)} vectors for {len(batch)} texts"
+    assert all(len(v) == DIMENSIONS for v in result), "wrong dimension"
+    assert all(all(math.isfinite(x) for x in v) for v in result), "non-finite value"
+    assert_normalised(result)
+    return result

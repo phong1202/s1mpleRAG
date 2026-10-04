@@ -7,10 +7,10 @@ import pytest
 from pypdf import PdfReader
 
 FIXTURES = Path(__file__).parent / "fixtures"
-NAMES = ["clean_text", "tables", "multi_column", "scanned", "encrypted", "malformed"]
+NAMES = ["clean_text", "tables", "multi_column", "scanned", "encrypted", "malformed", "topics"]
 
 
-def test_all_six_fixtures_exist():
+def test_all_fixtures_exist():
     missing = [n for n in NAMES if not (FIXTURES / f"{n}.pdf").exists()]
     assert missing == []
 
@@ -43,7 +43,7 @@ def test_malformed_cannot_be_opened():
 
 
 def test_regenerating_produces_identical_bytes():
-    """The six PDFs are committed, so a generator emitting fresh bytes on
+    """The fixture PDFs are committed, so a generator emitting fresh bytes on
     every run would surface as a phantom binary diff for anyone who ran it.
 
     Comparing two consecutive runs is not enough to catch this: MuPDF writes a

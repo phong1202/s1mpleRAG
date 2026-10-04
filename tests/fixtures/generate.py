@@ -1,6 +1,6 @@
-"""Build the six sample PDFs. Run: uv run python tests/fixtures/generate.py
+"""Build the seven sample PDFs. Run: uv run python tests/fixtures/generate.py
 
-Output must be reproducible bit-for-bit: these six files are committed, so if
+Output must be reproducible bit-for-bit: these seven files are committed, so if
 every run produced different bytes, git would report a phantom binary diff
 whenever anyone ran the generator. Hence reportlab's invariant=1 and the
 stripped metadata on the scan -- both embed a timestamp by default.
@@ -16,7 +16,7 @@ import pymupdf
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate, Paragraph, Table
+from reportlab.platypus import BaseDocTemplate, Frame, PageBreak, PageTemplate, Paragraph, Table
 
 HERE = Path(__file__).parent
 STYLES = getSampleStyleSheet()
@@ -40,6 +40,39 @@ def clean_text():
 def tables():
     data = [["Quy", "Doanh thu", "Chi phi"], ["Q1", "38.1", "8.0"], ["Q2", "39.4", "8.1"]]
     _simple(HERE / "tables.pdf", [Paragraph(BODY, STYLES["Normal"]), Table(data)])
+
+
+# One subject per page, each keyword on its own page and nowhere else. The
+# similarity smoke test needs exactly that: a question can rank the right
+# chunk first only if the vectors carry meaning. On clean_text, where every
+# chunk says "doanh thu", any ranking at all would pass.
+TOPICS = {
+    "doanh thu": (
+        "Doanh thu quy 3 nam 2024 dat 41.7 ty dong, tang 12 phan tram so voi cung ky "
+        "nho mang ban le phia Nam. Ban giam doc du kien doanh thu ca nam vuot ke hoach "
+        "8 phan tram."
+    ),
+    "nghi phep": (
+        "Nhan vien chinh thuc duoc huong 12 ngay nghi phep nam co luong. So ngay nghi phep "
+        "tang them mot ngay sau moi nam nam lam viec. Don xin nghi phep phai gui truoc ba "
+        "ngay lam viec."
+    ),
+    "bao tri": (
+        "He thong may chu duoc bao tri dinh ky vao 2 gio sang chu nhat hang tuan. Trong "
+        "thoi gian bao tri, cong thanh toan truc tuyen tam ngung khoang mot gio."
+    ),
+    "phong chay": (
+        "Moi tang van phong dat hai binh chua chay o canh cau thang. Dien tap phong chay "
+        "chua chay duoc to chuc moi sau thang mot lan, toan bo nguoi lam viec phai tham gia."
+    ),
+}
+
+
+def topics():
+    flowables = []
+    for text in TOPICS.values():
+        flowables += [Paragraph(text, STYLES["Normal"]), PageBreak()]
+    _simple(HERE / "topics.pdf", flowables[:-1])
 
 
 def multi_column():
@@ -107,7 +140,8 @@ def main() -> None:
     scanned()
     encrypted()
     malformed()
-    print("6 fixtures generated in", HERE)
+    topics()
+    print("7 fixtures generated in", HERE)
 
 
 if __name__ == "__main__":

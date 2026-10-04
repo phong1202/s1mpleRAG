@@ -156,3 +156,25 @@ def test_resuming_from_partials_sends_each_chunk_once_and_always_finishes(monkey
 
     assert [r["id"] for r in result] == list(range(100))
     assert set(sent.values()) == {1}, "a chunk was sent to the LLM more than once"
+
+
+def test_a_provider_429_mid_document_still_hands_back_what_was_paid_for(children):
+    """The provider's own 429 arrives from inside the batch loop, not from
+    the local limiter. It too has to carry the finished batches, or the
+    retry pays for every one of them again."""
+
+    class RateLimitedOnTheSecondCall(StubProvider):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def enrich(self, chunks):
+            self.calls += 1
+            if self.calls == 2:
+                raise RateLimited(countdown=1.0)
+            return super().enrich(chunks)
+
+    with pytest.raises(RateLimited) as exc:
+        enrich_chunks(children, provider=RateLimitedOnTheSecondCall(), batch_size=10)
+
+    assert sorted(r["id"] for r in exc.value.partial) == list(range(10))

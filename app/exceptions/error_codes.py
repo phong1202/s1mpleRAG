@@ -25,6 +25,12 @@ class ErrorCode(Enum):
     # --- Rate limiting ---
     RATE_LIMIT_UNSATISFIABLE = (500, "Batch cost exceeds the rate limit bucket's capacity")
 
+    # --- LLM provider ---
+    LLM_PROVIDER_REJECTED = (
+        502,
+        "The LLM provider rejected the request: check the API key, quota and model name",
+    )
+
     def __init__(self, status: int, message: str) -> None:
         self.status = status
         self.message = message

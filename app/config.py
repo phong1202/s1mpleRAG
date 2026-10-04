@@ -108,8 +108,18 @@ class Settings(BaseSettings):
     # that look real.
     llm_provider: Literal["stub", "openai"] = "stub"
     openai_api_key: str | None = None
-    openai_chat_model: str = "gpt-4o-mini"
-    openai_embed_model: str = "text-embedding-3-small"
+    # The small model of the current generation: enrichment is a sentence
+    # of context and a category per chunk, thousands of chunks a document.
+    openai_chat_model: str = "gpt-6-luna"
+    # Reasoning tokens bill as output. A one-sentence summary and a pick
+    # from eight categories need little of it; "medium", the API default,
+    # would multiply the cost of S3 for no visible gain.
+    openai_reasoning_effort: Literal["none", "low", "medium", "high"] = "low"
+    # -large rather than -small for its multilingual retrieval (MIRACL 54.9
+    # vs 44.0) -- the corpus is Vietnamese. Shortened to embed_dimensions
+    # by the API, which keeps the schema's vector(1536) and HNSW's 2000-dim
+    # ceiling.
+    openai_embed_model: str = "text-embedding-3-large"
     embed_dimensions: int = 1536
 
     # --- Limits ---

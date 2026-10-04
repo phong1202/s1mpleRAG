@@ -9,10 +9,13 @@ Chosen two ways, deliberately:
 import hashlib
 import json
 import math
+import random
 from dataclasses import dataclass
 from typing import Protocol
 
 from app.config import get_settings
+from app.exceptions import AppException, ErrorCode
+from shared.rate_limiter import RateLimited
 
 CATEGORIES = frozenset(
     {"FINANCIAL", "LEGAL", "TECHNICAL", "MARKETING", "HR", "RESEARCH", "OPERATIONS", "OTHER"}
@@ -87,31 +90,139 @@ class OpenAIProvider:
             raise RuntimeError("LLM_PROVIDER=openai but OPENAI_API_KEY is not set")
         self._client = OpenAI(api_key=settings.openai_api_key)
         self._chat_model = settings.openai_chat_model
+        self._reasoning_effort = settings.openai_reasoning_effort
         self._embed_model = settings.openai_embed_model
         self._dimensions = settings.embed_dimensions
 
     def enrich(self, chunks: list[dict]) -> list[EnrichedChunk]:
         prompt = (
-            "For each chunk, write ONE sentence of context and choose exactly one "
-            "category from: " + ", ".join(sorted(CATEGORIES)) + ". "
-            'Return JSON {"chunks":[{"id":int,"context":str,"category":str}]}.'
+            "For each chunk, write ONE sentence of context situating it, in the "
+            "chunk's own language, and choose exactly one category."
         )
-        response = self._client.chat.completions.create(
+        # Only what the task reads: every other field of a chunk would be
+        # tokens paid for and ignored.
+        sent = [{"id": c["id"], "content": c["content"]} for c in chunks]
+        response = _translating_errors(
+            self._client.chat.completions.create,
             model=self._chat_model,
-            response_format={"type": "json_object"},
+            reasoning_effort=self._reasoning_effort,
+            response_format=_ENRICHED_SCHEMA,
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(chunks, ensure_ascii=False)},
+                {"role": "user", "content": json.dumps(sent, ensure_ascii=False)},
             ],
         )
-        payload = json.loads(response.choices[0].message.content)
-        return [EnrichedChunk(**c) for c in payload["chunks"]]
+        return _parse_enriched(response.choices[0].message.content)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        response = self._client.embeddings.create(
-            model=self._embed_model, input=texts, dimensions=self._dimensions
+        response = _translating_errors(
+            self._client.embeddings.create,
+            model=self._embed_model,
+            input=texts,
+            dimensions=self._dimensions,
         )
-        return [item.embedding for item in response.data]
+        # By the index each item carries, not arrival order: a mismatch
+        # there would file every vector under the wrong chunk, silently.
+        return [item.embedding for item in sorted(response.data, key=lambda d: d.index)]
+
+
+# Structured outputs, strict: the model can no longer return an off-enum
+# category or an item missing a field -- JSON mode only promised valid JSON.
+# _parse_enriched still checks, since the stub and future providers may not
+# honour a schema.
+_ENRICHED_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "enriched_chunks",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "chunks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer"},
+                            "context": {"type": "string"},
+                            "category": {"type": "string", "enum": sorted(CATEGORIES)},
+                        },
+                        "required": ["id", "context", "category"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["chunks"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def _translating_errors(call, **kwargs):
+    """Maps the provider's refusals onto what a stage knows how to handle.
+
+    A 429 that outlasted the SDK's own retries means "wait", so it becomes
+    RateLimited -- the stage defers without counting a failed attempt.
+    Except insufficient_quota, which arrives as a 429 too but which no wait
+    pays: that, a rejected key, a key without access and an unknown model
+    are configuration, identical on every retry, so they fail permanently.
+    """
+    import openai
+
+    try:
+        return call(**kwargs)
+    except openai.RateLimitError as exc:
+        if exc.code == "insufficient_quota":
+            raise AppException(ErrorCode.LLM_PROVIDER_REJECTED, f"quota exhausted: {exc}") from exc
+        raise RateLimited(countdown=_retry_after_s(exc) * random.uniform(1.0, 1.3)) from exc
+    except (openai.AuthenticationError, openai.PermissionDeniedError, openai.NotFoundError) as exc:
+        raise AppException(ErrorCode.LLM_PROVIDER_REJECTED, str(exc)) from exc
+
+
+def _retry_after_s(exc) -> float:
+    """The provider's own estimate, when it sends one."""
+    headers = exc.response.headers
+    try:
+        if "retry-after-ms" in headers:
+            return float(headers["retry-after-ms"]) / 1000
+        if "retry-after" in headers:
+            return float(headers["retry-after"])
+    except ValueError:
+        pass
+    return _DEFAULT_RETRY_AFTER_S
+
+
+_DEFAULT_RETRY_AFTER_S = 10.0
+
+
+def _parse_enriched(content: str | None) -> list[EnrichedChunk]:
+    """Keeps every well-formed item and drops the rest, one by one. A dropped
+    item is just a missing id to S3, which retries it alone; raising here
+    instead would throw away the whole batch's good results with it.
+
+    Invalid JSON -- typically a reply cut off at the token limit -- likewise
+    yields nothing rather than an error: every id is then missing, and each
+    is retried in a request small enough not to be cut off again."""
+    try:
+        payload = json.loads(content or "")
+    except json.JSONDecodeError:
+        return []
+    items = payload.get("chunks") if isinstance(payload, dict) else None
+
+    out = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            # Model JSON is untyped: "2" has to match the id 2 it names.
+            chunk_id = int(item["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        context, category = item.get("context"), item.get("category")
+        if isinstance(context, str) and isinstance(category, str):
+            out.append(EnrichedChunk(id=chunk_id, context=context, category=category))
+    return out
 
 
 def get_provider() -> LLMProvider:

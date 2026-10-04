@@ -35,10 +35,10 @@ with a row here, the implementation is wrong.
 |---|----------|--------|-----------|
 | 1 | Base | Extend `rag-beginner` | FastAPI + async SQLAlchemy + pgvector already built and tested |
 | 2 | `app/core/` | RAG **read path only** | API-side retrieval/generation; ingestion is worker code |
-| 3 | Embedding model | `text-embedding-3-small` @ 1536 | 6.5× cheaper than `3-large` for ~2 MTEB points |
+| 3 | Embedding model | `text-embedding-3-large` @ 1536 | Multilingual retrieval: MIRACL 54.9 vs 44.0 for `3-small` — the corpus is Vietnamese; the API shortens it to 1536 |
 | 4 | HNSW | Plain `CREATE INDEX` | Bulk-load path is for backfills; irrelevant at this scale |
 | 5 | Deployment | Local Docker Compose | Study/test scale |
-| 6 | LLM provider | OpenAI (`gpt-4o-mini`) | Single provider; caching caveat accepted (§12) |
+| 6 | LLM provider | OpenAI (`gpt-6-luna`, reasoning effort `low`) | Single provider; caching caveat accepted (§12) |
 | 7 | Docling | Independent container | Isolates VRAM/RAM from worker concurrency |
 | 8 | Object storage | MinIO container | S3-API compatible — swap to S3 by URL later |
 | 9 | Broker | **RabbitMQ** | Real AMQP acks; no `visibility_timeout` guessing |
@@ -319,7 +319,7 @@ Two LLM concerns, one stage, because they share a quota and a failure mode.
 
 **Hard metadata** — filename, page number, created_at. Free, no LLM.
 
-**Soft metadata + context** — batched `gpt-4o-mini` calls, **20 child chunks per request**, using
+**Soft metadata + context** — batched `gpt-6-luna` calls, **20 child chunks per request**, using
 structured output keyed by chunk id:
 
 ```python
@@ -345,7 +345,7 @@ retrieval slightly; a dead-lettered document helps nobody.
 
 **In:** `enriched.json`  **Out:** `staging/{doc_id}/embeddings.npy` + manifest
 
-1. Batch **100 texts per request** to `text-embedding-3-small`, `dimensions=1536`.
+1. Batch **100 texts per request** to `text-embedding-3-large`, `dimensions=1536`.
 2. **L2-normalize every vector.** Non-negotiable — `vector_ip_ops` assumes it.
 3. Assert returned count == input count; assert every vector is 1536-dim and finite.
 4. Write `.npy` (float32) plus a JSON manifest mapping row index → `chunk_index`.
@@ -499,7 +499,7 @@ collapsing after `LIMIT` would yield fewer than `top_k` parents; over-fetching t
 guarantees the count.
 
 **`context_builder.py`** assembles parents newest-first under a token budget (default 8000), dropping
-the tail rather than truncating mid-parent. **`generator.py`** calls `gpt-4o-mini` with the assembled
+the tail rather than truncating mid-parent. **`generator.py`** calls `OPENAI_CHAT_MODEL` with the assembled
 context and maps each cited passage back to `(document_id, page_number)` — which works precisely
 because `page_number` lives on the *child*, as the original design had it.
 
@@ -613,8 +613,9 @@ MINIO_BUCKET_RAW=raw
 MINIO_BUCKET_STAGING=staging
 
 OPENAI_API_KEY=sk-...
-OPENAI_CHAT_MODEL=gpt-4o-mini
-OPENAI_EMBED_MODEL=text-embedding-3-small
+OPENAI_CHAT_MODEL=gpt-6-luna
+OPENAI_REASONING_EFFORT=low
+OPENAI_EMBED_MODEL=text-embedding-3-large
 EMBED_DIMENSIONS=1536
 
 DOCLING_URL=http://docling:8100

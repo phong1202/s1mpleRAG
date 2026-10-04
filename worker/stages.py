@@ -39,6 +39,9 @@ PERMANENT = {
     # Config-driven, not document-driven: a batch that costs more than the
     # whole rate limit bucket costs exactly as much on every retry.
     ErrorCode.RATE_LIMIT_UNSATISFIABLE,
+    # A wrong key, an empty quota, a misspelled model: the same answer on
+    # every retry.
+    ErrorCode.LLM_PROVIDER_REJECTED,
 }
 
 

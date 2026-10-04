@@ -115,3 +115,25 @@ def test_contextualize_puts_the_context_first_and_drops_an_empty_one():
     away from the text its vector was computed from."""
     assert contextualize("About revenue.", "Q3 was 41.7bn.") == "About revenue.\n\nQ3 was 41.7bn."
     assert contextualize("", "Q3 was 41.7bn.") == "Q3 was 41.7bn."
+
+
+def test_a_provider_429_mid_document_still_hands_back_the_vectors_so_far():
+    """Same as S3: a 429 from the provider, raised inside the loop, must
+    carry the finished batches too -- partial=None would not even save."""
+
+    class RateLimitedOnTheSecondCall(StubProvider):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def embed(self, texts):
+            self.calls += 1
+            if self.calls == 2:
+                raise RateLimited(countdown=1.0)
+            return super().embed(texts)
+
+    texts = [f"text {i}" for i in range(30)]
+    with pytest.raises(RateLimited) as exc:
+        embed_chunks(texts, provider=RateLimitedOnTheSecondCall(), batch_size=10)
+
+    assert exc.value.partial == StubProvider().embed(texts[:10])
