@@ -13,15 +13,23 @@ from sqlalchemy.orm import Session
 from app.models import Document
 
 
+class DocumentGone(Exception):
+    """The row was deleted -- typically by the user, while its chain was
+    still queued. Not a failure: there is nothing left to process."""
+
+
 class DocumentStateRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def get(self, document_id: uuid.UUID) -> Document | None:
-        return self.session.get(Document, document_id)
+    def get(self, document_id: uuid.UUID) -> Document:
+        document = self.session.get(Document, document_id)
+        if document is None:
+            raise DocumentGone(str(document_id))
+        return document
 
     def advance(self, document_id: uuid.UUID, status: str, stage: str | None = None) -> None:
-        document = self.session.get(Document, document_id)
+        document = self.get(document_id)
         document.status = status
         if stage:
             document.stage = stage
@@ -36,7 +44,7 @@ class DocumentStateRepository:
     ) -> bool:
         """Returns True if the document is now DEAD_LETTER. A permanent
         error is not counted as an attempt: it dead-letters at once."""
-        document = self.session.get(Document, document_id)
+        document = self.get(document_id)
         if not permanent:
             document.attempts += 1
         document.failed_stage = stage
@@ -46,14 +54,14 @@ class DocumentStateRepository:
         return dead
 
     def set_parse_result(self, document_id: uuid.UUID, page_count: int, title: str | None) -> None:
-        document = self.session.get(Document, document_id)
+        document = self.get(document_id)
         document.page_count = page_count
         # Filename is the last-resort fallback and it lives here, not in the
         # parser: raw/{sha256}.pdf is the only name the parser ever sees.
         document.title = title or document.filename
 
     def complete(self, document_id: uuid.UUID, language: str | None) -> None:
-        document = self.session.get(Document, document_id)
+        document = self.get(document_id)
         document.status = "COMPLETED"
         document.stage = "PERSISTING"
         document.completed_at = datetime.now(UTC)

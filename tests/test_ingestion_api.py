@@ -172,3 +172,19 @@ async def test_delete_removes_the_document(client, uploaded_pdf):
     await client.delete(f"/documents/{document_id}")
 
     assert (await client.get(f"/documents/{document_id}/status")).status_code == 404
+
+
+async def test_register_launches_the_chain_for_the_new_document(client, uploaded_pdf, launched):
+    response = await client.post("/documents", json=uploaded_pdf)
+
+    assert launched == [response.json()["data"]["document_id"]]
+
+
+async def test_a_duplicate_registration_launches_nothing_more(client, uploaded_pdf, launched):
+    """Definition of Done #4: re-uploading the same file is a 409 and NO
+    second message -- a second chain would race the first over the same
+    staging objects."""
+    await client.post("/documents", json=uploaded_pdf)
+    await client.post("/documents", json=uploaded_pdf)
+
+    assert len(launched) == 1

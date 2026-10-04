@@ -124,9 +124,21 @@ async def db_session():
         await engine.dispose()
 
 
+@pytest.fixture
+def launched(monkeypatch):
+    """The document ids the API launched a chain for -- recorded here
+    instead of published. The real launch() sends to the dev broker, whose
+    workers look the id up in the dev database, where a test's rolled-back
+    row never existed: a handful of dead tasks per test run."""
+    ids: list[str] = []
+    monkeypatch.setattr("worker.stages.launch", ids.append)
+    return ids
+
+
 @pytest_asyncio.fixture
-async def client(db_session):
-    """An HTTP client whose requests use the rolled-back test session."""
+async def client(db_session, launched):
+    """An HTTP client whose requests use the rolled-back test session, and
+    whose launched chains go nowhere -- see `launched`."""
     app = create_app()
 
     async def override_get_session():

@@ -443,3 +443,42 @@ def test_a_document_with_no_extractable_text_is_dead_lettered(seeded_document):
     assert document.failed_stage == "STRUCTURING"
     assert "no extractable text" in document.last_error.lower()
     assert not get_store().exists(f"staging/{seeded_document.id}/chunks.json")
+
+
+def _delete(document_id):
+    from app.models import Document
+    from worker.db import session_scope
+
+    with session_scope() as session:
+        session.delete(session.get(Document, document_id))
+
+
+def test_a_task_for_a_deleted_document_stops_quietly(seeded_document):
+    """A user can delete a document while its chain is still queued. The
+    next stage used to crash on the missing row -- AttributeError, logged as
+    an error, chain dead anyway. It should end the chain, quietly: there is
+    nothing left to process and nothing to retry."""
+    from worker import stages
+
+    _delete(seeded_document.id)
+
+    result = stages.structure.apply(args=(str(seeded_document.id),))
+
+    assert result.state == "IGNORED"
+
+
+def test_a_failure_on_a_deleted_document_stops_quietly_too(seeded_document, monkeypatch):
+    """The row can also vanish between a stage's failure and recording it --
+    stage_failed() then crashed inside the except handler, past every
+    clause that could have dealt with it."""
+    from worker import stages
+
+    def failing_advance(*args, **kwargs):
+        _delete(seeded_document.id)
+        raise ConnectionError("simulated transient failure")
+
+    monkeypatch.setattr(stages, "advance", failing_advance)
+
+    result = stages.structure.apply(args=(str(seeded_document.id),))
+
+    assert result.state == "IGNORED"
