@@ -150,6 +150,18 @@ services:
       - "${PORT:-8000}:8000"
     volumes:
       - .:/code
+    healthcheck:
+      # /health is answered by the app itself, so this proves the process
+      # is serving requests, not merely that the port is open.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/health')
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     depends_on:
       db:
         condition: service_healthy
@@ -197,6 +209,18 @@ services:
         condition: service_started
     volumes:
       - .:/code
+    healthcheck:
+      # A ping through the broker addressed to this very node: it answers
+      # only if the worker is up, connected, and its main loop not wedged --
+      # a process that merely exists would pass a `pgrep`. $$ stops compose
+      # from expanding HOSTNAME itself.
+      test:
+        - CMD-SHELL
+        - celery -A worker.celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
 
   worker-llm:
     build: .
@@ -223,6 +247,15 @@ services:
         condition: service_healthy
     volumes:
       - .:/code
+    healthcheck:
+      # Same probe as worker-cpu.
+      test:
+        - CMD-SHELL
+        - celery -A worker.celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
 
 volumes:
   pgdata:

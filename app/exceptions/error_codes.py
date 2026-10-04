@@ -20,6 +20,7 @@ class ErrorCode(Enum):
     PDF_MALFORMED = (422, "PDF is corrupted and cannot be parsed")
     PDF_TOO_LARGE = (413, "PDF exceeds the size or page limit")
     HASH_MISMATCH = (400, "Uploaded object does not match the supplied hash")
+    NO_EXTRACTABLE_TEXT = (422, "Document has no extractable text")
 
     # --- Rate limiting ---
     RATE_LIMIT_UNSATISFIABLE = (500, "Batch cost exceeds the rate limit bucket's capacity")

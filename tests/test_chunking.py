@@ -141,3 +141,31 @@ def test_unknown_languages_collapse_to_other():
     """A closed set, same discipline as a taxonomy category: an open one
     would accumulate 'vie', 'vi-VN' and 'vietnamese' within a week."""
     assert detect_language("Lorem ipsum dolor sit amet consectetur") == "other"
+
+
+def test_a_section_running_across_a_page_break_keeps_its_heading_path():
+    """An article in a decree routinely runs onto the next page, which then
+    opens mid-sentence with no heading of its own. Splitting page by page
+    with a fresh heading stack filed that continuation under no section at
+    all."""
+    parsed = {
+        "page_count": 2,
+        "pages": [
+            {
+                "page": 1,
+                "markdown": "# Chuong II\n\n## Dieu 19\n\n" + "noi dung dieu khoan. " * 120,
+                "source": "pymupdf",
+                "confidence": 1.0,
+            },
+            {
+                "page": 2,
+                "markdown": "tiep theo dieu khoan. " * 120,
+                "source": "pymupdf",
+                "confidence": 1.0,
+            },
+        ],
+    }
+
+    parents = chunk_document(parsed)["parents"]
+
+    assert {p["heading_path"] for p in parents if p["page_start"] == 2} == {"Chuong II > Dieu 19"}

@@ -8,6 +8,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.app import create_app
@@ -65,6 +66,20 @@ def prepare_test_database() -> None:
         check=True,
         env={**os.environ, "DATABASE_URL": TEST_DATABASE_URL},
     )
+
+    # worker/db.py builds its engine from settings at import time, and those
+    # point at the development database the running containers use. Seeded
+    # documents and every chain a test launches would land there instead --
+    # colliding on the sha256 unique key with whatever the dev stack has
+    # ingested, and keeping whatever a failed test never cleaned up.
+    import worker.db
+
+    worker.db.engine.dispose()
+    worker.db.engine = create_engine(
+        TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://"),
+        pool_pre_ping=True,
+    )
+    worker.db.SessionLocal.configure(bind=worker.db.engine)
 
 
 @pytest_asyncio.fixture
@@ -181,6 +196,17 @@ def seeded_document(uploaded_pdf):
         obj = session.get(Document, doc_id)
         if obj is not None:
             session.delete(obj)
+
+    # Chunk rows go with the document by cascade; staged artifacts are in
+    # MinIO, shared with the dev stack, and nothing else removes them short
+    # of the 7-day expiry. Every test that seeds a document can run the
+    # chain, so the cleanup lives here rather than in each such test.
+    from shared.storage import get_store
+    from worker.stages import _ARTIFACTS
+
+    store = get_store()
+    for name in (n for names in _ARTIFACTS.values() for n in names):
+        store.delete(f"staging/{doc_id}/{name}")
 
 
 @pytest.fixture

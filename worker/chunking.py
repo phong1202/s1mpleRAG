@@ -78,7 +78,7 @@ def _split_by_tokens(text: str, target_min: int, target_max: int) -> list[str]:
     return [" ".join(c) for c in chunks]
 
 
-def split_sections(markdown: str) -> list[tuple[str, str]]:
+def split_sections(markdown: str, stack: list[str] | None = None) -> list[tuple[str, str]]:
     """Splits on markdown headings, carrying the heading path down the
     tree. Spec §6 S2 puts headings ahead of paragraphs because a heading
     boundary is a real semantic boundary; a token-count cutoff is an
@@ -86,10 +86,14 @@ def split_sections(markdown: str) -> list[tuple[str, str]]:
 
     The heading line itself stays in the body it opens: heading_path is
     metadata, but the words in the heading also belong to content -- what
-    the keyword index reads."""
+    the keyword index reads.
+
+    `stack` holds the headings still open, and is updated in place: pass the
+    same list for consecutive pages, and text opening a page continues the
+    section the previous page ended in."""
     sections: list[tuple[str, str]] = []
-    stack: list[str] = []
-    path, buffer = "", []
+    stack = [] if stack is None else stack
+    path, buffer = " > ".join(stack), []
 
     for line in markdown.splitlines():
         found = _HEADING.match(line)
@@ -125,13 +129,15 @@ def chunk_document(parsed: dict) -> dict:
     natural key that keeps S5 idempotent."""
     parents, children = [], []
     parent_index = child_index = 0
+    # One stack for the whole document: an article runs across page breaks.
+    open_headings: list[str] = []
 
     for page in parsed["pages"]:
         text = sanitize(page["markdown"])
         if not text:
             continue
 
-        for heading_path, section in split_sections(text):
+        for heading_path, section in split_sections(text, open_headings):
             for parent_text in _split_by_tokens(section, PARENT_MIN, PARENT_MAX):
                 parent_tokens = count_tokens(parent_text)
                 if parent_tokens < DROP_BELOW:

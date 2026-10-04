@@ -137,7 +137,7 @@ def test_retries_stop_at_the_attempt_ceiling_not_at_max_retries(seeded_document,
 def staged_chunks(seeded_document):
     """chunks.json for seeded_document, shaped exactly as S2 leaves it:
     three parents of 20 children each -- three batches at enrich's default
-    size. Cleaned up for real, along with whatever enrich writes."""
+    size. seeded_document's teardown removes it, with everything downstream."""
     from shared.storage import get_store
 
     store = get_store()
@@ -166,9 +166,7 @@ def staged_chunks(seeded_document):
         for i in range(60)
     ]
     store.put_json(f"{prefix}/chunks.json", {"parents": parents, "children": children})
-    yield seeded_document
-    for name in ("chunks.json", "enriched.json", "enriched.partial.json"):
-        store.delete(f"{prefix}/{name}")
+    return seeded_document
 
 
 def test_a_rate_limited_enrich_is_deferred_not_counted_as_a_failure(staged_chunks, monkeypatch):
@@ -266,17 +264,14 @@ def test_a_mid_document_deferral_resumes_instead_of_starting_over(staged_chunks,
 @pytest.fixture
 def staged_enriched(staged_chunks):
     """enriched.json on top of staged_chunks, as S3 would have left it --
-    embed's input. Cleans up what embed writes; staged_chunks cleans up the
-    rest."""
+    embed's input."""
     from shared.storage import get_store
 
     store = get_store()
     prefix = f"staging/{staged_chunks.id}"
     enriched = [{"id": i, "context": f"context {i}", "category": "TECHNICAL"} for i in range(60)]
     store.put_json(f"{prefix}/enriched.json", {"chunks": enriched})
-    yield staged_chunks
-    for name in ("embeddings.npy", "manifest.json", "embeddings.partial.npy"):
-        store.delete(f"{prefix}/{name}")
+    return staged_chunks
 
 
 def test_a_mid_document_embed_deferral_resumes_with_rows_aligned(staged_enriched, monkeypatch):
@@ -358,7 +353,7 @@ def test_a_crash_between_the_two_embed_writes_is_recovered_not_skipped(
 @pytest.fixture
 def staged_embeddings(staged_enriched):
     """embeddings.npy + manifest.json on top of staged_enriched, as S4 would
-    have left them -- persist's input. staged_enriched cleans them up."""
+    have left them -- persist's input."""
     from shared.llm import StubProvider
     from shared.storage import get_store
     from worker.embedding import vectors_to_npy
@@ -419,3 +414,29 @@ def test_persist_refuses_vectors_built_for_a_different_chunks_json(staged_embedd
     assert document.failed_stage == "PERSISTING"
     assert "manifest" in document.last_error
     assert _child_count(staged_embeddings.id) == 0
+
+
+def test_a_document_with_no_extractable_text_is_dead_lettered(seeded_document):
+    """A blank or image-only PDF that OCR could get nothing from used to go
+    all the way to COMPLETED with zero chunks: a success that nothing can
+    ever find, with language left NULL. It is a permanent failure, with a
+    reason someone can act on."""
+    from shared.storage import get_store
+    from worker import stages
+
+    blank = {"page": 1, "markdown": "", "source": "docling", "confidence": 0.0}
+    get_store().put_json(
+        f"staging/{seeded_document.id}/parsed.json",
+        {"title": None, "page_count": 1, "pages": [blank]},
+    )
+
+    # Eager mode hands AppException back wrapped (it does not pickle), so
+    # this matches on the message; the document's state is the contract.
+    with pytest.raises(Exception, match="No extractable text"):
+        stages.structure.apply(args=(str(seeded_document.id),)).get()
+
+    document = reload(seeded_document.id)
+    assert document.status == "DEAD_LETTER"
+    assert document.failed_stage == "STRUCTURING"
+    assert "no extractable text" in document.last_error.lower()
+    assert not get_store().exists(f"staging/{seeded_document.id}/chunks.json")

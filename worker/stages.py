@@ -35,9 +35,21 @@ PERMANENT = {
     ErrorCode.PDF_MALFORMED,
     ErrorCode.PDF_TOO_LARGE,
     ErrorCode.HASH_MISMATCH,
+    ErrorCode.NO_EXTRACTABLE_TEXT,
     # Config-driven, not document-driven: a batch that costs more than the
     # whole rate limit bucket costs exactly as much on every retry.
     ErrorCode.RATE_LIMIT_UNSATISFIABLE,
+}
+
+
+# Each stage's staged artifacts, partials included: a resume that picked up
+# a partial computed from an older input would mix two runs' results under
+# the same ids.
+_ARTIFACTS = {
+    "PARSING": ("parsed.json",),
+    "STRUCTURING": ("chunks.json",),
+    "ENRICHING": ("enriched.json", "enriched.partial.json"),
+    "EMBEDDING": ("manifest.json", "embeddings.npy", "embeddings.partial.npy"),
 }
 
 
@@ -47,6 +59,19 @@ def _advance(document_id: str, status: str, stage: str | None = None) -> None:
         document.status = status
         if stage:
             document.stage = stage
+
+
+def _invalidate_downstream(store, document_id: str, stage: str) -> None:
+    """Called by a stage about to compute its artifact afresh. A checkpoint
+    skip only proves an artifact exists, not that it was built from the
+    current input: regenerate enriched.json and S4 would skip on its old
+    embeddings.npy, leaving S5 to store the new text beside the vector of
+    the old one. Deleted BEFORE this stage writes its own artifact -- the
+    other way round, a crash between the two leaves the new artifact (so a
+    retry skips) above the stale ones."""
+    for later in STAGES[STAGES.index(stage) + 1 :]:
+        for name in _ARTIFACTS.get(later, ()):
+            store.delete(f"staging/{document_id}/{name}")
 
 
 def stage_failed(document_id: str, stage: str, exc: BaseException) -> bool:
@@ -99,6 +124,7 @@ def parse(self, document_id: str) -> str:
             return document_id
 
         _advance(document_id, "PARSING")
+        _invalidate_downstream(store, document_id, "PARSING")
         with session_scope() as session:
             document = session.get(Document, uuid.UUID(document_id))
             object_key = document.object_key
@@ -138,8 +164,18 @@ def structure(self, document_id: str) -> str:
             return document_id
 
         _advance(document_id, "STRUCTURING")
+        _invalidate_downstream(store, document_id, "STRUCTURING")
         parsed = store.get_json(f"staging/{document_id}/parsed.json")
-        store.put_json(key, chunk_document(parsed))
+        chunks = chunk_document(parsed)
+        # Checked here, after chunking, rather than on S1's raw text: a page
+        # of a few stray characters is not empty, yet chunks to nothing.
+        if not chunks["children"]:
+            raise AppException(
+                ErrorCode.NO_EXTRACTABLE_TEXT,
+                f"No extractable text: no chunk survived from {parsed['page_count']} "
+                "page(s) -- blank, or an image OCR could read nothing from",
+            )
+        store.put_json(key, chunks)
 
         _advance(document_id, "STRUCTURING", stage="STRUCTURING")
         return document_id
@@ -170,6 +206,7 @@ def enrich(self, document_id: str) -> str:
             return document_id
 
         _advance(document_id, "ENRICHING")
+        _invalidate_downstream(store, document_id, "ENRICHING")
         chunks = store.get_json(f"staging/{document_id}/chunks.json")
         # chunk_index plays the "id" role in the provider contract -- it is
         # deterministic, so a rerun asks about exactly the same id set.
@@ -227,6 +264,7 @@ def embed(self, document_id: str) -> str:
             return document_id
 
         _advance(document_id, "EMBEDDING")
+        _invalidate_downstream(store, document_id, "EMBEDDING")
         chunks = store.get_json(f"staging/{document_id}/chunks.json")
         enriched = {
             e["id"]: e for e in store.get_json(f"staging/{document_id}/enriched.json")["chunks"]
