@@ -9,7 +9,8 @@ import uuid
 import pytest
 
 from worker.celery_app import app as celery_app
-from worker.stages import STAGES, launch
+from worker.pipeline.state import STAGES
+from worker.stages import launch
 
 
 @pytest.fixture(autouse=True)
@@ -61,7 +62,7 @@ def test_a_permanent_error_goes_straight_to_dead_letter(seeded_document):
     """An encrypted PDF will never parse. Burning five retries on it is
     wasted time, and worse, it hides the real reason."""
     from app.exceptions import AppException, ErrorCode
-    from worker.stages import stage_failed
+    from worker.pipeline.state import stage_failed
 
     stage_failed(str(seeded_document.id), "PARSING", AppException(ErrorCode.PDF_ENCRYPTED))
 
@@ -72,7 +73,7 @@ def test_a_permanent_error_goes_straight_to_dead_letter(seeded_document):
 
 
 def test_a_transient_error_becomes_retrying_and_counts_an_attempt(seeded_document):
-    from worker.stages import stage_failed
+    from worker.pipeline.state import stage_failed
 
     stage_failed(str(seeded_document.id), "ENRICHING", ConnectionError("broker went away"))
 
@@ -82,7 +83,7 @@ def test_a_transient_error_becomes_retrying_and_counts_an_attempt(seeded_documen
 
 
 def test_dead_letter_after_the_attempt_ceiling(seeded_document):
-    from worker.stages import MAX_ATTEMPTS, stage_failed
+    from worker.pipeline.state import MAX_ATTEMPTS, stage_failed
 
     for _ in range(4):
         stage_failed(str(seeded_document.id), "ENRICHING", ConnectionError("flaky"))
@@ -98,7 +99,7 @@ def test_stage_failed_reports_whether_the_document_is_now_dead(seeded_document):
     """The return value is what a task checks before asking Celery to retry
     -- see test_retries_stop_at_the_ceiling_not_at_max_retries below for why
     that check has to exist at all."""
-    from worker.stages import stage_failed
+    from worker.pipeline.state import stage_failed
 
     document_id = str(seeded_document.id)
     assert stage_failed(document_id, "ENRICHING", ConnectionError("1")) is False
@@ -114,6 +115,7 @@ def test_retries_stop_at_the_attempt_ceiling_not_at_max_retries(seeded_document,
     enrich/embed -- for every retry Celery's own ceiling still permits.
     """
     from worker import stages
+    from worker.pipeline.state import MAX_ATTEMPTS
 
     calls = {"n": 0}
 
@@ -121,12 +123,12 @@ def test_retries_stop_at_the_attempt_ceiling_not_at_max_retries(seeded_document,
         calls["n"] += 1
         raise ConnectionError("simulated transient failure")
 
-    monkeypatch.setattr(stages, "_advance", flaky_advance)
+    monkeypatch.setattr(stages, "advance", flaky_advance)
 
     with pytest.raises(ConnectionError):
         stages.structure.apply(args=(str(seeded_document.id),)).get()
 
-    assert calls["n"] == stages.MAX_ATTEMPTS
+    assert calls["n"] == MAX_ATTEMPTS
 
     document = reload(seeded_document.id)
     assert document.status == "DEAD_LETTER"
@@ -201,6 +203,7 @@ def test_enrich_stops_at_the_attempt_ceiling_with_no_celery_cap(seeded_document,
     stopping a real failure from retrying forever -- so it gets its own
     test rather than borrowing structure's."""
     from worker import stages
+    from worker.pipeline.state import MAX_ATTEMPTS
 
     calls = {"n": 0}
 
@@ -208,12 +211,12 @@ def test_enrich_stops_at_the_attempt_ceiling_with_no_celery_cap(seeded_document,
         calls["n"] += 1
         raise ConnectionError("simulated transient failure")
 
-    monkeypatch.setattr(stages, "_advance", flaky_advance)
+    monkeypatch.setattr(stages, "advance", flaky_advance)
 
     with pytest.raises(ConnectionError):
         stages.enrich.apply(args=(str(seeded_document.id),)).get()
 
-    assert calls["n"] == stages.MAX_ATTEMPTS
+    assert calls["n"] == MAX_ATTEMPTS
 
     document = reload(seeded_document.id)
     assert document.status == "DEAD_LETTER"
@@ -288,7 +291,7 @@ def test_a_mid_document_embed_deferral_resumes_with_rows_aligned(staged_enriched
     from shared.llm import StubProvider
     from shared.storage import get_store
     from worker import stages
-    from worker.embedding import contextualize
+    from worker.steps.embedding import contextualize
 
     monkeypatch.setattr(get_settings(), "embed_batch_size", 20)
     sent = Counter()
@@ -356,7 +359,7 @@ def staged_embeddings(staged_enriched):
     have left them -- persist's input."""
     from shared.llm import StubProvider
     from shared.storage import get_store
-    from worker.embedding import vectors_to_npy
+    from worker.steps.embedding import vectors_to_npy
 
     store = get_store()
     prefix = f"staging/{staged_enriched.id}"

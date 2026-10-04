@@ -5,8 +5,8 @@ import pytest
 
 from shared.llm import StubProvider
 from shared.rate_limiter import RateLimited
-from worker.chunking import count_tokens
-from worker.embedding import assert_normalised, contextualize, embed_chunks
+from worker.steps.chunking import count_tokens
+from worker.steps.embedding import assert_normalised, contextualize, embed_chunks
 
 
 def test_every_vector_has_the_configured_dimension():

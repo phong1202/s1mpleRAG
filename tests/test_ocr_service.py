@@ -20,7 +20,7 @@ import pytest
 
 from app.config import get_settings
 from shared.storage import get_public_store
-from worker.parsing import parse_document
+from worker.steps.parsing import parse_document
 
 OCR = get_settings().ocr_url
 FIXTURES = Path(__file__).parent / "fixtures"

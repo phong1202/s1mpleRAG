@@ -1,4 +1,4 @@
-from worker.chunking import (
+from worker.steps.chunking import (
     chunk_document,
     detect_language,
     sanitize,

@@ -20,7 +20,8 @@ from shared.llm import OpenAIProvider
 from shared.storage import get_public_store, get_store
 from worker.celery_app import app as celery_app
 from worker.db import session_scope
-from worker.stages import _ARTIFACTS, launch
+from worker.pipeline.state import ARTIFACTS
+from worker.stages import launch
 
 pytestmark = [
     pytest.mark.real_llm,
@@ -66,7 +67,7 @@ def topics_document():
 
     with session_scope() as session:
         session.delete(session.get(Document, document_id))
-    for name in (n for names in _ARTIFACTS.values() for n in names):
+    for name in (n for names in ARTIFACTS.values() for n in names):
         get_store().delete(f"staging/{document_id}/{name}")
     get_public_store().delete(key)
 

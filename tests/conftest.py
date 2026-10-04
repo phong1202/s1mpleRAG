@@ -212,10 +212,10 @@ def seeded_document(uploaded_pdf):
     # of the 7-day expiry. Every test that seeds a document can run the
     # chain, so the cleanup lives here rather than in each such test.
     from shared.storage import get_store
-    from worker.stages import _ARTIFACTS
+    from worker.pipeline.state import ARTIFACTS
 
     store = get_store()
-    for name in (n for names in _ARTIFACTS.values() for n in names):
+    for name in (n for names in ARTIFACTS.values() for n in names):
         store.delete(f"staging/{doc_id}/{name}")
 
 

@@ -141,13 +141,20 @@ rag-beginner/
 │
 ├── worker/                          # ── Celery (sync) ────────────────
 │   ├── celery_app.py                #   app, task_routes, retry defaults
-│   ├── stages.py                    #   @task wrappers; the S1→S5 chain
-│   ├── parsing.py                   #   PyMuPDF + Chandra client + detection
-│   ├── chunking.py                  #   sanitize + hierarchical chunking
-│   ├── enrichment.py                #   metadata + contextualizer
-│   ├── embedding.py                 #   chunk embedding (calls shared/)
-│   ├── persistence.py               #   idempotent bulk upsert
-│   └── db.py                        #   SYNC engine + sync repositories
+│   ├── stages.py                    #   5 thin @task wrappers; the S1→S5 chain
+│   ├── db.py                        #   SYNC engine + session_scope
+│   ├── pipeline/
+│   │   ├── state.py                 #   STAGES, PERMANENT, artifacts, advance, stage_failed
+│   │   └── errors.py                #   @stage_task: the one failure/retry policy
+│   ├── repositories/                #   sync, the worker's own (the API's are async)
+│   │   ├── documents.py             #   document state transitions
+│   │   └── chunks.py                #   parent/child upserts, leftover deletes
+│   └── steps/                       #   the work itself, one module per stage
+│       ├── parsing.py               #   PyMuPDF + Chandra client + detection
+│       ├── chunking.py              #   sanitize + hierarchical chunking
+│       ├── enrichment.py            #   metadata + contextualizer
+│       ├── embedding.py             #   chunk embedding (calls shared/)
+│       └── persistence.py           #   S5: builds rows, writes via repositories
 │
 ├── alembic/versions/                # CLI-generated only
 ├── tests/
@@ -668,10 +675,10 @@ Carried over from the scaffold: **real Postgres, rolled-back transactions per te
 
 | Layer | Approach | Real dependency |
 |-------|----------|-----------------|
-| `worker/chunking.py`, `parsing.py` | Pure unit — fixture PDFs | none |
-| `worker/enrichment.py` | Batch validation with a stub LLM | none |
+| `worker/steps/chunking.py`, `parsing.py` | Pure unit — fixture PDFs | none |
+| `worker/steps/enrichment.py` | Batch validation with a stub LLM | none |
 | `shared/rate_limiter.py` | Integration — real Redis | redis |
-| `worker/persistence.py` | Integration — real Postgres, rolled back | db |
+| `worker/steps/persistence.py`, `worker/repositories/` | Integration — real Postgres | db |
 | `app/core/retriever.py` | Integration — seeded vectors, real pgvector | db |
 | Stage chain | Integration — `task_always_eager`, real db + MinIO | db, minio |
 | API | Existing async client fixture | db |

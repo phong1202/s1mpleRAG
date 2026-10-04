@@ -8,7 +8,7 @@ import pytest
 from app.exceptions import AppException, ErrorCode
 from shared.llm import CATEGORIES, EnrichedChunk, StubProvider
 from shared.rate_limiter import RateLimited
-from worker.enrichment import enrich_chunks
+from worker.steps.enrichment import enrich_chunks
 
 
 class CountingStub(StubProvider):
@@ -72,7 +72,7 @@ def test_an_off_enum_category_is_rejected_and_replaced_with_other(children):
 
 def test_a_document_over_the_chunk_cap_is_refused_before_spending(children, monkeypatch):
     """The rate limiter caps SPEED, not TOTAL. This cap is what caps total."""
-    monkeypatch.setattr("worker.enrichment.MAX_CHUNKS_PER_DOC", 10)
+    monkeypatch.setattr("worker.steps.enrichment.MAX_CHUNKS_PER_DOC", 10)
 
     with pytest.raises(AppException):
         enrich_chunks(children, provider=StubProvider(), batch_size=20)

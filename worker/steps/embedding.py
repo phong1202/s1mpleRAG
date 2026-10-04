@@ -11,7 +11,7 @@ import numpy as np
 from app.config import get_settings
 from shared.llm import LLMProvider
 from shared.rate_limiter import RateLimited, acquire_or_defer
-from worker.chunking import count_tokens
+from worker.steps.chunking import count_tokens
 
 DIMENSIONS = get_settings().embed_dimensions
 

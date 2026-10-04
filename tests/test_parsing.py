@@ -8,8 +8,8 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate
 
 from app.exceptions import AppException, ErrorCode
-from worker.chunking import chunk_document
-from worker.parsing import extract_title, is_scanned, parse_document
+from worker.steps.chunking import chunk_document
+from worker.steps.parsing import extract_title, is_scanned, parse_document
 
 FIXTURES = Path(__file__).parent / "fixtures"
 STYLES = getSampleStyleSheet()
@@ -93,7 +93,7 @@ def test_malformed_pdf_raises_the_malformed_error_not_encrypted(store, uploaded)
 def test_a_document_over_the_page_limit_is_rejected(store, uploaded, monkeypatch):
     """clean_text.pdf is genuinely 1 page, so the cap is set to 0 --
     anything at all exceeds it -- rather than to its real page count."""
-    monkeypatch.setattr("worker.parsing.MAX_PAGE_COUNT", 0)
+    monkeypatch.setattr("worker.steps.parsing.MAX_PAGE_COUNT", 0)
     key = uploaded("clean_text.pdf")
 
     with pytest.raises(AppException) as exc:
@@ -192,7 +192,7 @@ def ocr_calls(monkeypatch):
         calls["pages"] = list(page_numbers)
         return {n: None if n in calls["fail"] else f"# Page {n} by OCR" for n in page_numbers}
 
-    monkeypatch.setattr("worker.parsing._ocr", fake_ocr)
+    monkeypatch.setattr("worker.steps.parsing._ocr", fake_ocr)
     return calls
 
 

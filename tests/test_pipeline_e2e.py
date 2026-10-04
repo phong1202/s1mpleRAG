@@ -39,17 +39,17 @@ class _Calls:
     its checkpoint skip."""
 
     def __init__(self, monkeypatch):
-        import worker.chunking
-        import worker.embedding
-        import worker.enrichment
-        import worker.parsing
+        import worker.steps.chunking
+        import worker.steps.embedding
+        import worker.steps.enrichment
+        import worker.steps.parsing
 
         self.counts = {}
         for module, name in (
-            (worker.parsing, "parse_document"),
-            (worker.chunking, "chunk_document"),
-            (worker.enrichment, "enrich_chunks"),
-            (worker.embedding, "embed_chunks"),
+            (worker.steps.parsing, "parse_document"),
+            (worker.steps.chunking, "chunk_document"),
+            (worker.steps.enrichment, "enrich_chunks"),
+            (worker.steps.embedding, "embed_chunks"),
         ):
             monkeypatch.setattr(module, name, self._counting(name, getattr(module, name)))
 

@@ -5,8 +5,8 @@ from sqlalchemy import func, select, text
 
 from app.models import ChildChunk, Document, ParentChunk
 from worker.db import session_scope
-from worker.embedding import contextualize
-from worker.persistence import persist_document
+from worker.steps.embedding import contextualize
+from worker.steps.persistence import persist_document
 
 UNIT = [1.0] + [0.0] * 1535
 
