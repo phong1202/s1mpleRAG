@@ -132,7 +132,8 @@ def parse(self, document_id: str) -> str:
             document = session.get(Document, uuid.UUID(document_id))
             object_key = document.object_key
 
-        result = parse_document(object_key, store, get_settings().docling_url)
+        settings = get_settings()
+        result = parse_document(object_key, store, settings.ocr_url, settings.ocr_all_pages)
         store.put_json(key, result)
 
         with session_scope() as session:

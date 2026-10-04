@@ -424,7 +424,7 @@ def test_a_document_with_no_extractable_text_is_dead_lettered(seeded_document):
     from shared.storage import get_store
     from worker import stages
 
-    blank = {"page": 1, "markdown": "", "source": "docling", "confidence": 0.0}
+    blank = {"page": 1, "markdown": "", "source": "chandra", "confidence": 0.0}
     get_store().put_json(
         f"staging/{seeded_document.id}/parsed.json",
         {"title": None, "page_count": 1, "pages": [blank]},

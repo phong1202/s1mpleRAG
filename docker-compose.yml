@@ -92,36 +92,55 @@ services:
         {"Rules":[{"ID":"expire-staging-7d","Status":"Enabled","Expiration":{"Days":7},"Filter":{}}]}
         JSON
 
-  docling:
-    build: ./docling_service
-    environment:
-      # Container-internal, literal like the other services -- not
-      # MINIO_ENDPOINT, which is app/config.py's escape hatch for real S3
-      # and is unset by default; ${MINIO_ENDPOINT} here would resolve to
-      # an empty string.
-      MINIO_HOST: minio
-      MINIO_PORT: 9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+  # Chandra OCR 2 behind vLLM's OpenAI-style API. Settings are Datalab's own
+  # launcher's (chandra_vllm) scaled to a 16 GB card: 8 sequences, 1024
+  # batched tokens. BF16 weights take ~10 GB of the 16, so nothing else can
+  # share this GPU.
+  chandra:
+    image: vllm/vllm-openai:v0.17.0
+    command:
+      # Positional: the image's entrypoint is `vllm serve`, which is
+      # retiring the --model flag.
+      - datalab-to/chandra-ocr-2
+      - --served-model-name
+      - chandra
+      - --dtype
+      - bfloat16
+      - --max-model-len
+      - "18000"
+      - --max-num-seqs
+      - "8"
+      - --max-num-batched-tokens
+      - "1024"
+      - --gpu-memory-utilization
+      - "0.85"
+      - --enable-prefix-caching
+      - --no-enforce-eager
+      - --mm-processor-kwargs
+      - '{"min_pixels": 3136, "max_pixels": 6291456}'
     ports:
-      - "8100:8100"
+      - "8100:8000"
     volumes:
-      # Weights download once and are reused forever. The first run takes
-      # real time and LOOKS EXACTLY LIKE A HANG -- that is normal.
-      - doclingmodels:/models
+      # ~10 GB of weights download once and are reused forever. The first
+      # start takes real time and LOOKS EXACTLY LIKE A HANG -- that is normal.
+      - chandramodels:/root/.cache/huggingface
+      # torch.compile output (~27 s of every start). Without a volume it lives
+      # in the container layer and is lost whenever the container is
+      # recreated -- a `down`, or any edit to this service.
+      - chandracompile:/root/.cache/vllm
+    ipc: host
     healthcheck:
-      # Waits for the model to finish loading, not just for the port to
-      # open -- otherwise a worker fires requests at a service that isn't
-      # ready yet, and you end up debugging the wrong thing.
+      # vLLM answers /health only once the model is loaded, not when the
+      # port opens -- a worker sending pages any earlier would only fail.
       test:
-        - CMD-SHELL
-        - >-
-          python -c "import urllib.request,json;
-          assert json.load(urllib.request.urlopen('http://localhost:8100/health'))['models_loaded']"
+        - CMD
+        - python3
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/health')
       interval: 15s
       timeout: 10s
       retries: 40
-      start_period: 300s
+      start_period: 900s
     deploy:
       resources:
         reservations:
@@ -183,9 +202,9 @@ services:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
       REDIS_URL: redis://redis:6379/0
-      # Only this worker calls Docling: S1 parse is the only stage that
+      # Only this worker calls Chandra: S1 parse is the only stage that
       # does, and it is routed to the cpu queue.
-      DOCLING_URL: http://docling:8100
+      OCR_URL: http://chandra:8000
       # celery's own process gets /code on sys.path to resolve `-A
       # worker.celery_app`, but its prefork pool forks task-executing child
       # processes that do NOT inherit that -- found because every stage
@@ -201,11 +220,11 @@ services:
       rabbitmq:
         condition: service_healthy
       # Not service_healthy: that would block worker-cpu -- which also
-      # runs structure/persist, neither touching Docling -- on the full
-      # model load every time. A parse task that lands before Docling is
-      # ready just retries with backoff, the same as any other transient
-      # failure.
-      docling:
+      # runs structure/persist, neither touching Chandra -- on the full
+      # model load every time. A parse task that lands before Chandra is
+      # ready fails its /health check and retries with backoff, the same as
+      # any other transient failure.
+      chandra:
         condition: service_started
     volumes:
       - .:/code
@@ -260,4 +279,5 @@ services:
 volumes:
   pgdata:
   miniodata:
-  doclingmodels:
+  chandramodels:
+  chandracompile:

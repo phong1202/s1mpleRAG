@@ -72,14 +72,21 @@ class Settings(BaseSettings):
     rabbitmq_vhost: str = "/"
     rabbitmq_url_override: str | None = Field(default=None, validation_alias="RABBITMQ_URL")
 
-    # Redis and Docling stay whole URLs on purpose. Neither carries a
+    # Redis and the OCR server stay whole URLs on purpose. Neither carries a
     # credential compose needs separately, and both fail loudly -- connection
     # refused -- rather than quietly talking to the wrong place. Talking to the
     # wrong place silently is what splitting the database was guarding against.
     redis_url: str = "redis://redis:6379/0"
 
-    docling_url: str = "http://docling:8100"
-    docling_page_timeout_s: int = 90
+    # The vLLM server running Chandra OCR. Root URL, not .../v1: S1 checks
+    # /health on it before sending pages, and the OpenAI-style API lives
+    # under /v1.
+    ocr_url: str = "http://chandra:8000"
+    # False: only the pages PyMuPDF cannot do well go to OCR -- scans, and
+    # pages with a detected table or an image. True: every page, for the
+    # best output, at the cost of a GPU pass per page. Borderless tables are
+    # the case that needs it: PyMuPDF does not detect them as tables.
+    ocr_all_pages: bool = False
 
     # Only the internal endpoint is assembled, because compose publishes
     # ${MINIO_PORT} and would otherwise repeat it. The public endpoint stays a

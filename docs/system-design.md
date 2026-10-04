@@ -39,7 +39,7 @@ with a row here, the implementation is wrong.
 | 4 | HNSW | Plain `CREATE INDEX` | Bulk-load path is for backfills; irrelevant at this scale |
 | 5 | Deployment | Local Docker Compose | Study/test scale |
 | 6 | LLM provider | OpenAI (`gpt-6-luna`, reasoning effort `low`) | Single provider; caching caveat accepted (§12) |
-| 7 | Docling | Independent container | Isolates VRAM/RAM from worker concurrency |
+| 7 | OCR | Chandra OCR 2 on vLLM, own container | Out-read Docling in our own benchmark; isolates the GPU from worker concurrency |
 | 8 | Object storage | MinIO container | S3-API compatible — swap to S3 by URL later |
 | 9 | Broker | **RabbitMQ** | Real AMQP acks; no `visibility_timeout` guessing |
 | 10 | Rate limiter | **Redis** (only job) | RabbitMQ can't do atomic token buckets |
@@ -74,7 +74,7 @@ with a row here, the implementation is wrong.
        │                    │                    │
        │                    │  S1 over HTTP      │ token bucket
        │             ┌──────▼───────┐     ┌──────▼───────┐
-       └────────────▶│ docling      │     │ redis :6379  │
+       └────────────▶│ chandra      │     │ redis :6379  │
                      │ :8100        │     │ rate limiter │
                      └──────────────┘     └──────────────┘
                                 │
@@ -84,16 +84,16 @@ with a row here, the implementation is wrong.
                          └─────────────────────────┘
 ```
 
-**Eight containers.** RabbitMQ (~200MB) and Docling (~1–2GB with models) are the heavy ones. If your
-machine strains, fold `docling` into `worker-cpu` for local runs via a compose override — keep it
-separate in the file you'd deploy.
+**Eight containers.** `chandra` is the heavy one: ~10 GB of BF16 weights on the GPU, which it
+cannot share on a 16 GB card. RabbitMQ (~200MB) comes next. The first start downloads the weights
+and looks exactly like a hang.
 
 | Service | Image / build | Ports | Notes |
 |---------|---------------|-------|-------|
 | `api` | build `.` | 8000 | FastAPI, async, existing |
 | `worker-cpu` | build `.` | — | `celery -A worker.celery_app worker -Q cpu -c 8` |
 | `worker-llm` | build `.` | — | `celery -A worker.celery_app worker -Q llm -c 20` |
-| `docling` | build `./docling_service` | 8100 | FastAPI wrapper, models loaded at startup |
+| `chandra` | `vllm/vllm-openai:v0.17.0` | 8100→8000 | Chandra OCR 2, OpenAI-style API; healthy once weights are loaded |
 | `rabbitmq` | `rabbitmq:3-management` | 5672, 15672 | Management UI for queue inspection |
 | `redis` | `redis:7-alpine` | 6379 | Token buckets only |
 | `db` | `pgvector/pgvector:pg16` | 5433→5432 | Existing; 5432 taken by another container |
@@ -142,17 +142,12 @@ rag-beginner/
 ├── worker/                          # ── Celery (sync) ────────────────
 │   ├── celery_app.py                #   app, task_routes, retry defaults
 │   ├── stages.py                    #   @task wrappers; the S1→S5 chain
-│   ├── parsing.py                   #   PyMuPDF + docling client + detection
+│   ├── parsing.py                   #   PyMuPDF + Chandra client + detection
 │   ├── chunking.py                  #   sanitize + hierarchical chunking
 │   ├── enrichment.py                #   metadata + contextualizer
 │   ├── embedding.py                 #   chunk embedding (calls shared/)
 │   ├── persistence.py               #   idempotent bulk upsert
 │   └── db.py                        #   SYNC engine + sync repositories
-│
-├── docling_service/                 # ★ NEW — its own container
-│   ├── main.py                      #   FastAPI: POST /parse
-│   ├── Dockerfile
-│   └── requirements.txt
 │
 ├── alembic/versions/                # CLI-generated only
 ├── tests/
@@ -257,7 +252,7 @@ neighbors with no error.
 
 Seven original nodes, five stages, grouped by contended resource.
 
-### S1 — Parse · queue `cpu` → HTTP to `docling`
+### S1 — Parse · queue `cpu` → HTTP to `chandra`
 
 **In:** `document_id`  **Out:** `staging/{doc_id}/parsed.json`
 
@@ -266,7 +261,7 @@ Seven original nodes, five stages, grouped by contended resource.
   "page_count": 42,
   "pages": [
     {"page": 1, "markdown": "...", "source": "pymupdf", "confidence": 1.0},
-    {"page": 2, "markdown": "...", "source": "docling", "confidence": 0.91}
+    {"page": 2, "markdown": "...", "source": "chandra", "confidence": 1.0}
   ]
 }
 ```
@@ -275,24 +270,28 @@ Seven original nodes, five stages, grouped by contended resource.
 2. **Guard:** encrypted → `AppException(PDF_ENCRYPTED)`, straight to `DEAD_LETTER`. Page count over
    limit → `PDF_TOO_LARGE`.
 3. PyMuPDF fast pass, all pages.
-4. **Scanned detection:** `total_text_chars / page_count < 100` → route *every* page to Docling.
-5. **Per-page routing:** pages with detected tables/images → Docling, one HTTP call per page.
-6. **Per-page timeout 90s** → fall back to PyMuPDF text for that page, `confidence: 0.0`, log it.
+4. **Scanned detection:** `total_text_chars / page_count < 100` → route *every* page to Chandra.
+5. **Per-page routing:** pages with detected tables/images → Chandra, 8 pages per batch.
+   `OCR_ALL_PAGES=true` sends every page — the only way a borderless table, which PyMuPDF does not
+   detect, gets read as a table.
+6. **A page Chandra still fails after its own retries** → fall back to PyMuPDF text for that page,
+   `confidence: 0.0`, log it. **Server unreachable** → the stage fails and retries: degrading every
+   page of a scan to its empty text layer would read as a blank document.
 7. Write `parsed.json`, update `documents.page_count`.
 
-The task runs on `worker-cpu` but the *work* happens in the `docling` container — the worker holds an
-HTTP connection, not model weights. That's what makes S1 safe to run at concurrency 8.
+The task runs on `worker-cpu` but the *work* happens in the `chandra` container — the worker renders
+pages and holds HTTP connections, not model weights. That's what makes S1 safe to run at concurrency 8.
 
-**Docling service contract:**
+**Chandra server:** vLLM's OpenAI-style API under `/v1`; S1 checks `GET /health` first. Pages go
+as images rendered by `chandra-ocr`'s own renderer (≥192 DPI, form fields flattened) with Chandra's
+`ocr_layout` prompt, and come back as markdown — tables included — parsed by the same library.
+Weights load once at container start, never per request. Concurrency **8** (`--max-num-seqs`).
+Chandra gives no per-page confidence: a page it read is `1.0`, a page it failed is `0.0`.
 
-```
-POST /parse
-  { "object_key": "raw/abc123.pdf", "pages": [2, 7, 11] }
-→ { "pages": [ {"page": 2, "markdown": "...", "confidence": 0.91} ] }
-```
-
-It pulls from MinIO itself — no multi-MB payloads over the wire. Models load once at process start,
-never per request. Concurrency **1**.
+Measured on an RTX 5060 Ti 16 GB: 8.6 GiB of weights plus 4.25 GiB of KV cache; **~12 s per scanned
+page with 8 in flight (~5 pages/min)**, a single page alone ~60 s. A digital PDF only pays this for
+its table/image pages. Chandra's repetition check reads genuinely repeated text (identical rows, dot
+leaders) as a loop and retries — capped at 2 retries here, against its default of 6.
 
 ### S2 — Structure · queue `cpu`
 
@@ -406,7 +405,7 @@ harmless re-run of exactly one stage.
 
 | Stage | Skip if | Wasted re-run costs | Retry |
 |-------|---------|---------------------|-------|
-| S1 | `parsed.json` exists | **High** — Docling inference | 3× backoff |
+| S1 | `parsed.json` exists | **High** — Chandra inference on the GPU | 3× backoff |
 | S2 | `chunks.json` exists | Trivial — pure CPU | 5× fast |
 | S3 | `enriched.json` exists | **High** — dominant invoice line | 3× backoff |
 | S4 | `embeddings.npy` exists | Moderate — embedding tokens | 3× backoff |
@@ -618,12 +617,12 @@ OPENAI_REASONING_EFFORT=low
 OPENAI_EMBED_MODEL=text-embedding-3-large
 EMBED_DIMENSIONS=1536
 
-DOCLING_URL=http://docling:8100
+OCR_URL=http://chandra:8000
+OCR_ALL_PAGES=false
 
 # limits
 MAX_FILE_SIZE_MB=50
 MAX_PAGE_COUNT=500
-DOCLING_PAGE_TIMEOUT_S=90
 ENRICH_BATCH_SIZE=20
 EMBED_BATCH_SIZE=100
 RL_CHAT_RPM=500

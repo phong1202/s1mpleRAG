@@ -1,8 +1,8 @@
-"""S1 -- Parse. PyMuPDF for a fast first pass, Docling for the hard pages.
+"""S1 -- Parse. PyMuPDF for a fast first pass, Chandra OCR for the hard pages.
 
-The task runs on worker-cpu but the REAL work happens inside the docling
-container: the worker only holds an HTTP connection, not model weights.
-That is why S1 is safe at concurrency 8.
+The task runs on worker-cpu but the model runs inside the chandra container
+(vLLM): the worker renders pages and holds HTTP connections, not model
+weights. That is why S1 is safe at concurrency 8.
 """
 
 import logging
@@ -25,6 +25,16 @@ SCANNED_CHARS_PER_PAGE = 100
 
 _H1 = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 _HEADING_MARKUP = re.compile(r"^#{1,6}\s+")
+
+# Pages per OCR request batch: the chandra server's --max-num-seqs, so one
+# batch keeps it full without queueing pages the GPU cannot start yet.
+_OCR_BATCH_PAGES = 8
+# Chandra's own default is 6. Its repetition check reads a page whose text
+# genuinely repeats -- identical table rows, dot leaders, a form -- as the
+# model looping, and retries; on a 16 GB card each attempt is about a
+# minute, and one such page measured 7 requests and 8 minutes, to return
+# the text it had right the first time. 2 still rescues a real loop.
+_OCR_MAX_RETRIES = 2
 
 _BOLD_FLAG = 16
 # A line this much larger than the document's body text reads as a heading.
@@ -122,7 +132,7 @@ def _heading_key(text: str, size: float, bold: bool, body_size: float) -> tuple 
 def _markdown_pages(document: pymupdf.Document) -> list[str]:
     """PyMuPDF's text with the headings marked up as markdown. Plain
     get_text() carries no structure at all, so S2's heading split -- and
-    with it heading_path -- came out empty for every digital PDF, docling
+    with it heading_path -- came out empty for every digital PDF, OCR'd
     pages being the only exception. Typography is the signal: the size most
     characters are set in is body text; headings are set larger, or in bold
     with a structural opening. Levels go by how prominent each style is
@@ -158,7 +168,46 @@ def _markdown_pages(document: pymupdf.Document) -> list[str]:
     return markdown
 
 
-def parse_document(object_key: str, store: ObjectStore, docling_url: str | None) -> dict:
+def _ocr(data: bytes, page_numbers: list[int], ocr_url: str) -> dict[int, str | None]:
+    """Chandra's markdown for each page, or None for a page it still failed
+    on after its own retries.
+
+    Raises if the OCR server itself is down. An outage is a stage failure to
+    retry later, not a page to degrade: degraded, every page of a scan falls
+    back to its empty text layer, and the document would be dead-lettered
+    as blank -- permanently, for what was a restart."""
+    if not page_numbers:
+        return {}
+
+    from chandra.input import load_pdf_images
+    from chandra.model import InferenceManager
+    from chandra.model.schema import BatchInputItem
+
+    httpx.get(f"{ocr_url}/health", timeout=10).raise_for_status()
+
+    manager = InferenceManager(method="vllm")
+    out: dict[int, str | None] = {}
+    # A batch at a time: a page rendered for the model is ~12 MB, so a
+    # 500-page scan rendered all at once would not fit in the worker.
+    for start in range(0, len(page_numbers), _OCR_BATCH_PAGES):
+        batch = page_numbers[start : start + _OCR_BATCH_PAGES]
+        # Chandra's own renderer, so pages reach the model exactly as it was
+        # trained to see them: at least 192 DPI, form fields flattened.
+        images = load_pdf_images(data, page_range=[n - 1 for n in batch])
+        results = manager.generate(
+            [BatchInputItem(image=image, prompt_type="ocr_layout") for image in images],
+            vllm_api_base=f"{ocr_url}/v1",
+            include_images=False,
+            max_retries=_OCR_MAX_RETRIES,
+        )
+        for number, result in zip(batch, results, strict=True):
+            out[number] = None if result.error else result.markdown
+    return out
+
+
+def parse_document(
+    object_key: str, store: ObjectStore, ocr_url: str | None, ocr_all_pages: bool = False
+) -> dict:
     data = store.get(object_key)
 
     try:
@@ -176,52 +225,44 @@ def parse_document(object_key: str, store: ObjectStore, docling_url: str | None)
     texts = [page.get_text() for page in document]
     total_chars = sum(len(t) for t in texts)
 
-    if is_scanned(total_chars, document.page_count) and docling_url:
-        needs_docling = list(range(1, document.page_count + 1))
-    elif docling_url:
-        needs_docling = [
+    if not ocr_url:
+        needs_ocr = []
+    elif ocr_all_pages or is_scanned(total_chars, document.page_count):
+        needs_ocr = list(range(1, document.page_count + 1))
+    else:
+        needs_ocr = [
             i + 1
             for i, page in enumerate(document)
             if page.find_tables().tables or page.get_images()
         ]
-    else:
-        needs_docling = []
 
     pages = [
         {"page": i + 1, "markdown": markdown, "source": "pymupdf", "confidence": 1.0}
         for i, markdown in enumerate(_markdown_pages(document))
     ]
 
-    for page_number in needs_docling:
-        try:
-            response = httpx.post(
-                f"{docling_url}/parse",
-                json={"object_key": object_key, "pages": [page_number]},
-                timeout=_settings.docling_page_timeout_s,
-            )
-            response.raise_for_status()
-            parsed = response.json()["pages"][0]
-            pages[page_number - 1] = {
-                "page": page_number,
-                "markdown": parsed["markdown"],
-                "source": "docling",
-                "confidence": parsed["confidence"],
-            }
-        except Exception:
-            # Timeout or error: keep PyMuPDF's raw text, mark confidence 0
-            # and log it -- a degraded page beats a dead document, but the
-            # degradation has to be visible or nobody knows to check it.
+    for page_number, markdown in _ocr(data, needs_ocr, ocr_url).items():
+        if markdown is None:
+            # Keep PyMuPDF's text, mark confidence 0, and log it -- a
+            # degraded page beats a dead document, but the degradation has
+            # to be visible or nobody knows to check it.
             logger.warning(
-                "Docling failed for %s page %d; keeping PyMuPDF text at confidence 0",
+                "OCR failed for %s page %d; keeping PyMuPDF text at confidence 0",
                 object_key,
                 page_number,
-                exc_info=True,
             )
             pages[page_number - 1]["confidence"] = 0.0
+        else:
+            pages[page_number - 1] = {
+                "page": page_number,
+                "markdown": markdown,
+                "source": "chandra",
+                "confidence": 1.0,
+            }
 
     return {
-        # Extracted AFTER merging in Docling: an h1 usually only exists on
-        # pages Docling rendered into markdown.
+        # Extracted AFTER merging in OCR output: on a scan, an h1 only
+        # exists in what Chandra rendered into markdown.
         "title": extract_title(document.metadata, pages),
         "page_count": document.page_count,
         "pages": pages,

@@ -61,7 +61,7 @@ def test_a_document_opening_on_a_lower_heading_gets_its_text_as_title():
 def test_clean_text_is_parsed_by_pymupdf_alone(store, uploaded):
     key = uploaded("clean_text.pdf")
 
-    result = parse_document(key, store, docling_url=None)
+    result = parse_document(key, store, ocr_url=None)
 
     assert result["page_count"] == 1
     assert all(p["source"] == "pymupdf" for p in result["pages"])
@@ -72,7 +72,7 @@ def test_encrypted_pdf_raises_a_permanent_error(store, uploaded):
     key = uploaded("encrypted.pdf")
 
     with pytest.raises(AppException) as exc:
-        parse_document(key, store, docling_url=None)
+        parse_document(key, store, ocr_url=None)
 
     assert exc.value.error is ErrorCode.PDF_ENCRYPTED
 
@@ -85,7 +85,7 @@ def test_malformed_pdf_raises_the_malformed_error_not_encrypted(store, uploaded)
     key = uploaded("malformed.pdf")
 
     with pytest.raises(AppException) as exc:
-        parse_document(key, store, docling_url=None)
+        parse_document(key, store, ocr_url=None)
 
     assert exc.value.error is ErrorCode.PDF_MALFORMED
 
@@ -97,7 +97,7 @@ def test_a_document_over_the_page_limit_is_rejected(store, uploaded, monkeypatch
     key = uploaded("clean_text.pdf")
 
     with pytest.raises(AppException) as exc:
-        parse_document(key, store, docling_url=None)
+        parse_document(key, store, ocr_url=None)
 
     assert exc.value.error is ErrorCode.PDF_TOO_LARGE
 
@@ -141,7 +141,7 @@ def test_larger_type_becomes_markdown_headings_ranked_by_size(store, upload_pdf)
         Paragraph(BODY, STYLES["BodyText"]),
     )
 
-    result = parse_document(key, store, docling_url=None)
+    result = parse_document(key, store, ocr_url=None)
 
     assert _headings(result) == ["# Chuong I - Quy dinh chung", "## Dieu 1. Pham vi"]
     parents = chunk_document(result)["parents"]
@@ -157,7 +157,7 @@ def test_bold_structural_lines_at_body_size_nest_by_their_rank(store, upload_pdf
         Paragraph(BODY, STYLES["BodyText"]),
     )
 
-    result = parse_document(key, store, docling_url=None)
+    result = parse_document(key, store, ocr_url=None)
 
     assert _headings(result) == ["# Chuong I", "## Dieu 1. Pham vi dieu chinh"]
 
@@ -172,10 +172,73 @@ def test_body_text_is_not_mistaken_for_a_heading(store, upload_pdf):
         Paragraph(BODY, STYLES["BodyText"]),
     )
 
-    assert _headings(parse_document(key, store, docling_url=None)) == []
+    assert _headings(parse_document(key, store, ocr_url=None)) == []
 
 
 def test_a_document_without_headings_gains_none(store, uploaded):
     key = uploaded("clean_text.pdf")
 
-    assert _headings(parse_document(key, store, docling_url=None)) == []
+    assert _headings(parse_document(key, store, ocr_url=None)) == []
+
+
+@pytest.fixture
+def ocr_calls(monkeypatch):
+    """Stands in for Chandra: records which pages were sent, and answers
+    each with markdown -- or with None, Chandra's "failed after retries", for
+    the page numbers listed in `ocr_calls.fail`."""
+    calls = {"pages": [], "fail": set()}
+
+    def fake_ocr(data, page_numbers, ocr_url):
+        calls["pages"] = list(page_numbers)
+        return {n: None if n in calls["fail"] else f"# Page {n} by OCR" for n in page_numbers}
+
+    monkeypatch.setattr("worker.parsing._ocr", fake_ocr)
+    return calls
+
+
+def test_a_scan_sends_every_page_to_ocr(store, uploaded, ocr_calls):
+    key = uploaded("scanned.pdf")
+
+    result = parse_document(key, store, ocr_url="http://ocr")
+
+    assert ocr_calls["pages"] == list(range(1, result["page_count"] + 1))
+    assert {p["source"] for p in result["pages"]} == {"chandra"}
+
+
+def test_a_plain_digital_page_skips_ocr_unless_every_page_is_asked_for(store, uploaded, ocr_calls):
+    """clean_text has a text layer, no table and no image: PyMuPDF alone is
+    enough -- unless OCR_ALL_PAGES asks for Chandra's reading of everything,
+    which is the only way a borderless table PyMuPDF cannot see gets read."""
+    key = uploaded("clean_text.pdf")
+
+    assert parse_document(key, store, ocr_url="http://ocr")["pages"][0]["source"] == "pymupdf"
+    assert ocr_calls["pages"] == []
+
+    result = parse_document(key, store, ocr_url="http://ocr", ocr_all_pages=True)
+    assert ocr_calls["pages"] == [1]
+    assert result["pages"][0]["source"] == "chandra"
+
+
+def test_a_page_ocr_fails_on_keeps_its_own_text_at_confidence_zero(store, uploaded, ocr_calls):
+    """A degraded page beats a dead document -- as long as the degradation
+    shows, which is what confidence 0 is for."""
+    ocr_calls["fail"] = {1}
+    key = uploaded("clean_text.pdf")
+
+    page = parse_document(key, store, ocr_url="http://ocr", ocr_all_pages=True)["pages"][0]
+
+    assert page["source"] == "pymupdf"
+    assert page["confidence"] == 0.0
+    assert "Doanh thu" in page["markdown"]
+
+
+def test_an_unreachable_ocr_server_fails_the_stage_rather_than_the_pages(store, uploaded):
+    """Degrading every page of a scan to its empty text layer would read as
+    a blank document and dead-letter it -- permanently, for an outage. The
+    stage has to fail, so it retries once the server is back."""
+    import httpx
+
+    key = uploaded("scanned.pdf")
+
+    with pytest.raises(httpx.ConnectError):
+        parse_document(key, store, ocr_url="http://127.0.0.1:1")
