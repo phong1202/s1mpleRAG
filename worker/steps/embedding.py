@@ -75,5 +75,14 @@ def _embed_batch(batch: list[str], provider: LLMProvider) -> list[list[float]]:
     assert len(result) == len(batch), f"got {len(result)} vectors for {len(batch)} texts"
     assert all(len(v) == DIMENSIONS for v in result), "wrong dimension"
     assert all(all(math.isfinite(x) for x in v) for v in result), "non-finite value"
+    # Normalised here, not trusted: text-embedding-3-large shortened to 1536
+    # dimensions returns norms like 1.00019. The assert after it is the
+    # guard, catching what no division can fix -- an all-zero vector.
+    result = [_unit(v) for v in result]
     assert_normalised(result)
     return result
+
+
+def _unit(vector: list[float]) -> list[float]:
+    norm = math.sqrt(sum(x * x for x in vector))
+    return [x / norm for x in vector] if norm else vector

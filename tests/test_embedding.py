@@ -1,6 +1,7 @@
 import math
 from collections import Counter
 
+import numpy as np
 import pytest
 
 from shared.llm import StubProvider
@@ -106,7 +107,7 @@ def test_resuming_from_partials_embeds_each_text_once_and_always_finishes(monkey
         pytest.fail("never finished in 10 attempts")
 
     assert set(sent.values()) == {1}, "a text was embedded more than once"
-    assert vectors == StubProvider().embed(texts)
+    np.testing.assert_allclose(vectors, StubProvider().embed(texts), atol=1e-9)
 
 
 def test_contextualize_puts_the_context_first_and_drops_an_empty_one():
@@ -136,4 +137,28 @@ def test_a_provider_429_mid_document_still_hands_back_the_vectors_so_far():
     with pytest.raises(RateLimited) as exc:
         embed_chunks(texts, provider=RateLimitedOnTheSecondCall(), batch_size=10)
 
-    assert exc.value.partial == StubProvider().embed(texts[:10])
+    np.testing.assert_allclose(exc.value.partial, StubProvider().embed(texts[:10]), atol=1e-9)
+
+
+def test_a_providers_nearly_unit_vectors_are_normalised_not_rejected():
+    """text-embedding-3-large shortened to 1536 dimensions came back with
+    norms like 1.00019 -- outside the assert's tolerance, so the first real
+    run failed every document at S4. The design says S4 L2-normalises every
+    vector; it used to only check."""
+
+    class SlightlyOffProvider(StubProvider):
+        def embed(self, texts):
+            return [[x * 1.0002 for x in v] for v in super().embed(texts)]
+
+    vectors = embed_chunks(["a", "b"], provider=SlightlyOffProvider())
+
+    assert all(abs(math.sqrt(sum(x * x for x in v)) - 1.0) < 1e-9 for v in vectors)
+
+
+def test_a_zero_vector_is_rejected_since_it_cannot_be_normalised():
+    class ZeroProvider(StubProvider):
+        def embed(self, texts):
+            return [[0.0] * 1536 for _ in texts]
+
+    with pytest.raises(AssertionError):
+        embed_chunks(["a"], provider=ZeroProvider())
