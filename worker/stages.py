@@ -1,5 +1,4 @@
-"""Five stages. In this task all of them are no-ops -- only the state
-machine changes.
+"""Five stages: parse, structure, enrich, embed, persist.
 
 documents.stage holds the stage that JUST completed, and only advances
 after its artifact is durably written. So the crash window always reduces
@@ -8,7 +7,6 @@ one stage, harmlessly.
 """
 
 import uuid
-from datetime import UTC, datetime
 
 from celery import chain
 
@@ -43,16 +41,12 @@ PERMANENT = {
 }
 
 
-def _advance(
-    document_id: str, status: str, stage: str | None = None, completed: bool = False
-) -> None:
+def _advance(document_id: str, status: str, stage: str | None = None) -> None:
     with session_scope() as session:
         document = session.get(Document, uuid.UUID(document_id))
         document.status = status
         if stage:
             document.stage = stage
-        if completed:
-            document.completed_at = datetime.now(UTC)
 
 
 def stage_failed(document_id: str, stage: str, exc: BaseException) -> bool:
@@ -282,10 +276,38 @@ def embed(self, document_id: str) -> str:
         raise self.retry(exc=exc, countdown=min(2**self.request.retries, MAX_BACKOFF_S)) from exc
 
 
+# No checkpoint skip, unlike the other four: the upserts are idempotent in
+# themselves, so a rerun is boring rather than destructive.
 @app.task(name="worker.stages.persist", bind=True, max_retries=5)
 def persist(self, document_id: str) -> str:
     try:
-        _advance(document_id, "COMPLETED", stage="PERSISTING", completed=True)
+        from shared.storage import get_store
+        from worker.embedding import vectors_from_npy
+        from worker.persistence import persist_document
+
+        store = get_store()
+        _advance(document_id, "PERSISTING")
+
+        prefix = f"staging/{document_id}"
+        chunks = store.get_json(f"{prefix}/chunks.json")
+        enriched = store.get_json(f"{prefix}/enriched.json")["chunks"]
+        vectors = vectors_from_npy(store.get(f"{prefix}/embeddings.npy"))
+        manifest = store.get_json(f"{prefix}/manifest.json")["chunk_index_by_row"]
+
+        # Row i of the matrix belongs to manifest[i]. Pairing vectors with
+        # children by position is only safe once that list is exactly the
+        # children, in order; otherwise the files came from different runs
+        # and every vector would land under the wrong chunk, silently.
+        expected = [c["chunk_index"] for c in chunks["children"]]
+        if manifest != expected:
+            raise ValueError(
+                f"manifest lists {len(manifest)} rows that do not match the "
+                f"{len(expected)} children of chunks.json -- staged artifacts are from "
+                "different runs"
+            )
+
+        with session_scope() as session:
+            persist_document(uuid.UUID(document_id), chunks, enriched, vectors, session)
         return document_id
     except AppException as exc:
         stage_failed(document_id, "PERSISTING", exc)

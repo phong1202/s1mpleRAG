@@ -135,15 +135,37 @@ def test_retries_stop_at_the_attempt_ceiling_not_at_max_retries(seeded_document,
 
 @pytest.fixture
 def staged_chunks(seeded_document):
-    """chunks.json for seeded_document, as S2 would have left it -- enrich's
-    input: 60 children, three batches at the default size of 20. Cleaned up
-    for real, along with whatever enrich writes."""
+    """chunks.json for seeded_document, shaped exactly as S2 leaves it:
+    three parents of 20 children each -- three batches at enrich's default
+    size. Cleaned up for real, along with whatever enrich writes."""
     from shared.storage import get_store
 
     store = get_store()
     prefix = f"staging/{seeded_document.id}"
-    children = [{"chunk_index": i, "content": f"body {i}", "token_count": 50} for i in range(60)]
-    store.put_json(f"{prefix}/chunks.json", {"parents": [], "children": children})
+    parents = [
+        {
+            "chunk_index": p,
+            "content": f"parent {p}",
+            "token_count": 600,
+            "page_start": 1,
+            "page_end": 1,
+            "heading_path": f"Chuong {p}",
+            "language": "vi",
+        }
+        for p in range(3)
+    ]
+    children = [
+        {
+            "chunk_index": i,
+            "parent_index": i // 20,
+            "content": f"body {i}",
+            "token_count": 50,
+            "page_number": 1,
+            "language": "vi",
+        }
+        for i in range(60)
+    ]
+    store.put_json(f"{prefix}/chunks.json", {"parents": parents, "children": children})
     yield seeded_document
     for name in ("chunks.json", "enriched.json", "enriched.partial.json"):
         store.delete(f"{prefix}/{name}")
@@ -331,3 +353,69 @@ def test_a_crash_between_the_two_embed_writes_is_recovered_not_skipped(
 
     assert crashed["yet"]
     assert get_store().exists(f"staging/{staged_enriched.id}/manifest.json")
+
+
+@pytest.fixture
+def staged_embeddings(staged_enriched):
+    """embeddings.npy + manifest.json on top of staged_enriched, as S4 would
+    have left them -- persist's input. staged_enriched cleans them up."""
+    from shared.llm import StubProvider
+    from shared.storage import get_store
+    from worker.embedding import vectors_to_npy
+
+    store = get_store()
+    prefix = f"staging/{staged_enriched.id}"
+    store.put_json(f"{prefix}/manifest.json", {"chunk_index_by_row": list(range(60))})
+    store.put(
+        f"{prefix}/embeddings.npy",
+        vectors_to_npy(StubProvider().embed([f"text {i}" for i in range(60)])),
+    )
+    return staged_enriched
+
+
+def _child_count(document_id):
+    from sqlalchemy import func, select
+
+    from app.models import ChildChunk
+    from worker.db import session_scope
+
+    with session_scope() as session:
+        return session.scalar(
+            select(func.count())
+            .select_from(ChildChunk)
+            .where(ChildChunk.document_id == document_id)
+        )
+
+
+def test_persist_completes_a_document_from_its_staged_artifacts(staged_embeddings):
+    from worker import stages
+
+    stages.persist.apply(args=(str(staged_embeddings.id),)).get()
+
+    document = reload(staged_embeddings.id)
+    assert document.status == "COMPLETED"
+    assert document.language == "vi"
+    assert _child_count(staged_embeddings.id) == 60
+
+
+def test_persist_refuses_vectors_built_for_a_different_chunks_json(staged_embeddings):
+    """Vectors pair with children by row. If the manifest S4 wrote does not
+    list exactly these children in this order, the two files came from
+    different runs, and persisting would file every vector under the wrong
+    chunk -- with nothing anywhere to say so."""
+    from shared.storage import get_store
+    from worker import stages
+
+    get_store().put_json(
+        f"staging/{staged_embeddings.id}/manifest.json",
+        {"chunk_index_by_row": list(reversed(range(60)))},
+    )
+
+    with pytest.raises(ValueError):
+        stages.persist.apply(args=(str(staged_embeddings.id),)).get()
+
+    document = reload(staged_embeddings.id)
+    assert document.status == "DEAD_LETTER"
+    assert document.failed_stage == "PERSISTING"
+    assert "manifest" in document.last_error
+    assert _child_count(staged_embeddings.id) == 0
