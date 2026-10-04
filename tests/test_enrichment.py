@@ -91,7 +91,7 @@ def test_a_batch_bigger_than_the_bucket_fails_instead_of_retrying_forever(childr
         def acquire(self, tokens: int = 1) -> tuple[bool, int]:
             return False, -1
 
-    monkeypatch.setattr("worker.enrichment.get_bucket", lambda name: ImpossibleBucket())
+    monkeypatch.setattr("shared.rate_limiter.get_bucket", lambda name: ImpossibleBucket())
 
     with pytest.raises(AppException) as exc:
         enrich_chunks(children, provider=StubProvider(), batch_size=20)
@@ -108,7 +108,7 @@ def test_a_bucket_that_says_wait_raises_rate_limited_with_its_wait(children, mon
         def acquire(self, tokens: int = 1) -> tuple[bool, int]:
             return False, 500
 
-    monkeypatch.setattr("worker.enrichment.get_bucket", lambda name: WaitingBucket())
+    monkeypatch.setattr("shared.rate_limiter.get_bucket", lambda name: WaitingBucket())
 
     with pytest.raises(RateLimited) as exc:
         enrich_chunks(children, provider=StubProvider(), batch_size=20)
@@ -145,7 +145,7 @@ def test_resuming_from_partials_sends_each_chunk_once_and_always_finishes(monkey
     done: list[dict] = []
     for _attempt in range(10):
         bucket = RoomForTwoBatches()
-        monkeypatch.setattr("worker.enrichment.get_bucket", lambda name, b=bucket: b)
+        monkeypatch.setattr("shared.rate_limiter.get_bucket", lambda name, b=bucket: b)
         try:
             result = enrich_chunks(children, provider=provider, batch_size=20, done=done)
             break

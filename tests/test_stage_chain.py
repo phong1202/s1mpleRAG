@@ -155,7 +155,7 @@ def test_a_rate_limited_enrich_is_deferred_not_counted_as_a_failure(staged_chunk
     is an Exception -- so every deferral cost an attempt (three deferrals
     dead-lettered a perfectly healthy document) and published a second
     retry on top of the first, running the rest of the chain twice."""
-    from worker import enrichment, stages
+    from worker import stages
 
     calls = {"n": 0}
 
@@ -164,7 +164,7 @@ def test_a_rate_limited_enrich_is_deferred_not_counted_as_a_failure(staged_chunk
             calls["n"] += 1
             return (False, 50) if calls["n"] == 1 else (True, 0)
 
-    monkeypatch.setattr(enrichment, "get_bucket", lambda name: WaitOnceBucket())
+    monkeypatch.setattr("shared.rate_limiter.get_bucket", lambda name: WaitOnceBucket())
 
     stages.enrich.apply(args=(str(staged_chunks.id),)).get()
 
@@ -212,7 +212,7 @@ def test_a_mid_document_deferral_resumes_instead_of_starting_over(staged_chunks,
     import shared.llm
     from shared.llm import StubProvider
     from shared.storage import get_store
-    from worker import enrichment, stages
+    from worker import stages
 
     sent = Counter()
 
@@ -230,7 +230,7 @@ def test_a_mid_document_deferral_resumes_instead_of_starting_over(staged_chunks,
             acquires["n"] += 1  # two per batch: chat_rpm, then chat_tpm
             return (False, 50) if acquires["n"] == 5 else (True, 0)
 
-    monkeypatch.setattr(enrichment, "get_bucket", lambda name: WaitAtTheThirdBatch())
+    monkeypatch.setattr("shared.rate_limiter.get_bucket", lambda name: WaitAtTheThirdBatch())
 
     stages.enrich.apply(args=(str(staged_chunks.id),)).get()
 
@@ -239,3 +239,95 @@ def test_a_mid_document_deferral_resumes_instead_of_starting_over(staged_chunks,
 
     enriched = get_store().get_json(f"staging/{staged_chunks.id}/enriched.json")["chunks"]
     assert [c["id"] for c in enriched] == list(range(60))
+
+
+@pytest.fixture
+def staged_enriched(staged_chunks):
+    """enriched.json on top of staged_chunks, as S3 would have left it --
+    embed's input. Cleans up what embed writes; staged_chunks cleans up the
+    rest."""
+    from shared.storage import get_store
+
+    store = get_store()
+    prefix = f"staging/{staged_chunks.id}"
+    enriched = [{"id": i, "context": f"context {i}", "category": "TECHNICAL"} for i in range(60)]
+    store.put_json(f"{prefix}/enriched.json", {"chunks": enriched})
+    yield staged_chunks
+    for name in ("embeddings.npy", "manifest.json", "embeddings.partial.npy"):
+        store.delete(f"{prefix}/{name}")
+
+
+def test_a_mid_document_embed_deferral_resumes_with_rows_aligned(staged_enriched, monkeypatch):
+    """S4 had S3's three rate-limit bugs copied in. Deferred at the third
+    batch, it must count no attempt, embed every text exactly once, and
+    still leave row i of the matrix matching manifest row i."""
+    import io
+    from collections import Counter
+
+    import numpy as np
+
+    import shared.llm
+    from app.config import get_settings
+    from shared.llm import StubProvider
+    from shared.storage import get_store
+    from worker import stages
+    from worker.embedding import contextualize
+
+    monkeypatch.setattr(get_settings(), "embed_batch_size", 20)
+    sent = Counter()
+
+    class CountingStub(StubProvider):
+        def embed(self, texts):
+            sent.update(texts)
+            return super().embed(texts)
+
+    monkeypatch.setattr(shared.llm, "get_provider", lambda: CountingStub())
+    acquires = {"n": 0}
+
+    class WaitAtTheThirdBatch:
+        def acquire(self, tokens: int = 1) -> tuple[bool, int]:
+            acquires["n"] += 1  # two per batch: embed_rpm, then embed_tpm
+            return (False, 50) if acquires["n"] == 5 else (True, 0)
+
+    monkeypatch.setattr("shared.rate_limiter.get_bucket", lambda name: WaitAtTheThirdBatch())
+
+    stages.embed.apply(args=(str(staged_enriched.id),)).get()
+
+    assert reload(staged_enriched.id).attempts == 0
+    assert len(sent) == 60
+    assert set(sent.values()) == {1}, "a text was embedded more than once"
+
+    prefix = f"staging/{staged_enriched.id}"
+    store = get_store()
+    vectors = np.load(io.BytesIO(store.get(f"{prefix}/embeddings.npy")))
+    manifest = store.get_json(f"{prefix}/manifest.json")["chunk_index_by_row"]
+    expected = StubProvider().embed([contextualize(f"context {i}", f"body {i}") for i in range(60)])
+    assert vectors.shape == (60, 1536)
+    assert manifest == list(range(60))
+    assert np.allclose(vectors, np.asarray(expected, dtype=np.float32))
+
+
+def test_a_crash_between_the_two_embed_writes_is_recovered_not_skipped(
+    staged_enriched, monkeypatch
+):
+    """embeddings.npy is the checkpoint this stage skips on. Written before
+    manifest.json, a crash between the two leaves a run every retry skips
+    -- and S5 without a manifest, for good."""
+    from shared.storage import ObjectStore, get_store
+    from worker import stages
+
+    real_put_json = ObjectStore.put_json
+    crashed = {"yet": False}
+
+    def put_json_crashing_on_the_first_manifest(self, key, obj):
+        if key.endswith("/manifest.json") and not crashed["yet"]:
+            crashed["yet"] = True
+            raise ConnectionError("simulated crash between the two writes")
+        return real_put_json(self, key, obj)
+
+    monkeypatch.setattr(ObjectStore, "put_json", put_json_crashing_on_the_first_manifest)
+
+    stages.embed.apply(args=(str(staged_enriched.id),)).get()
+
+    assert crashed["yet"]
+    assert get_store().exists(f"staging/{staged_enriched.id}/manifest.json")

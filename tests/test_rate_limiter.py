@@ -11,7 +11,8 @@ import pytest
 import redis as redis_lib
 
 from app.config import get_settings
-from shared.rate_limiter import TokenBucket, get_bucket
+from app.exceptions import AppException, ErrorCode
+from shared.rate_limiter import RateLimited, TokenBucket, acquire_or_defer, get_bucket
 
 
 @pytest.fixture
@@ -112,3 +113,37 @@ def test_get_bucket_is_cached_and_derives_its_rate_from_settings():
     assert chat.capacity == settings.rl_chat_rpm
     assert chat.refill_per_sec == pytest.approx(settings.rl_chat_rpm / 60)
     assert get_bucket("embed_tpm").capacity == settings.rl_embed_tpm
+
+
+def test_acquire_or_defer_turns_a_wait_into_rate_limited_with_jitter(monkeypatch):
+    """ "Wait" is not an error: it becomes RateLimited, which only the stage
+    task turns into a retry. The jitter keeps a crowd of deferred tasks from
+    waking in lockstep and colliding on the bucket again."""
+
+    class Waiting:
+        def acquire(self, tokens: int = 1) -> tuple[bool, int]:
+            return False, 1000
+
+    monkeypatch.setattr("shared.rate_limiter.get_bucket", lambda name: Waiting())
+
+    with pytest.raises(RateLimited) as exc:
+        acquire_or_defer([("chat_rpm", 1)])
+
+    assert 1.0 <= exc.value.countdown <= 1.3
+
+
+def test_acquire_or_defer_fails_loudly_on_a_request_no_wait_can_satisfy(monkeypatch):
+    """wait_ms=-1 means the cost exceeds the whole bucket. Deferring on it
+    would compute a negative countdown -- an ETA already past, so Celery
+    runs it again at once, forever."""
+
+    class Impossible:
+        def acquire(self, tokens: int = 1) -> tuple[bool, int]:
+            return False, -1
+
+    monkeypatch.setattr("shared.rate_limiter.get_bucket", lambda name: Impossible())
+
+    with pytest.raises(AppException) as exc:
+        acquire_or_defer([("embed_tpm", 10**9)])
+
+    assert exc.value.error is ErrorCode.RATE_LIMIT_UNSATISFIABLE

@@ -9,11 +9,13 @@ uninterruptible step. As two commands, two workers both read one token
 remaining and both spend it.
 """
 
+import random
 from functools import lru_cache
 
 import redis as redis_lib
 
 from app.config import get_settings
+from app.exceptions import AppException, ErrorCode
 
 # Idle buckets are dropped after an hour. Any bucket in use refreshes this on
 # every call, so only abandoned keys expire.
@@ -124,3 +126,32 @@ def get_bucket(name: str) -> TokenBucket:
         capacity=per_minute,
         refill_per_sec=per_minute / 60,
     )
+
+
+def acquire_or_defer(costs: list[tuple[str, int]]) -> None:
+    """Takes `cost` from each named bucket, in order, or raises.
+
+    One definition for every stage that calls a paid API: each fix below
+    was found in S3 and would otherwise have had to be found again in S4.
+    """
+    for bucket_name, cost in costs:
+        allowed, wait_ms = get_bucket(bucket_name).acquire(cost)
+        if allowed:
+            continue
+
+        if wait_ms < 0:
+            # Not "wait and it clears" but "no amount of waiting clears it":
+            # the request costs more than the bucket holds in total.
+            # Deferring on this would compute a negative countdown, which
+            # Celery turns into an ETA already in the past and so runs
+            # immediately -- an endless tight loop, with nothing logged.
+            raise AppException(
+                ErrorCode.RATE_LIMIT_UNSATISFIABLE,
+                f"{bucket_name}: costs {cost}, more than the bucket's whole capacity",
+            )
+
+        # Requeue, do NOT sleep: a sleeping worker still holds its slot and
+        # reports itself busy, leaving the pool at 100% utilised while doing
+        # nothing. The jitter keeps a crowd of deferred tasks from waking up
+        # in lockstep and colliding on the bucket again.
+        raise RateLimited(countdown=(wait_ms / 1000) * random.uniform(1.0, 1.3))

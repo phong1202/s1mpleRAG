@@ -5,12 +5,10 @@ Validate BEFORE writing anything. A broken batch is retried by its exact
 missing ids, one at a time -- never the whole batch of 20 again.
 """
 
-import random
-
 from app.config import get_settings
 from app.exceptions import AppException, ErrorCode
 from shared.llm import CATEGORIES, EnrichedChunk, LLMProvider
-from shared.rate_limiter import RateLimited, get_bucket
+from shared.rate_limiter import RateLimited, acquire_or_defer
 
 _settings = get_settings()
 MAX_CHUNKS_PER_DOC = _settings.max_chunks_per_doc
@@ -37,31 +35,6 @@ def _normalise(item: EnrichedChunk) -> dict:
     return {"id": item.id, "context": item.context, "category": category}
 
 
-def _acquire_or_defer(estimated_tokens: int) -> None:
-    for bucket_name, cost in (("chat_rpm", 1), ("chat_tpm", estimated_tokens)):
-        allowed, wait_ms = get_bucket(bucket_name).acquire(cost)
-        if allowed:
-            continue
-
-        if wait_ms < 0:
-            # Not "wait and it clears" but "no amount of waiting clears it":
-            # the batch costs more than the bucket holds in total. Deferring
-            # on this would compute a negative countdown, which Celery turns
-            # into an ETA already in the past and so runs immediately --
-            # with max_retries=None below, an endless tight loop on a
-            # document that can never get through, and nothing logged.
-            raise AppException(
-                ErrorCode.RATE_LIMIT_UNSATISFIABLE,
-                f"{bucket_name}: batch costs {cost}, more than the bucket's whole capacity",
-            )
-
-        # Requeue, do NOT sleep: a sleeping worker still holds its slot and
-        # reports itself busy, leaving the pool at 100% utilised while doing
-        # nothing. The jitter keeps a crowd of deferred tasks from waking up
-        # in lockstep and colliding on the bucket again.
-        raise RateLimited(countdown=(wait_ms / 1000) * random.uniform(1.0, 1.3))
-
-
 def enrich_chunks(
     children: list[dict],
     provider: LLMProvider,
@@ -85,7 +58,7 @@ def enrich_chunks(
             sum(c["token_count"] for c in batch) if "token_count" in batch[0] else len(batch) * 150
         )
         try:
-            _acquire_or_defer(estimated_tokens)
+            acquire_or_defer([("chat_rpm", 1), ("chat_tpm", estimated_tokens)])
         except RateLimited as exc:
             exc.partial = list(out.values())
             raise

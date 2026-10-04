@@ -217,18 +217,69 @@ def enrich(self, document_id: str) -> str:
         raise self.retry(exc=exc, countdown=min(2**self.request.retries, MAX_BACKOFF_S)) from exc
 
 
-@app.task(name="worker.stages.embed", bind=True, max_retries=3)
+# max_retries=None for the same reason as enrich.
+@app.task(name="worker.stages.embed", bind=True, max_retries=None)
 def embed(self, document_id: str) -> str:
     try:
+        from app.config import get_settings
+        from shared.llm import get_provider
+        from shared.storage import get_store
+        from worker.embedding import contextualize, embed_chunks, vectors_from_npy, vectors_to_npy
+
+        store = get_store()
+        key = f"staging/{document_id}/embeddings.npy"
+        if store.exists(key):  # checkpoint skip
+            _advance(document_id, "EMBEDDING", stage="EMBEDDING")
+            return document_id
+
+        _advance(document_id, "EMBEDDING")
+        chunks = store.get_json(f"staging/{document_id}/chunks.json")
+        enriched = {
+            e["id"]: e for e in store.get_json(f"staging/{document_id}/enriched.json")["chunks"]
+        }
+
+        texts, manifest = [], []
+        for child in chunks["children"]:
+            # Indexed, not .get() with an empty fallback: S3 gives every
+            # child an entry, even one whose context failed, so a missing
+            # one means chunks.json and enriched.json came from different
+            # runs -- worth failing on, not embedding past in silence.
+            context = enriched[child["chunk_index"]]["context"]
+            # What gets embedded is the contextualized text, NOT the raw content.
+            texts.append(contextualize(context, child["content"]))
+            manifest.append(child["chunk_index"])
+
+        partial_key = f"staging/{document_id}/embeddings.partial.npy"
+        done = vectors_from_npy(store.get(partial_key)) if store.exists(partial_key) else []
+        try:
+            vectors = embed_chunks(
+                texts,
+                provider=get_provider(),
+                batch_size=get_settings().embed_batch_size,
+                done=done,
+            )
+        except RateLimited as exc:
+            # Inside the outer try for the same reason as in enrich.
+            store.put(partial_key, vectors_to_npy(exc.partial))
+            raise
+
+        # The manifest first, the file the skip above checks last: written
+        # the other way round, a crash between the two leaves a run every
+        # retry skips, and S5 without a manifest for good.
+        store.put_json(f"staging/{document_id}/manifest.json", {"chunk_index_by_row": manifest})
+        store.put(key, vectors_to_npy(vectors))
+
         _advance(document_id, "EMBEDDING", stage="EMBEDDING")
         return document_id
     except AppException as exc:
         stage_failed(document_id, "EMBEDDING", exc)
         raise
+    except RateLimited as exc:
+        raise self.retry(exc=exc, countdown=exc.countdown) from exc
     except Exception as exc:
         if stage_failed(document_id, "EMBEDDING", exc):
             raise
-        raise self.retry(exc=exc, countdown=2**self.request.retries) from exc
+        raise self.retry(exc=exc, countdown=min(2**self.request.retries, MAX_BACKOFF_S)) from exc
 
 
 @app.task(name="worker.stages.persist", bind=True, max_retries=5)
