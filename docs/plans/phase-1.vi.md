@@ -4158,6 +4158,58 @@ Commit message đề xuất: `test: add similarity smoke test against the real p
 
 ---
 
+## Phase 1c — dọn kiến trúc worker (làm sau cùng)
+
+> **Task 20 (đã làm, ngoài plan ban đầu):** thay Docling bằng Chandra OCR 2 chạy trên vLLM —
+> xem commit `feat(ocr): replace Docling with Chandra OCR on vLLM` và `docs/system-design.md`.
+
+### Task 21: Refactor worker — tầng repository riêng cho worker
+
+**Vì sao có task này.** `worker/stages.py` (~360 dòng) đang gánh ba việc: máy trạng thái
+(`STAGES`, `PERMANENT`, `_advance`, `stage_failed`, `_invalidate_downstream`), năm thân task gọi
+thẳng `session.get(Document)`, và **cùng một khối** `try / except AppException / RateLimited /
+Exception → retry` chép lại năm lần. Truy cập DB rải ở `stages.py` và `persistence.py`, không có
+chỗ nào gom lại.
+
+**Không dùng chung repository với API — có chủ đích.** `app/repositories/` là async
+(`AsyncSession`); worker là Celery sync, không có event loop. Một class dùng chung sẽ phải
+`asyncio.run()` trong task (đụng prefork) hoặc nhân đôi mọi method, trong khi phần trùng thật chỉ
+có `get_by_id`. Worker có repository **sync của riêng nó**.
+
+**Files:**
+- Create: `worker/repositories/__init__.py`
+- Create: `worker/repositories/documents.py` — `DocumentStateRepository`: `get`, `advance(status,
+  stage)`, `record_failure(stage, exc) -> dead`, `set_parse_result(page_count, title)`
+- Create: `worker/repositories/chunks.py` — `ChunkRepository`: `upsert_parents`, `upsert_children`,
+  `parent_ids`, `delete_leftovers` (chuyển từ `worker/persistence.py`)
+- Create: `worker/pipeline/state.py` — `STAGES`, `PERMANENT`, `MAX_ATTEMPTS`, `MAX_BACKOFF_S`,
+  `_ARTIFACTS`, `invalidate_downstream`
+- Create: `worker/pipeline/errors.py` — một decorator/helper thay cho năm khối try/except
+- Move: `parsing.py`, `chunking.py`, `enrichment.py`, `embedding.py` → `worker/steps/` (logic thuần,
+  không đụng Celery hay DB)
+- Modify: `worker/stages.py` → chỉ còn năm task mỏng, điều phối repository + step
+- Modify: mọi test monkeypatch theo đường dẫn module cũ (`worker.parsing._ocr`, `worker.stages`, …)
+
+**Ràng buộc:**
+- **Không đổi hành vi.** Số test pass trước và sau phải bằng nhau; không test nào bị xoá để "cho
+  qua". Tên Celery task (`worker.stages.parse`, …) giữ nguyên — message đang nằm trong queue tham
+  chiếu theo tên đó.
+- Repository nhận `Session` từ ngoài vào (`with session_scope() as s: repo = ...(s)`): ranh giới
+  transaction vẫn do task quyết định, như S5 cần (upsert + đóng sổ trong **một** transaction).
+- Không thêm abstraction ngoài danh sách trên.
+
+- [ ] **Step 1:** Ghi lại số test pass hiện tại (`uv run pytest -q`).
+- [ ] **Step 2:** Tạo `worker/repositories/` + test cho từng method (DB test thật, như
+  `test_persistence.py`).
+- [ ] **Step 3:** Tách `pipeline/state.py`, `pipeline/errors.py`; chuyển năm task sang dùng chúng.
+- [ ] **Step 4:** Chuyển các module logic sang `worker/steps/`, sửa import và đường dẫn monkeypatch.
+- [ ] **Step 5:** Suite đầy đủ — cùng số test pass như Step 1; chạy một tài liệu thật qua pipeline
+  (container) để chắc import trong tiến trình con của Celery vẫn đúng.
+
+Commit message đề xuất: `refactor(worker): add a sync repository layer and split stages`
+
+---
+
 ## Definition of Done — Phase 1
 
 1. `docker compose up -d` cho **8 container healthy**.

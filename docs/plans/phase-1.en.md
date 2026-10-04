@@ -4121,6 +4121,60 @@ Proposed commit message: `test: add similarity smoke test against the real provi
 
 ---
 
+## Phase 1c — worker architecture cleanup (done last)
+
+> **Task 20 (done, outside the original plan):** replaced Docling with Chandra OCR 2 on vLLM —
+> see commit `feat(ocr): replace Docling with Chandra OCR on vLLM` and `docs/system-design.md`.
+
+### Task 21: Refactor the worker — a repository layer of its own
+
+**Why this task exists.** `worker/stages.py` (~360 lines) carries three jobs: the state machine
+(`STAGES`, `PERMANENT`, `_advance`, `stage_failed`, `_invalidate_downstream`), five task bodies
+calling `session.get(Document)` directly, and **the same** `try / except AppException /
+RateLimited / Exception → retry` block copied five times. Database access is spread across
+`stages.py` and `persistence.py` with no single home.
+
+**Not shared with the API's repositories — on purpose.** `app/repositories/` is async
+(`AsyncSession`); the worker is sync Celery with no event loop. One shared class would need
+`asyncio.run()` inside tasks (fighting prefork) or every method twice, while the real overlap is
+only `get_by_id`. The worker gets a **sync repository of its own**.
+
+**Files:**
+- Create: `worker/repositories/__init__.py`
+- Create: `worker/repositories/documents.py` — `DocumentStateRepository`: `get`, `advance(status,
+  stage)`, `record_failure(stage, exc) -> dead`, `set_parse_result(page_count, title)`
+- Create: `worker/repositories/chunks.py` — `ChunkRepository`: `upsert_parents`, `upsert_children`,
+  `parent_ids`, `delete_leftovers` (moved from `worker/persistence.py`)
+- Create: `worker/pipeline/state.py` — `STAGES`, `PERMANENT`, `MAX_ATTEMPTS`, `MAX_BACKOFF_S`,
+  `_ARTIFACTS`, `invalidate_downstream`
+- Create: `worker/pipeline/errors.py` — one decorator/helper replacing the five try/except blocks
+- Move: `parsing.py`, `chunking.py`, `enrichment.py`, `embedding.py` → `worker/steps/` (pure logic,
+  no Celery, no database)
+- Modify: `worker/stages.py` → only five thin tasks orchestrating repositories and steps
+- Modify: every test that monkeypatches an old module path (`worker.parsing._ocr`,
+  `worker.stages`, …)
+
+**Constraints:**
+- **No behaviour change.** The same number of tests pass before and after; none deleted to get
+  through. Celery task names (`worker.stages.parse`, …) stay — queued messages refer to them.
+- Repositories take a `Session` from outside (`with session_scope() as s: repo = ...(s)`): the
+  task still owns the transaction boundary, as S5 needs (upsert and close-out in **one**
+  transaction).
+- No abstraction beyond the list above.
+
+- [ ] **Step 1:** Record the current passing test count (`uv run pytest -q`).
+- [ ] **Step 2:** Create `worker/repositories/` with a test per method (real database, like
+  `test_persistence.py`).
+- [ ] **Step 3:** Split out `pipeline/state.py` and `pipeline/errors.py`; move the five tasks onto
+  them.
+- [ ] **Step 4:** Move the logic modules to `worker/steps/`; fix imports and monkeypatch paths.
+- [ ] **Step 5:** Full suite — the same passing count as Step 1; push one real document through
+  the containers, to be sure imports still resolve inside Celery's forked children.
+
+Suggested commit message: `refactor(worker): add a sync repository layer and split stages`
+
+---
+
 ## Definition of Done — Phase 1
 
 1. `docker compose up -d` brings up **8 healthy containers**.
