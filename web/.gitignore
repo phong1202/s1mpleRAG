@@ -1,0 +1,10 @@
+# Environment variables
+.env*.local
+
+# Common ignores
+node_modules
+.next/
+.DS_Store
+# TypeScript / Next build artefacts
+*.tsbuildinfo
+next-env.d.ts
