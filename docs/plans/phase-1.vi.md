@@ -4507,6 +4507,32 @@ token/s rồi treo hẳn (VRAM 15,9/16,3 GB). `/health` vẫn trả 200 trong 0,
 
 Commit message đề xuất: `fix(parse): call vLLM directly with a per-page timeout`
 
+### Task 34: Tiến độ theo từng trang, chia GPU giữa các document
+
+**Vì sao.** Lần test trên UI ngày 07/10, có 2 document đang chạy, nhưng một cái cứ đứng ở 0 trang
+nên trông như bị kẹt:
+- Mỗi document gửi một lô 8 trang. chandra chỉ chạy 8 sequence, nên 8 chỗ bị document đầu chiếm
+  trọn, document kia phải chờ hết một lô.
+- Tiến độ chỉ cập nhật khi cả lô xong, nên con số nhảy 0 → 8 sau 1–2 phút.
+
+**Files:** `worker/steps/parsing.py`, `worker/stages.py`, `shared/progress.py` (comment),
+`tests/test_parsing.py`, `tests/test_stage_chain.py`, `docker-compose.yml` (comment),
+`docs/system-design.md`.
+
+- Bỏ lô. Mỗi document giữ tối đa `_OCR_IN_FLIGHT` = 4 trang đang chạy, tức 8 sequence chia cho
+  2 parse. Trang nào xong thì gửi ngay trang kế tiếp, nên một trang chậm chỉ giữ chỗ của chính nó.
+- `on_batch` đổi thành `on_page`: checkpoint và tiến độ ghi sau mỗi trang.
+- Khi gặp outage, những trang đã đọc xong được giữ lại thay vì bỏ cả lô.
+- Hết lát thời gian (Task 26) thì không gửi thêm trang nào; các trang đang chạy được chạy nốt và
+  vẫn được giữ.
+
+- [ ] **Step 1:** Test đỏ: tiến độ 1 → 2 → 3 → 4; số trang đang chạy không vượt phần được chia;
+  trang kế tiếp được gửi trước khi một trang chậm xong.
+- [ ] **Step 2:** Sửa; chạy suite.
+- [ ] **Step 3:** Chạy thật 2 file cùng lúc: cả hai cùng tăng tiến độ theo từng trang.
+
+Commit message đề xuất: `fix(parse): read pages as a stream and report each one`
+
 ---
 
 ## Definition of Done — Phase 1

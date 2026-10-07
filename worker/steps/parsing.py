@@ -12,7 +12,7 @@ import time
 import unicodedata
 from collections import Counter
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
 import httpx
 import pymupdf
@@ -30,13 +30,15 @@ SCANNED_CHARS_PER_PAGE = 100
 _H1 = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 _HEADING_MARKUP = re.compile(r"^#{1,6}\s+")
 
-# Pages per OCR request batch: the chandra server's --max-num-seqs, so one
-# batch keeps it full without queueing pages the GPU cannot start yet.
-_OCR_BATCH_PAGES = 8
-# How long one page may take. A page measured ~60 s alone and ~2.5 min in
-# a full batch; this is past both, and bounds what a wedged server can hold
+# Pages one document keeps in flight. chandra runs --max-num-seqs 8 and
+# worker-ocr two parses, so 4 each keeps the GPU full and both documents
+# moving: at 8 each, one document's pages took every slot and the other
+# sat at 0 for a whole batch, reading as stuck (2026-10-07).
+_OCR_IN_FLIGHT = 4
+# How long one page may take. A page measured ~60 s alone and ~2.5 min with
+# the GPU full; this is past both, and bounds what a wedged server can hold
 # a worker for -- Chandra's own client waits 600 s, retried twice, per
-# attempt, which could keep one batch past the time slice and RabbitMQ's
+# attempt, which could keep a page past the time slice and RabbitMQ's
 # 30-minute ack timeout alike.
 _PAGE_TIMEOUT_S = 300
 # When to try again: a busy server did not answer in time; a down one is a
@@ -102,8 +104,8 @@ _SUMMARY_MAX_CHARS = 400
 
 class OcrUnavailable(Exception):
     """The OCR server, not a page, is what failed. Raised instead of saving
-    the batch's pages degraded: degraded, a scan's pages fall back to an
-    empty text layer, and the document reads as blank.
+    pages degraded: degraded, a scan's pages fall back to an empty text
+    layer, and the document reads as blank.
 
     Not the document's failure either: the stage defers on it, like a rate
     limit, after `countdown` seconds -- see worker/pipeline/errors.py."""
@@ -379,13 +381,14 @@ def _ocr(
     data: bytes,
     page_numbers: list[int],
     ocr_url: str,
-    on_batch: Callable[[dict[int, str | None]], None] | None = None,
+    on_page: Callable[[dict[int, str | None]], None] | None = None,
     deadline: float | None = None,
 ) -> dict[int, str | None]:
     """Chandra's markdown for each page, or None for a page it still failed
-    on after its own retries. `on_batch` gets everything read so far after
-    every batch -- the caller's checkpoint. Past `deadline` (a
-    time.monotonic() value), raises ParseContinues between batches.
+    on after its own retries. `on_page` gets everything read so far after
+    every page -- the caller's checkpoint and progress. Past `deadline` (a
+    time.monotonic() value), sends no more pages and raises ParseContinues
+    once those in flight are read.
 
     Raises OcrUnavailable if the OCR server, not a page, failed: an
     outage is a stage failure to retry later, not a page to degrade.
@@ -398,37 +401,50 @@ def _ocr(
     from chandra.input import load_pdf_images
 
     out: dict[int, str | None] = {}
-    # A batch at a time: a page rendered for the model is ~12 MB, so a
-    # 500-page scan rendered all at once would not fit in the worker.
-    for start in range(0, len(page_numbers), _OCR_BATCH_PAGES):
-        batch = page_numbers[start : start + _OCR_BATCH_PAGES]
-        # Chandra's own renderer, so pages reach the model exactly as it was
-        # trained to see them: at least 192 DPI, form fields flattened.
-        images = load_pdf_images(data, page_range=[n - 1 for n in batch])
-        with _http_client() as client, ThreadPoolExecutor(len(images)) as pool:
-            futures = [pool.submit(_read_page, client, ocr_url, image) for image in images]
-        results, trouble = [], None
-        for future in futures:
-            try:
-                results.append(future.result())
-            except _ServerTrouble as exc:
-                trouble = trouble or exc
-                results.append(None)
-        if trouble:
-            # The whole batch goes, not just its failed pages: a page that
-            # did come back is cheap to read again on the retry.
-            raise OcrUnavailable(
-                f"OCR server {trouble.reason} at {ocr_url}",
-                countdown=_BUSY_RETRY_S if trouble.busy else _DOWN_RETRY_S,
-            )
-        for number, markdown in zip(batch, results, strict=True):
-            out[number] = markdown
-        if on_batch:
-            on_batch(dict(out))
-        # Checked only after a batch, so every slice reads at least one.
-        more = start + _OCR_BATCH_PAGES < len(page_numbers)
-        if more and deadline is not None and time.monotonic() >= deadline:
-            raise ParseContinues(f"slice over after {len(out)} of {len(page_numbers)} pages")
+    waiting = iter(page_numbers)
+    trouble: _ServerTrouble | None = None
+
+    # No batches: a page goes out as soon as another is read, so a slow page
+    # holds only its own slot, and progress and the checkpoint move a page
+    # at a time. Rendered one by one as they go -- a page rendered for the
+    # model is ~12 MB, and a 500-page scan rendered at once would not fit.
+    with _http_client() as client, ThreadPoolExecutor(_OCR_IN_FLIGHT) as pool:
+        in_flight: dict[Future, int] = {}
+
+        def send_more() -> None:
+            while len(in_flight) < _OCR_IN_FLIGHT:
+                number = next(waiting, None)
+                if number is None:
+                    return
+                # Chandra's own renderer, so pages reach the model exactly as
+                # it was trained to see them: >= 192 DPI, form fields flattened.
+                image = load_pdf_images(data, page_range=[number - 1])[0]
+                in_flight[pool.submit(_read_page, client, ocr_url, image)] = number
+
+        send_more()
+        while in_flight:
+            finished, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+            for future in finished:
+                number = in_flight.pop(future)
+                try:
+                    out[number] = future.result()
+                except _ServerTrouble as exc:
+                    trouble = trouble or exc
+                    continue
+                if on_page:
+                    on_page(dict(out))
+            # Past the deadline, or with the server in trouble, nothing more
+            # goes out; what is in flight is let finish, and kept.
+            if trouble is None and (deadline is None or time.monotonic() < deadline):
+                send_more()
+
+    if trouble:
+        raise OcrUnavailable(
+            f"OCR server {trouble.reason} at {ocr_url}",
+            countdown=_BUSY_RETRY_S if trouble.busy else _DOWN_RETRY_S,
+        )
+    if len(out) < len(page_numbers):
+        raise ParseContinues(f"slice over after {len(out)} of {len(page_numbers)} pages")
     return out
 
 
@@ -438,19 +454,19 @@ def parse_document(
     ocr_url: str | None,
     ocr_all_pages: bool = False,
     done: dict[int, str | None] | None = None,
-    on_batch: Callable[[dict[int, str | None]], None] | None = None,
+    on_page: Callable[[dict[int, str | None]], None] | None = None,
     deadline: float | None = None,
     on_start: Callable[[int, int, int], None] | None = None,
 ) -> dict:
     """`done` is OCR an earlier, interrupted run already paid for -- those
     pages are not sent again, a None among them included: a page the server
-    refused is refused the same way twice. `on_batch` gets `done` plus everything read since, after
-    each batch.
+    refused is refused the same way twice. `on_page` gets `done` plus
+    everything read since, after each page.
 
     `deadline` (a time.monotonic() value) ends the call with ParseContinues
-    once it passes, between batches -- the caller resumes from `on_batch`'s
-    checkpoint. That is what keeps one delivery of a long scan under
-    RabbitMQ's consumer_timeout.
+    once it passes and the pages in flight are read -- the caller resumes
+    from `on_page`'s checkpoint. That is what keeps one delivery of a long
+    scan under RabbitMQ's consumer_timeout.
 
     `on_start` gets (page_count, pages already read, pages to read by OCR)
     once the PDF is open and before any OCR -- the moment page_count is
@@ -494,11 +510,11 @@ def parse_document(
         on_start(document.page_count, len(done), len(needs_ocr))
 
     def checkpoint(read: dict[int, str | None]) -> None:
-        on_batch({**done, **read})
+        on_page({**done, **read})
 
     ocr = {
         **done,
-        **_ocr(data, todo, ocr_url, on_batch=checkpoint if on_batch else None, deadline=deadline),
+        **_ocr(data, todo, ocr_url, on_page=checkpoint if on_page else None, deadline=deadline),
     }
     for page_number, markdown in ocr.items():
         if markdown is None:

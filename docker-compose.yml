@@ -251,11 +251,11 @@ services:
       start_period: 30s
 
   # S1 alone, on a queue of its own, so its concurrency is set by the GPU
-  # rather than the CPU. Each parse keeps one 8-page batch in flight and
-  # chandra runs 8 sequences, so 2 parses keep it full -- one batch running
-  # while the other's pages render -- without queueing more requests than
-  # it can start. On 2026-10-06, 8 parses at once queued 46, every document
-  # crawled, none finished early, and vLLM's host RAM grew with the queue.
+  # rather than the CPU. chandra runs 8 sequences and each parse keeps 4
+  # pages in flight (worker/steps/parsing.py), so 2 parses keep it full,
+  # both moving, without queueing more requests than it can start. On
+  # 2026-10-06, 8 parses at once queued 46, every document crawled, none
+  # finished early, and vLLM's host RAM grew with the queue.
   worker-ocr:
     build: .
     command: celery -A worker.celery_app worker -Q ocr -c 2 -l info

@@ -188,7 +188,7 @@ def ocr_calls(monkeypatch):
     the page numbers listed in `ocr_calls.fail`."""
     calls = {"pages": [], "fail": set()}
 
-    def fake_ocr(data, page_numbers, ocr_url, on_batch=None, deadline=None):
+    def fake_ocr(data, page_numbers, ocr_url, on_page=None, deadline=None):
         calls["pages"] = list(page_numbers)
         return {n: None if n in calls["fail"] else f"# Page {n} by OCR" for n in page_numbers}
 
@@ -251,13 +251,15 @@ def chandra(monkeypatch):
     """A fake vLLM behind httpx.MockTransport, so _ocr's own HTTP code runs.
     Per page: `fail` is refused with a 400 -- the page's own fault; `down`
     gets a refused connection, `silent` a read timeout, `broken` a 503 --
-    the server's fault; `repeat_once` first comes back looping. `sent`
-    records every page request, `requests` each one's JSON body and read
-    timeout.
+    the server's fault; `repeat_once` first comes back looping; `slow` maps
+    a page to seconds it takes. `sent` records every page request,
+    `requests` each one's JSON body and read timeout, `events` each one's
+    ("start", page) and ("end", page) in the order they happened.
 
     Chandra's renderer is faked to hand back the 0-based page index as the
     "image", which travels as the data URL's payload."""
     import json
+    import time
 
     import httpx
 
@@ -267,8 +269,10 @@ def chandra(monkeypatch):
         "silent": set(),
         "broken": set(),
         "repeat_once": set(),
+        "slow": {},
         "sent": [],
         "requests": [],
+        "events": [],
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -276,6 +280,14 @@ def chandra(monkeypatch):
         page = int(body["messages"][0]["content"][0]["image_url"]["url"].rsplit(",", 1)[1]) + 1
         state["sent"].append(page)
         state["requests"].append((page, body, request.extensions["timeout"]["read"]))
+        state["events"].append(("start", page))
+        try:
+            return _answer(request, page)
+        finally:
+            state["events"].append(("end", page))
+
+    def _answer(request: httpx.Request, page: int) -> httpx.Response:
+        time.sleep(state["slow"].get(page, 0))
         if page in state["down"]:
             raise httpx.ConnectError("connection refused", request=request)
         if page in state["silent"]:
@@ -380,17 +392,17 @@ def test_an_interrupted_parse_resumes_from_its_checkpoint(store, uploaded, chand
     """OCR results used to live in memory until the whole file was done, so
     any retry -- a crash, a redelivery, an outage -- read the scan again from
     page 1: ~25 GPU minutes for the 111-page decree. Each batch is handed to
-    on_batch as it lands, and a rerun given those pages as `done` sends only
+    on_page as it lands, and a rerun given those pages as `done` sends only
     the rest."""
     from worker.steps.parsing import OcrUnavailable
 
-    monkeypatch.setattr("worker.steps.parsing._OCR_BATCH_PAGES", 2)
+    monkeypatch.setattr("worker.steps.parsing._OCR_IN_FLIGHT", 1)
     key = uploaded("topics.pdf")
     saved = {}
 
     chandra["down"] = {3, 4}
     with pytest.raises(OcrUnavailable):
-        parse_document(key, store, "http://ocr", ocr_all_pages=True, on_batch=saved.update)
+        parse_document(key, store, "http://ocr", ocr_all_pages=True, on_page=saved.update)
     assert saved == {1: "# Page 1 by OCR", 2: "# Page 2 by OCR"}
 
     chandra.update(down=set(), sent=[])
@@ -448,25 +460,25 @@ def test_a_parse_past_its_deadline_stops_after_the_batch_in_hand(
     """RabbitMQ takes a message back from a consumer that holds it unacked
     past consumer_timeout (30 min), and Celery then exits: on 2026-10-06
     that ended the 111-page decree, and the worker with it. A parse runs in
-    slices well under that: past its deadline it stops between batches --
-    never before finishing one, so every slice makes progress -- with the
-    batch already checkpointed."""
+    slices well under that: past its deadline it sends no more pages, lets
+    the ones in flight finish -- so every slice makes progress -- and stops
+    with them checkpointed."""
     from worker.steps.parsing import ParseContinues
 
-    monkeypatch.setattr("worker.steps.parsing._OCR_BATCH_PAGES", 2)
+    monkeypatch.setattr("worker.steps.parsing._OCR_IN_FLIGHT", 2)
     key = uploaded("topics.pdf")
     saved = {}
 
     with pytest.raises(ParseContinues):
         parse_document(
-            key, store, "http://ocr", ocr_all_pages=True, on_batch=saved.update, deadline=0
+            key, store, "http://ocr", ocr_all_pages=True, on_page=saved.update, deadline=0
         )
 
     assert sorted(chandra["sent"]) == [1, 2]
     assert saved == {1: "# Page 1 by OCR", 2: "# Page 2 by OCR"}
 
 
-def test_a_deadline_reached_on_the_last_batch_still_finishes(store, uploaded, chandra):
+def test_a_deadline_reached_with_every_page_already_sent_still_finishes(store, uploaded, chandra):
     """Nothing is left to continue with, so there is no slice to end."""
     key = uploaded("topics.pdf")
 
@@ -640,3 +652,47 @@ def test_the_national_motto_is_never_a_title():
     ]
 
     assert extract_title({}, pages) == "Báo cáo tình hình kinh tế"
+
+
+def test_progress_moves_page_by_page(store, uploaded, chandra):
+    """It used to move a batch at a time: 0 for a minute or two, then 8 --
+    with two documents at once, one of them sat at 0 for a whole batch and
+    read as stuck."""
+    key = uploaded("topics.pdf")
+    reported = []
+
+    parse_document(
+        key, store, "http://ocr", ocr_all_pages=True, on_page=lambda ocr: reported.append(len(ocr))
+    )
+
+    assert reported == [1, 2, 3, 4]
+
+
+def test_a_document_keeps_only_its_share_of_the_gpu(store, uploaded, chandra, monkeypatch):
+    """chandra runs 8 sequences and worker-ocr 2 parses: 4 pages each keep
+    the GPU full and both documents moving. At 8 each, one document's pages
+    took every slot and the other's waited behind them."""
+    monkeypatch.setattr("worker.steps.parsing._OCR_IN_FLIGHT", 2)
+    chandra["slow"] = dict.fromkeys(range(1, 5), 0.05)
+    key = uploaded("topics.pdf")
+
+    parse_document(key, store, "http://ocr", ocr_all_pages=True)
+
+    running, most = 0, 0
+    for kind, _ in chandra["events"]:
+        running += 1 if kind == "start" else -1
+        most = max(most, running)
+    assert most == 2
+
+
+def test_the_next_page_goes_out_as_soon_as_one_is_read(store, uploaded, chandra, monkeypatch):
+    """No batch barrier: a slow page used to hold its whole batch, and the
+    GPU slots of every page already done sat idle until it finished."""
+    monkeypatch.setattr("worker.steps.parsing._OCR_IN_FLIGHT", 2)
+    chandra["slow"] = {1: 0.5}
+    key = uploaded("topics.pdf")
+
+    parse_document(key, store, "http://ocr", ocr_all_pages=True)
+
+    events = chandra["events"]
+    assert events.index(("start", 3)) < events.index(("end", 1))

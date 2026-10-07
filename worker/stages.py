@@ -47,7 +47,7 @@ def parse(self, document_id: str) -> str:
     with session_scope() as session:
         object_key = DocumentStateRepository(session).get(uuid.UUID(document_id)).object_key
 
-    # Written after every OCR batch, as it lands -- not on the way out, like
+    # Written after every OCR'd page, as it lands -- not on the way out, like
     # enrich's and embed's: what loses a parse is a worker killed or cut off
     # from its broker, and neither runs an except clause. Left behind on
     # success for the staging bucket's 7-day expiry, as theirs are.
@@ -71,7 +71,7 @@ def parse(self, document_id: str) -> str:
     def checkpoint(ocr: dict[int, str | None]) -> None:
         store.put_json(partial_key, {"ocr": {str(n): markdown for n, markdown in ocr.items()}})
         progress.report(document_id, "PARSING", done=len(ocr), total=to_read["pages"])
-        # A batch landed, so the server is back: a later outage is timed
+        # A page landed, so the server is back: a later outage is timed
         # from its own start, not from this one's.
         outage_over(document_id)
 
@@ -82,7 +82,7 @@ def parse(self, document_id: str) -> str:
         settings.ocr_url,
         settings.ocr_all_pages,
         done=done,
-        on_batch=checkpoint,
+        on_page=checkpoint,
         deadline=time.monotonic() + settings.parse_slice_s,
         on_start=started,
     )

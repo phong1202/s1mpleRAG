@@ -4496,6 +4496,32 @@ hung for 120 s. Two holes showed:
 
 Suggested commit message: `fix(parse): call vLLM directly with a per-page timeout`
 
+### Task 34: Page-by-page progress, and the GPU shared between documents
+
+**Why.** In the UI test of 2026-10-07, two documents were running, but one stayed at 0 pages and
+looked stuck:
+- Each document sent an 8-page batch. chandra runs only 8 sequences, so the first document's pages
+  took every slot and the other's waited a whole batch.
+- Progress moved only once a whole batch was done, so it jumped 0 → 8 after 1–2 minutes.
+
+**Files:** `worker/steps/parsing.py`, `worker/stages.py`, `shared/progress.py` (comment),
+`tests/test_parsing.py`, `tests/test_stage_chain.py`, `docker-compose.yml` (comment),
+`docs/system-design.md`.
+
+- No batches. Each document keeps at most `_OCR_IN_FLIGHT` = 4 pages in flight — 8 sequences
+  shared by 2 parses. A page goes out as soon as another is read, so a slow page holds only its own
+  slot.
+- `on_batch` becomes `on_page`: the checkpoint and progress are written after every page.
+- On an outage, the pages already read are kept instead of dropping a whole batch.
+- At the end of a time slice (Task 26) no more pages go out; the ones in flight finish and are kept.
+
+- [ ] **Step 1:** Failing tests: progress 1 → 2 → 3 → 4; pages in flight never exceed the share;
+  the next page goes out before a slow one finishes.
+- [ ] **Step 2:** Fix; run the suite.
+- [ ] **Step 3:** Real run of 2 files at once: both progress page by page.
+
+Suggested commit message: `fix(parse): read pages as a stream and report each one`
+
 ---
 
 ## Definition of Done — Phase 1

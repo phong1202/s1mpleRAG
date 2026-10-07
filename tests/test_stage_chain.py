@@ -504,7 +504,7 @@ def test_parse_resumes_from_a_saved_ocr_checkpoint(seeded_document, ocr_every_pa
     store.put_json(f"{prefix}/parsed.partial.json", {"ocr": {"1": "# Read before the crash"}})
     sent = []
 
-    def recording_ocr(data, page_numbers, ocr_url, on_batch=None, deadline=None):
+    def recording_ocr(data, page_numbers, ocr_url, on_page=None, deadline=None):
         sent.extend(page_numbers)
         return {}
 
@@ -525,8 +525,8 @@ def test_parse_saves_each_ocr_batch_before_anything_can_fail(
     from shared.storage import get_store
     from worker import stages
 
-    def ocr_then_die(data, page_numbers, ocr_url, on_batch=None, deadline=None):
-        on_batch({1: "# Paid for"})
+    def ocr_then_die(data, page_numbers, ocr_url, on_page=None, deadline=None):
+        on_page({1: "# Paid for"})
         raise RuntimeError("worker lost")
 
     monkeypatch.setattr("worker.steps.parsing._ocr", ocr_then_die)
@@ -564,11 +564,11 @@ def test_an_ocr_outage_is_deferred_without_counting_an_attempt(
 
     calls = {"n": 0}
 
-    def down_once(data, page_numbers, ocr_url, on_batch=None, deadline=None):
+    def down_once(data, page_numbers, ocr_url, on_page=None, deadline=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise OcrUnavailable("OCR server not answering", countdown=20)
-        on_batch({1: "# Read once it was back"})
+        on_page({1: "# Read once it was back"})
         return {1: "# Read once it was back"}
 
     monkeypatch.setattr("worker.steps.parsing._ocr", down_once)
@@ -593,7 +593,7 @@ def test_an_outage_past_the_ceiling_counts_like_any_failure(
     from worker.pipeline.state import MAX_ATTEMPTS
     from worker.steps.parsing import OcrUnavailable
 
-    def always_down(data, page_numbers, ocr_url, on_batch=None, deadline=None):
+    def always_down(data, page_numbers, ocr_url, on_page=None, deadline=None):
         raise OcrUnavailable("OCR server unreachable (ConnectError)", countdown=60)
 
     monkeypatch.setattr("worker.steps.parsing._ocr", always_down)
@@ -614,7 +614,7 @@ def test_an_outage_with_redis_down_is_counted_not_deferred_forever(
     from worker import stages
     from worker.steps.parsing import OcrUnavailable
 
-    def down(data, page_numbers, ocr_url, on_batch=None, deadline=None):
+    def down(data, page_numbers, ocr_url, on_page=None, deadline=None):
         raise OcrUnavailable("OCR server unreachable (ConnectError)", countdown=60)
 
     def no_redis(document_id):
@@ -639,10 +639,10 @@ def test_a_parse_slice_that_runs_out_continues_without_costing_an_attempt(
 
     calls = []
 
-    def one_batch_per_slice(data, page_numbers, ocr_url, on_batch=None, deadline=None):
+    def one_batch_per_slice(data, page_numbers, ocr_url, on_page=None, deadline=None):
         calls.append(list(page_numbers))
         if len(calls) == 1:
-            on_batch({1: "# Read in the first slice"})
+            on_page({1: "# Read in the first slice"})
             raise ParseContinues("slice over")
         return {}
 
@@ -667,10 +667,10 @@ def test_parse_reports_page_progress_and_the_page_count_up_front(
 
     seen = {}
 
-    def ocr_and_look(data, page_numbers, ocr_url, on_batch=None, deadline=None):
+    def ocr_and_look(data, page_numbers, ocr_url, on_page=None, deadline=None):
         seen["page_count"] = reload(seeded_document.id).page_count
         seen["before"] = progress.read(str(seeded_document.id))
-        on_batch({1: "# Page 1"})
+        on_page({1: "# Page 1"})
         seen["after"] = progress.read(str(seeded_document.id))
         return {1: "# Page 1"}
 
@@ -706,8 +706,8 @@ def test_progress_lost_to_redis_does_not_fail_the_parse(
     monkeypatch.setattr("shared.progress._client", lambda: DownRedis())
     monkeypatch.setattr(
         "worker.steps.parsing._ocr",
-        lambda data, page_numbers, ocr_url, on_batch=None, deadline=None: (
-            on_batch({1: "# P"}) or {1: "# P"}
+        lambda data, page_numbers, ocr_url, on_page=None, deadline=None: (
+            on_page({1: "# P"}) or {1: "# P"}
         ),
     )
 

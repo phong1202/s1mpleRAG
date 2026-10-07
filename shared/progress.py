@@ -1,7 +1,7 @@
 """Live progress of a document's running stage, kept in Redis.
 
 Not in Postgres, which stays the source of truth for status: progress is
-written after every OCR batch, read on every FE poll, and worth nothing
+written after every OCR'd page, read on every FE poll, and worth nothing
 once the stage is over. Losing it to a Redis restart loses a progress bar,
 never a document's state -- so every failure here is logged and swallowed.
 
@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 # stage that stopped reporting is how the FE learns it stopped.
 _TTL_S = 3600
 # Past this with no report, a running stage reads as stalled. Not tighter:
-# one 8-page batch takes ~2.5 min, and between time slices a document waits
-# its turn behind another's (worker/steps/parsing.py).
+# a page can take ~2.5 min with the GPU full, and between time slices a
+# document waits its turn behind another's (worker/steps/parsing.py).
 STALLED_AFTER_S = 600
 # Statuses with nothing running, whose leftover key is not shown.
 TERMINAL = {"COMPLETED", "DEAD_LETTER"}

@@ -317,7 +317,8 @@ Seven original nodes, five stages, grouped by contended resource.
    limit → `PDF_TOO_LARGE`.
 3. PyMuPDF fast pass, all pages.
 4. **Scanned detection:** `total_text_chars / page_count < 100` → route *every* page to Chandra.
-5. **Per-page routing:** pages with detected tables/images → Chandra, 8 pages per batch.
+5. **Per-page routing:** pages with detected tables/images → Chandra, 4 in flight per document,
+   the next sent as soon as one is read — no batches.
    `OCR_ALL_PAGES=true` sends every page — the only way a borderless table, which PyMuPDF does not
    detect, gets read as a table.
 6. **A page the server refuses** (a 4xx — e.g. more tokens than the model takes) → fall back to
@@ -351,7 +352,7 @@ its scanner's "2025-01-02 (1)"), then the first h1, then the first line that is 
 motto, the number or the date. Last of all, in the stage, the filename.
 
 **Checkpoint.** OCR results are saved to `staging/{id}/parsed.partial.json` (`{"ocr": {"<page>":
-markdown | null}}`) after every batch, as it lands — not on the way out: what interrupts a parse is
+markdown | null}}`) after every page, as it lands — not on the way out: what interrupts a parse is
 a worker killed or cut off from its broker, and neither runs an except clause. A rerun sends only
 the pages missing from it; a `null` page (refused by the server) is not sent again.
 
@@ -359,15 +360,17 @@ the pages missing from it; a `null` page (refused by the server) is not sent aga
 batches; then it checkpoints and requeues itself (`ParseContinues` → `retry(countdown=0)`, no
 attempt counted). RabbitMQ takes back a message held unacked past its `consumer_timeout` (30 min) —
 on 2026-10-06 that ended a 111-page scan and Celery exited with it — and a scan of `MAX_PAGE_COUNT`
-pages runs well past that. A slice plus the one batch it can overrun by stays far under it, at any
+pages runs well past that. A slice plus the pages in flight when it ends stays far under it, at any
 page count. Requeued to the back of the queue, documents also take turns: a short one is not stuck
 behind a long one.
 
 The task runs on `worker-ocr` but the *work* happens in the `chandra` container — the worker renders
 pages and holds HTTP connections, not model weights. Its concurrency is set by the GPU, not the CPU:
-each parse keeps one 8-page batch in flight and chandra runs 8 sequences, so **2** parses keep it
-full. On 2026-10-06, 8 parses at once queued 46 page requests: every document crawled, none
-finished early, and vLLM's host RAM grew with the queue.
+chandra runs 8 sequences and each parse keeps **4** pages in flight, so **2** parses keep it full
+and both move. On 2026-10-06, 8 parses at once queued 46 page requests: every document crawled,
+none finished early, and vLLM's host RAM grew with the queue. On 2026-10-07, with 8 pages in
+flight each, the first document's pages took all 8 slots and the other sat at 0 for a whole batch,
+reading as stuck — hence 4, and no batch barrier: a page goes out as soon as another is read.
 
 Routing happens where a task is **published**, not where it is consumed: `api` publishes S1 (the
 first link of the chain), and a retry goes back to the queue it came from. So a change to
@@ -472,7 +475,7 @@ raw/
 staging/
   {document_id}/
     parsed.json                      # S1 → S2
-    parsed.partial.json              # S1's OCR so far, written after every batch
+    parsed.partial.json              # S1's OCR so far, written after every page
     chunks.json                      # S2 → S3
     enriched.json                    # S3 → S4
     enriched.partial.json            # S3's batches so far, saved on a rate-limit deferral
@@ -542,7 +545,7 @@ GET  /documents/{id}/status
   The same object is each item of GET /documents. progress is null unless a stage is reporting.
 
   progress = { stage, done, total, updated_at, stalled }, overlaid from Redis (`progress:{id}`,
-  one JSON string, one MGET per page of results). S1 reports pages read by OCR after every batch;
+  one JSON string, one MGET per page of results). S1 reports pages read by OCR after every page;
   it writes page_count to the row the moment the PDF opens. Postgres stays the source of truth for
   status — the overlay is a courtesy, and any Redis failure leaves it null rather than failing the
   request or the stage. A key outlives its writer by an hour, so a stage that stopped reporting
