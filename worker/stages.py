@@ -31,6 +31,7 @@ from worker.repositories.documents import DocumentStateRepository
 @stage_task("PARSING")
 def parse(self, document_id: str) -> str:
     from app.config import get_settings
+    from shared import progress
     from shared.storage import get_store
     from worker.pipeline.outage import outage_over
     from worker.steps.parsing import parse_document
@@ -57,8 +58,19 @@ def parse(self, document_id: str) -> str:
         else {}
     )
 
+    to_read = {"pages": 0}
+
+    def started(page_count: int, read: int, pages: int) -> None:
+        # Known the moment the PDF opens; on a scan, half an hour before
+        # the result -- the FE has a page count to show from the start.
+        with session_scope() as session:
+            DocumentStateRepository(session).set_page_count(uuid.UUID(document_id), page_count)
+        to_read["pages"] = pages
+        progress.report(document_id, "PARSING", done=read, total=pages)
+
     def checkpoint(ocr: dict[int, str | None]) -> None:
         store.put_json(partial_key, {"ocr": {str(n): markdown for n, markdown in ocr.items()}})
+        progress.report(document_id, "PARSING", done=len(ocr), total=to_read["pages"])
         # A batch landed, so the server is back: a later outage is timed
         # from its own start, not from this one's.
         outage_over(document_id)
@@ -72,6 +84,7 @@ def parse(self, document_id: str) -> str:
         done=done,
         on_batch=checkpoint,
         deadline=time.monotonic() + settings.parse_slice_s,
+        on_start=started,
     )
     store.put_json(key, result)
 
@@ -80,6 +93,7 @@ def parse(self, document_id: str) -> str:
             uuid.UUID(document_id), result["page_count"], result["title"]
         )
 
+    progress.clear(document_id)
     advance(document_id, "PARSING", stage="PARSING")
     return document_id
 

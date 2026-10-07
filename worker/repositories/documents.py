@@ -53,6 +53,9 @@ class DocumentStateRepository:
         document.status = "DEAD_LETTER" if dead else "RETRYING"
         return dead
 
+    def set_page_count(self, document_id: uuid.UUID, page_count: int) -> None:
+        self.get(document_id).page_count = page_count
+
     def set_parse_result(self, document_id: uuid.UUID, page_count: int, title: str | None) -> None:
         document = self.get(document_id)
         document.page_count = page_count

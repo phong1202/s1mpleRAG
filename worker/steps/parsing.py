@@ -411,6 +411,7 @@ def parse_document(
     done: dict[int, str | None] | None = None,
     on_batch: Callable[[dict[int, str | None]], None] | None = None,
     deadline: float | None = None,
+    on_start: Callable[[int, int, int], None] | None = None,
 ) -> dict:
     """`done` is OCR an earlier, interrupted run already paid for -- those
     pages are not sent again, a None among them included: a page the model
@@ -421,7 +422,11 @@ def parse_document(
     `deadline` (a time.monotonic() value) ends the call with ParseContinues
     once it passes, between batches -- the caller resumes from `on_batch`'s
     checkpoint. That is what keeps one delivery of a long scan under
-    RabbitMQ's consumer_timeout."""
+    RabbitMQ's consumer_timeout.
+
+    `on_start` gets (page_count, pages already read, pages to read by OCR)
+    once the PDF is open and before any OCR -- the moment page_count is
+    known, which on a scan is up to half an hour before the result."""
     data = store.get(object_key)
 
     try:
@@ -457,6 +462,8 @@ def parse_document(
 
     done = {n: done[n] for n in needs_ocr if n in (done or {})}
     todo = [n for n in needs_ocr if n not in done]
+    if on_start:
+        on_start(document.page_count, len(done), len(needs_ocr))
 
     def checkpoint(read: dict[int, str | None]) -> None:
         on_batch({**done, **read})

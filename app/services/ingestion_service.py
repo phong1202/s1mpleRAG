@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from collections.abc import Sequence
 
 from fastapi import Depends
 
@@ -7,7 +8,14 @@ from app.config import get_settings
 from app.exceptions import AppException, ErrorCode
 from app.models.document import Document
 from app.repositories.document_repository import DocumentRepository, get_document_repository
-from app.schemas.ingestion import DocumentRegister, FileUrl, UploadTarget
+from app.schemas.ingestion import (
+    DocumentProgress,
+    DocumentRegister,
+    DocumentStatus,
+    FileUrl,
+    UploadTarget,
+)
+from shared import progress
 from shared.storage import ObjectStore, get_public_store, get_store
 
 _FILE_URL_EXPIRES_S = 300
@@ -94,6 +102,19 @@ class IngestionService:
 
     async def list(self, limit: int, offset: int, status: str | None) -> tuple[list[Document], int]:
         return await self.repository.list(limit=limit, offset=offset, status=status)
+
+    # Sequence, not list: inside this class body `list` is the method above.
+    async def statuses(self, documents: Sequence[Document]) -> Sequence[DocumentStatus]:
+        """The rows as the API shows them, each running stage's live
+        progress overlaid from Redis -- one round trip for the whole page."""
+        items = [DocumentStatus.model_validate(d) for d in documents]
+        live = await progress.read_many(
+            [str(d.id) for d in documents if d.status not in progress.TERMINAL]
+        )
+        for item in items:
+            if str(item.id) in live:
+                item.progress = DocumentProgress.model_validate(live[str(item.id)])
+        return items
 
     async def file_url(self, document_id: uuid.UUID) -> FileUrl:
         """Short-lived on purpose: the viewer fetches the bytes at once and

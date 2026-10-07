@@ -306,7 +306,8 @@ Seven original nodes, five stages, grouped by contended resource.
    by the first batch that lands) does each further one cost an attempt, so a server that is not
    coming back still ends in `DEAD_LETTER`. There is no `/health` check before sending pages: on
    2026-10-06 that preflight was what timed out, against a server too busy to answer.
-7. Write `parsed.json`, update `documents.page_count`.
+7. Write `parsed.json` and the title. `documents.page_count` is written earlier, the moment the
+   PDF opens — on a scan that is up to half an hour sooner, and the FE shows it meanwhile.
 
 **Title.** A Vietnamese legal document names itself on page one, so that comes first: the
 document-type line (`LUẬT`, `NGHỊ ĐỊNH`, `THÔNG TƯ`, …) with the summary below it and the number
@@ -500,6 +501,13 @@ GET  /documents/{id}/status
               title, page_count, size_bytes, language, created_at, updated_at, completed_at,
               progress } }
   The same object is each item of GET /documents. progress is null unless a stage is reporting.
+
+  progress = { stage, done, total, updated_at, stalled }, overlaid from Redis (`progress:{id}`,
+  one JSON string, one MGET per page of results). S1 reports pages read by OCR after every batch;
+  it writes page_count to the row the moment the PDF opens. Postgres stays the source of truth for
+  status — the overlay is a courtesy, and any Redis failure leaves it null rather than failing the
+  request or the stage. A key outlives its writer by an hour, so a stage that stopped reporting
+  shows `stalled: true` (no report for 10 min) instead of vanishing — the signal 2026-10-06 lacked.
 
 GET  /documents            list + filter by status
 DELETE /documents/{id}     cascades to chunks; leaves raw/ intact

@@ -57,7 +57,7 @@ async def get_status(
     service: IngestionService = Depends(get_ingestion_service),
 ) -> ApiResponse[DocumentStatus]:
     document = await service.get(document_id)
-    return ApiResponse.ok(DocumentStatus.model_validate(document))
+    return ApiResponse.ok((await service.statuses([document]))[0])
 
 
 @router.get("/{document_id}/file-url", response_model=ApiResponse[FileUrl], responses=_NOT_FOUND)
@@ -78,7 +78,7 @@ async def list_documents(
     documents, total = await service.list(limit=limit, offset=offset, status=status)
     return ApiResponse.ok(
         PaginatedData[DocumentStatus](
-            items=[DocumentStatus.model_validate(d) for d in documents],
+            items=await service.statuses(documents),
             total=total,
             limit=limit,
             offset=offset,

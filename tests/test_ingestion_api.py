@@ -273,3 +273,72 @@ async def test_status_and_list_carry_what_the_fe_shows(client, uploaded_pdf):
     assert (one["title"], one["page_count"], one["language"]) == (None, None, None)
     assert (one["completed_at"], one["progress"]) == (None, None)
     assert datetime.fromisoformat(one["created_at"]) <= datetime.fromisoformat(one["updated_at"])
+
+
+@pytest.fixture
+def progress_key():
+    """Deletes the progress keys a test writes -- they would otherwise
+    linger an hour in the Redis the dev stack shares."""
+    from shared import progress
+
+    written = []
+    yield written.append
+    for document_id in written:
+        progress.clear(document_id)
+
+
+async def test_status_overlays_the_running_stages_progress(client, uploaded_pdf, progress_key):
+    from shared import progress
+
+    created = await client.post("/documents", json=uploaded_pdf)
+    document_id = created.json()["data"]["document_id"]
+    progress_key(document_id)
+    progress.report(document_id, "PARSING", done=16, total=111)
+
+    data = (await client.get(f"/documents/{document_id}/status")).json()["data"]
+
+    assert {k: data["progress"][k] for k in ("stage", "done", "total", "stalled")} == {
+        "stage": "PARSING",
+        "done": 16,
+        "total": 111,
+        "stalled": False,
+    }
+
+
+async def test_progress_that_stopped_coming_reads_as_stalled(
+    client, uploaded_pdf, progress_key, monkeypatch
+):
+    """A worker killed mid-stage leaves its last report behind; that it
+    stopped is the signal 2026-10-06 lacked."""
+    import time
+
+    from shared import progress
+
+    created = await client.post("/documents", json=uploaded_pdf)
+    document_id = created.json()["data"]["document_id"]
+    progress_key(document_id)
+    monkeypatch.setattr(time, "time", lambda: 1_000_000.0)
+    progress.report(document_id, "PARSING", done=16, total=111)
+    monkeypatch.undo()
+
+    listed = (await client.get("/documents")).json()["data"]["items"]
+
+    assert next(d for d in listed if d["id"] == document_id)["progress"]["stalled"] is True
+
+
+async def test_redis_down_leaves_progress_null_not_the_endpoint_broken(
+    client, uploaded_pdf, monkeypatch
+):
+    import redis
+
+    async def down(document_ids):
+        raise redis.ConnectionError("redis is down")
+
+    monkeypatch.setattr("shared.progress._read_raw", down)
+    created = await client.post("/documents", json=uploaded_pdf)
+    document_id = created.json()["data"]["document_id"]
+
+    response = await client.get(f"/documents/{document_id}/status")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["progress"] is None

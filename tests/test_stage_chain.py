@@ -653,3 +653,64 @@ def test_a_parse_slice_that_runs_out_continues_without_costing_an_attempt(
     document = reload(seeded_document.id)
     assert calls == [[1], []]
     assert (document.stage, document.attempts) == ("PARSING", 0)
+
+
+def test_parse_reports_page_progress_and_the_page_count_up_front(
+    seeded_document, ocr_every_page, monkeypatch
+):
+    """The FE showed "reading pages (OCR)..." for an hour on 2026-10-06:
+    page_count arrived only once S1 was done, and nothing else was said.
+    page_count is known the moment the PDF opens; pages read, after every
+    batch."""
+    from shared import progress
+    from worker import stages
+
+    seen = {}
+
+    def ocr_and_look(data, page_numbers, ocr_url, on_batch=None, deadline=None):
+        seen["page_count"] = reload(seeded_document.id).page_count
+        seen["before"] = progress.read(str(seeded_document.id))
+        on_batch({1: "# Page 1"})
+        seen["after"] = progress.read(str(seeded_document.id))
+        return {1: "# Page 1"}
+
+    monkeypatch.setattr("worker.steps.parsing._ocr", ocr_and_look)
+
+    stages.parse.apply(args=(str(seeded_document.id),)).get()
+
+    assert seen["page_count"] == 1
+    assert (seen["before"]["stage"], seen["before"]["done"], seen["before"]["total"]) == (
+        "PARSING",
+        0,
+        1,
+    )
+    assert (seen["after"]["done"], seen["after"]["total"]) == (1, 1)
+    assert progress.read(str(seeded_document.id)) is None, "a finished stage reports nothing"
+
+
+def test_progress_lost_to_redis_does_not_fail_the_parse(
+    seeded_document, ocr_every_page, monkeypatch
+):
+    """Progress is a courtesy to the FE, not part of the work."""
+    import redis
+
+    from worker import stages
+
+    class DownRedis:
+        def __getattr__(self, name):
+            def fail(*args, **kwargs):
+                raise redis.ConnectionError("redis is down")
+
+            return fail
+
+    monkeypatch.setattr("shared.progress._client", lambda: DownRedis())
+    monkeypatch.setattr(
+        "worker.steps.parsing._ocr",
+        lambda data, page_numbers, ocr_url, on_batch=None, deadline=None: (
+            on_batch({1: "# P"}) or {1: "# P"}
+        ),
+    )
+
+    stages.parse.apply(args=(str(seeded_document.id),)).get()
+
+    assert reload(seeded_document.id).stage == "PARSING"

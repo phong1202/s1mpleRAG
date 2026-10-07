@@ -230,6 +230,14 @@ def seeded_document(uploaded_pdf):
     for name in (n for names in ARTIFACTS.values() for n in names):
         store.delete(f"staging/{doc_id}/{name}")
 
+    # Likewise the Redis keys a stage leaves when the test ends it mid-way
+    # -- a failed parse keeps its progress for an hour, by design.
+    import redis
+
+    from app.config import get_settings
+
+    redis.from_url(get_settings().redis_url).delete(f"progress:{doc_id}", f"ocr:outage:{doc_id}")
+
 
 @pytest.fixture
 def store():
