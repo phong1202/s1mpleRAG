@@ -5,8 +5,9 @@
 // response the browser receives, background fetches included, and snatch
 // anything that looks like a PDF -- the application/pdf type, a filename in
 // Content-Disposition, or a .pdf path. The viewer then never gets its bytes.
-// This response carries none of the three. The presigned URL also never
-// reaches the browser, so the page's CSP only needs its own origin.
+// This response carries none of the three, and the GET URL for reading a
+// document never reaches the browser. (Uploads still PUT from the browser
+// to a presigned URL; that response is empty, so nothing there to snatch.)
 
 const API_URL = process.env.API_URL ?? 'http://localhost:8000'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

@@ -1,5 +1,11 @@
 import { NextResponse, type NextRequest } from 'next/server'
 
+// Uploads PUT the file from the browser straight to a presigned storage URL
+// (lib/backend.ts putObject), so that origin -- and only that one -- is
+// allowed besides our own. Reading a PDF does not need it: the viewer's
+// bytes come through /api/documents/{id}/bytes on this origin.
+const STORAGE_ORIGIN = process.env.STORAGE_PUBLIC_ORIGIN ?? 'http://localhost:9000'
+
 // A strict CSP matters here because the viewer runs pdf.js in this page on
 // PDFs anyone can upload. A nonce + 'strict-dynamic' lets only Next's own
 // scripts (and what they load) run; 'wasm-unsafe-eval' allows compiling
@@ -18,7 +24,7 @@ export function proxy(request: NextRequest) {
     style-src 'self' 'unsafe-inline';
     img-src 'self' blob: data:;
     font-src 'self' data:;
-    connect-src 'self';
+    connect-src 'self' ${STORAGE_ORIGIN};
     worker-src 'self' blob:;
     frame-src 'none';
     object-src 'none';
