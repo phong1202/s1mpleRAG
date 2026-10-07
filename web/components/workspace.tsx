@@ -4,6 +4,7 @@ import { useEffect, useSyncExternalStore } from 'react'
 import dynamic from 'next/dynamic'
 import { Group, Panel, Separator, useDefaultLayout, type LayoutStorage } from 'react-resizable-panels'
 import { useDocuments } from '@/hooks/use-documents'
+import { displayName } from '@/lib/documents'
 import { ChatPanel } from './chat-panel'
 import { DocumentPanel } from './document-panel'
 import { useLocale } from './locale-provider'
@@ -85,7 +86,7 @@ function ChatArea() {
       <PdfViewer
         key={docId}
         docId={docId}
-        filename={doc.filename}
+        filename={displayName(doc)}
         request={request}
         onNavigate={(target) => open(docId, target)}
         onClose={close}

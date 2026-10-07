@@ -12,7 +12,19 @@ export type DocumentStatus =
   | 'RETRYING'
   | 'DEAD_LETTER'
 
+// Progress of the running stage, overlaid by the API from Redis (backend
+// plan, phase 1d task 31). `stalled` means no report for a while.
+export type DocumentProgress = {
+  stage: string
+  done: number | null
+  total: number | null
+  updated_at: string | null
+  stalled: boolean
+}
+
 // GET /documents item, as the backend's DocumentStatus schema serialises it.
+// Everything after last_error is phase 1d task 30/31: optional so the UI
+// works against a backend that does not send them yet.
 export type DocumentSummary = {
   id: string
   filename: string
@@ -21,6 +33,14 @@ export type DocumentSummary = {
   attempts: number
   failed_stage: string | null
   last_error: string | null
+  title?: string | null
+  page_count?: number | null
+  size_bytes?: number | null
+  language?: string | null
+  created_at?: string
+  updated_at?: string
+  completed_at?: string | null
+  progress?: DocumentProgress | null
 }
 
 // [x0, y0, x1, y1] as fractions (0..1) of the page, origin top-left, so a

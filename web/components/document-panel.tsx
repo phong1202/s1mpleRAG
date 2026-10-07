@@ -11,6 +11,7 @@ import {
   uploadDocument,
   type UploadPhase,
 } from '@/lib/backend'
+import { displayName, formatBytes, isStalled, stageProgress } from '@/lib/documents'
 import type { DocumentSummary } from '@/lib/types'
 import type { Dictionary } from '@/lib/i18n'
 import { useLocale } from './locale-provider'
@@ -34,9 +35,10 @@ function DocumentLabel({ doc, t }: { doc: DocumentSummary; t: Dictionary }) {
       <FileText className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm" title={doc.filename}>
-          {doc.filename}
+          {displayName(doc)}
         </p>
         <StatusLine doc={doc} t={t} />
+        <ProgressBar doc={doc} t={t} />
       </div>
     </>
   )
@@ -45,10 +47,14 @@ function DocumentLabel({ doc, t }: { doc: DocumentSummary; t: Dictionary }) {
 function StatusLine({ doc, t }: { doc: DocumentSummary; t: Dictionary }) {
   const label = t.statuses[doc.status] ?? doc.status
   if (doc.status === 'COMPLETED') {
+    const details = [
+      doc.page_count ? `${doc.page_count} ${t.pages}` : null,
+      doc.size_bytes ? formatBytes(doc.size_bytes) : null,
+    ].filter(Boolean)
     return (
       <p className="flex items-center gap-1 text-xs text-muted-foreground">
-        <CheckCircle2 className="size-3 text-primary" aria-hidden="true" />
-        {label}
+        <CheckCircle2 className="size-3 shrink-0 text-primary" aria-hidden="true" />
+        <span className="truncate">{[label, ...details].join(' · ')}</span>
       </p>
     )
   }
@@ -63,12 +69,53 @@ function StatusLine({ doc, t }: { doc: DocumentSummary; t: Dictionary }) {
       </p>
     )
   }
+  if (isStalled(doc)) {
+    return (
+      <p
+        className="flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400"
+        title={t.stalledHint}
+      >
+        <AlertTriangle className="size-3 shrink-0" aria-hidden="true" />
+        <span className="truncate">
+          {trimEllipsis(label)} · {t.stalled}
+        </span>
+      </p>
+    )
+  }
+  const progress = stageProgress(doc)
   return (
     <p className="flex items-center gap-1 text-xs text-muted-foreground">
-      <Loader2 className="size-3 animate-spin" aria-hidden="true" />
-      {label}
-      {doc.attempts > 1 && ` · ${t.attempt} ${doc.attempts}`}
+      <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />
+      <span className="truncate">
+        {progress ? `${trimEllipsis(label)} · ${progress.done}/${progress.total} ${t.pages}` : label}
+        {doc.attempts > 1 && ` · ${t.attempt} ${doc.attempts}`}
+      </span>
     </p>
+  )
+}
+
+// "Reading pages…" ends in an ellipsis that reads wrong once a count follows.
+function trimEllipsis(label: string) {
+  return label.replace(/…$/, '')
+}
+
+function ProgressBar({ doc, t }: { doc: DocumentSummary; t: Dictionary }) {
+  const progress = stageProgress(doc)
+  if (!progress || isStalled(doc)) return null
+  return (
+    <div
+      role="progressbar"
+      aria-label={t.statuses[doc.status] ?? doc.status}
+      aria-valuemin={0}
+      aria-valuemax={progress.total}
+      aria-valuenow={progress.done}
+      className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted"
+    >
+      <div
+        className="h-full rounded-full bg-primary transition-[width] duration-500"
+        style={{ width: `${progress.ratio * 100}%` }}
+      />
+    </div>
   )
 }
 
@@ -215,7 +262,7 @@ export function DocumentPanel() {
                 type="button"
                 onClick={() => viewer.open(doc.id)}
                 aria-pressed={viewer.docId === doc.id}
-                aria-label={`${t.viewer.open} ${doc.filename}`}
+                aria-label={`${t.viewer.open} ${displayName(doc)}`}
                 className="flex min-w-0 flex-1 items-center gap-3 rounded-md p-1.5 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
               >
                 <DocumentLabel doc={doc} t={t} />
@@ -229,7 +276,7 @@ export function DocumentPanel() {
               type="button"
               onClick={() => deleteDocument(doc.id)}
               className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-              aria-label={`${t.remove} ${doc.filename}`}
+              aria-label={`${t.remove} ${displayName(doc)}`}
             >
               <Trash2 className="size-4" aria-hidden="true" />
             </button>
