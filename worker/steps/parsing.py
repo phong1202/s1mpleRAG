@@ -69,6 +69,34 @@ _STRUCTURE = [
 # exact string, and trusting it as an author's real title would put a fake
 # one on every such document.
 _REPORTLAB_PLACEHOLDER_TITLE = "(anonymous)"
+# What else a PDF's title metadata is often left holding: a scanner's stamp
+# ("2025-01-02 (1)" on every decree of 2026-10-06), a word processor's
+# "Microsoft Word - x.docx", a file name.
+_JUNK_METADATA_TITLE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}\b|\(\d+\)$|^microsoft \w+ - |\.(pdf|docx?|odt|rtf)$|^(untitled|scan\d*)",
+    re.IGNORECASE,
+)
+# The lines every Vietnamese official document opens with -- the national
+# motto, its slogan, the number, the place and date. Never the title.
+_PREAMBLE = re.compile(
+    r"^(cộng hò?a xã hội chủ nghĩa việt nam|độc lập\s*-\s*tự do\s*-\s*hạnh phúc|số\s*:"
+    r"|.*,\s*ngày \d+ tháng \d+ năm \d{4})",
+    re.IGNORECASE,
+)
+# A legal document names its type on a line of its own, its summary right
+# below. Laws and their kin carry a name in capitals instead of a sentence.
+_LEGAL_TYPES = {
+    "luật", "bộ luật", "hiến pháp", "pháp lệnh", "nghị định", "nghị quyết", "thông tư",
+    "thông tư liên tịch", "quyết định", "chỉ thị", "lệnh",
+}  # fmt: skip
+_NAMED_TYPES = {"luật", "bộ luật", "hiến pháp", "pháp lệnh"}
+_LEGAL_NUMBER = re.compile(r"\bsố\s*:?\s*(\d+/\d{4}/[\w.-]+)", re.IGNORECASE)
+# What follows the summary: the legal bases, the enacting line, the body.
+_AFTER_SUMMARY = re.compile(
+    r"^(căn cứ|theo đề nghị|quốc hội ban hành|chương |điều \d|phần |luật .* số \d)",
+    re.IGNORECASE,
+)
+_SUMMARY_MAX_CHARS = 400
 
 
 class OcrUnavailable(Exception):
@@ -136,12 +164,79 @@ def is_scanned(total_text_chars: int, page_count: int) -> bool:
     return total_text_chars / page_count < SCANNED_CHARS_PER_PAGE
 
 
+def _plain(line: str) -> str:
+    """A line of page markdown as text: no heading marks, no emphasis, no
+    HTML tags, composed Unicode -- OCR and PyMuPDF output compared alike."""
+    line = re.sub(r"<[^>]+>", " ", _HEADING_MARKUP.sub("", line.strip()))
+    return unicodedata.normalize("NFC", line.strip(" *_\t"))
+
+
+def _sentence_case(text: str) -> str:
+    text = text.lower().replace("việt nam", "Việt Nam")
+    return text[:1].upper() + text[1:]
+
+
+def _legal_title(markdown: str) -> str | None:
+    """ "Nghị định 168/2024/NĐ-CP quy định xử phạt ..." or "Luật Đường bộ",
+    from the opening of page one -- or None if it does not read as a
+    Vietnamese legal document."""
+    # An HTML block on a scan's first page is a stamp or a box -- the
+    # portal's "received" stamp sat between nd-151's type line and its
+    # summary -- never part of the title. None marks it to be stepped over.
+    lines = [
+        None if raw.lstrip().startswith("<") else _plain(raw) for raw in markdown.splitlines()[:60]
+    ]
+    number = None
+    for i, line in enumerate(lines):
+        if line is None:
+            continue
+        if number is None and (found := _LEGAL_NUMBER.search(line)):
+            number = found.group(1)
+        kind = line.lower()
+        if kind not in _LEGAL_TYPES:
+            continue
+
+        summary: list[str] = []
+        for following in lines[i + 1 :]:
+            if following is None:
+                continue
+            if not following:
+                if summary:
+                    break
+                continue
+            if _AFTER_SUMMARY.match(following) or _PREAMBLE.match(following):
+                break
+            # A law's name is set in capitals, and the prose under it --
+            # "Luật Đường bộ số 35/2024/QH15 ngày ..." -- is not part of it.
+            if kind in _NAMED_TYPES and not following.isupper():
+                break
+            summary.append(following)
+        text = " ".join(summary)[:_SUMMARY_MAX_CHARS].strip()
+        if not text:
+            return None
+        if kind in _NAMED_TYPES:
+            return f"{kind.capitalize()} {_sentence_case(text)}"
+        text = _sentence_case(text) if text.isupper() else text
+        head = f"{kind.capitalize()} {number}" if number else kind.capitalize()
+        return f"{head} {text[:1].lower()}{text[1:]}"
+    return None
+
+
 def extract_title(metadata: dict, pages: list[dict]) -> str | None:
-    """PDF metadata, then the first h1, then the first non-empty line of
-    page one. Returns None when the PDF has none of the three -- the caller
-    falls back to the filename, the one thing guaranteed to exist."""
+    """A legal document's own type and summary, then PDF metadata, then the
+    first h1, then the first line of page one that is not the national
+    motto. Returns None when there is none of these -- the caller falls
+    back to the filename, the one thing guaranteed to exist.
+
+    The legal title goes first, ahead of metadata: on 2026-10-06 every
+    decree carried its scanner's date stamp there, and every one of them
+    names itself on page one."""
+    legal = _legal_title(pages[0]["markdown"]) if pages else None
+    if legal:
+        return legal
+
     title = (metadata or {}).get("title", "").strip()
-    if title and title != _REPORTLAB_PLACEHOLDER_TITLE:
+    if title and title != _REPORTLAB_PLACEHOLDER_TITLE and not _JUNK_METADATA_TITLE.search(title):
         return title
 
     for page in pages:
@@ -150,10 +245,11 @@ def extract_title(metadata: dict, pages: list[dict]) -> str | None:
             return found.group(1).strip()
 
     for line in (pages[0]["markdown"] if pages else "").splitlines():
-        if line.strip():
-            # A lower-level heading opening the page is still a heading:
-            # its text is the title, its markup is not.
-            return _HEADING_MARKUP.sub("", line.strip())[:200]
+        # A lower-level heading opening the page is still a heading: its
+        # text is the title, its markup is not.
+        text = _HEADING_MARKUP.sub("", line.strip())
+        if text and not _PREAMBLE.match(_plain(line)):
+            return text[:200]
 
     return None
 

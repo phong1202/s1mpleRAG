@@ -308,6 +308,13 @@ Seven original nodes, five stages, grouped by contended resource.
    2026-10-06 that preflight was what timed out, against a server too busy to answer.
 7. Write `parsed.json`, update `documents.page_count`.
 
+**Title.** A Vietnamese legal document names itself on page one, so that comes first: the
+document-type line (`LUẬT`, `NGHỊ ĐỊNH`, `THÔNG TƯ`, …) with the summary below it and the number
+above — "Nghị định 168/2024/NĐ-CP quy định xử phạt …", or a law's capitalised name — "Luật Đường
+bộ". Then PDF metadata, unless it is a date stamp or a file name (every decree of 2026-10-06 carried
+its scanner's "2025-01-02 (1)"), then the first h1, then the first line that is not the national
+motto, the number or the date. Last of all, in the stage, the filename.
+
 **Checkpoint.** OCR results are saved to `staging/{id}/parsed.partial.json` (`{"ocr": {"<page>":
 markdown | null}}`) after every batch, as it lands — not on the way out: what interrupts a parse is
 a worker killed or cut off from its broker, and neither runs an except clause. A rerun sends only

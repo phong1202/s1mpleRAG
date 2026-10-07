@@ -479,3 +479,169 @@ def test_a_deadline_reached_on_the_last_batch_still_finishes(store, uploaded, ch
 
     assert chandra["sent"] == [1, 2, 3, 4]
     assert len(result["pages"]) == 4
+
+
+# Page 1 of real documents, as S1 produced it on 2026-10-06/07 -- scans as
+# Chandra's markdown, digital ones as PyMuPDF's. Trimmed after the opening.
+_ND_168_PAGE_1 = """CHÍNH PHỦ
+
+CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM
+Độc lập - Tự do - Hạnh phúc
+
+Số: 168/2024/NĐ-CP
+
+Hà Nội, ngày 26 tháng 12 năm 2024
+
+NGHỊ ĐỊNH
+
+Quy định xử phạt vi phạm hành chính về trật tự, an toàn giao thông trong lĩnh vực giao thông \
+đường bộ; trừ điểm, phục hồi điểm giấy phép lái xe
+
+<table><tr><td>CÔNG THÔNG TIN ĐIỆN TỬ CHÍNH PHỦ</td></tr><tr><td>ĐẾN GHI: C</td></tr></table>
+
+Căn cứ Luật Tổ chức Chính phủ ngày 19 tháng 6 năm 2015;"""
+
+_ND_238_PAGE_1 = """CHÍNH PHỦ
+
+CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM
+Độc lập - Tự do - Hạnh phúc
+
+Số: 238/2026/NĐ-CP
+
+Hà Nội, ngày 26 tháng 6 năm 2026
+
+### NGHỊ ĐỊNH
+
+**Sửa đổi, bổ sung một số điều của Nghị định số 168/2024/NĐ-CP ngày 26 tháng 12 năm 2024 của \
+Chính phủ quy định xử phạt vi phạm hành chính về trật tự, an toàn giao thông trong lĩnh vực giao \
+thông đường bộ; trừ điểm, phục hồi điểm giấy phép lái xe**
+
+*Căn cứ Luật Tổ chức Chính phủ số 63/2025/QH15;*"""
+
+_LUAT_DUONG_BO_PAGE_1 = """CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM
+Độc lập - Tự do - Hạnh phúc
+LUẬT
+ĐƯỜNG BỘ
+Luật Đường bộ số 35/2024/QH15 ngày 27 tháng 6 năm 2024 của Quốc hội,
+có hiệu lực kể từ ngày 01 tháng 01 năm 2025, được sửa đổi, bổ sung bởi:
+Căn cứ Hiến pháp nước Cộng hòa xã hội chủ nghĩa Việt Nam;
+### Chương I
+NHỮNG QUY ĐỊNH CHUNG"""
+
+_LUAT_TRAT_TU_PAGE_1 = """CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM
+Độc lập - Tự do - Hạnh phúc
+LUẬT
+TRẬT TỰ, AN TOÀN GIAO THÔNG ĐƯỜNG BỘ
+Luật Trật tự, an toàn giao thông đường bộ số 36/2024/QH15 ngày 27 tháng
+6 năm 2024 của Quốc hội, có hiệu lực kể từ ngày 01 tháng 01 năm 2025, được
+Căn cứ Hiến pháp nước Cộng hòa xã hội chủ nghĩa Việt Nam;
+Quốc hội ban hành Luật Trật tự, an toàn giao thông đường bộ1.
+## Chương I"""
+
+# The summary wrapped over five bold lines, as Chandra set it.
+_ND_236_PAGE_1 = """CHÍNH PHỦ
+
+CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM
+Độc lập - Tự do - Hạnh phúc
+
+Số: 236/2026/NĐ-CP
+
+Hà Nội, ngày 26 tháng 6 năm 2026
+
+**NGHỊ ĐỊNH**
+
+**Sửa đổi, bổ sung một số điều của Nghị định số 151/2024/NĐ-CP
+ngày 15 tháng 11 năm 2024 của Chính phủ quy định chi tiết một số điều
+và biện pháp thi hành Luật Trật tự, an toàn giao thông đường bộ
+được sửa đổi, bổ sung bởi Nghị định số 184/2025/NĐ-CP
+ngày 01 tháng 7 năm 2025 của Chính phủ**
+
+*Căn cứ Luật Tổ chức Chính phủ số 63/2025/QH15;*"""
+
+# The portal's "received" stamp, which Chandra reads as a table, sits
+# between the type line and the summary here.
+_ND_151_PAGE_1 = """CHÍNH PHỦ
+
+CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM
+Độc lập - Tự do - Hạnh phúc
+
+Số: 151/2024/NĐ-CP
+
+Hà Nội, ngày 15 tháng 11 năm 2024
+
+NGHỊ ĐỊNH
+
+<table><tr><td colspan="2">CỘNG THÔNG TIN ĐIỆN TỬ CHÍNH PHỦ</td></tr><tr><td>ĐẾN</td>\
+<td>Gửi: .....<br/>Ngày: 10.11.2024</td></tr></table>
+
+Quy định chi tiết một số điều và biện pháp thi hành
+Luật Trật tự, an toàn giao thông đường bộ
+
+Căn cứ Luật Tổ chức Chính phủ ngày 19 tháng 6 năm 2015;"""
+
+
+@pytest.mark.parametrize(
+    ("metadata", "page_1", "title"),
+    [
+        (
+            {"title": "2025-01-02 (1)"},
+            _ND_168_PAGE_1,
+            "Nghị định 168/2024/NĐ-CP quy định xử phạt vi phạm hành chính về trật tự, an toàn "
+            "giao thông trong lĩnh vực giao thông đường bộ; trừ điểm, phục hồi điểm giấy phép "
+            "lái xe",
+        ),
+        (
+            {"title": "2026-07-01 (1)"},
+            _ND_238_PAGE_1,
+            "Nghị định 238/2026/NĐ-CP sửa đổi, bổ sung một số điều của Nghị định số 168/2024/NĐ-CP "
+            "ngày 26 tháng 12 năm 2024 của Chính phủ quy định xử phạt vi phạm hành chính về trật "
+            "tự, an toàn giao thông trong lĩnh vực giao thông đường bộ; trừ điểm, phục hồi điểm "
+            "giấy phép lái xe",
+        ),
+        ({"title": ""}, _LUAT_DUONG_BO_PAGE_1, "Luật Đường bộ"),
+        ({"title": ""}, _LUAT_TRAT_TU_PAGE_1, "Luật Trật tự, an toàn giao thông đường bộ"),
+        (
+            {"title": "2026-06-30 (1)"},
+            _ND_236_PAGE_1,
+            "Nghị định 236/2026/NĐ-CP sửa đổi, bổ sung một số điều của Nghị định số 151/2024/NĐ-CP "
+            "ngày 15 tháng 11 năm 2024 của Chính phủ quy định chi tiết một số điều và biện pháp "
+            "thi hành Luật Trật tự, an toàn giao thông đường bộ được sửa đổi, bổ sung bởi Nghị "
+            "định số 184/2025/NĐ-CP ngày 01 tháng 7 năm 2025 của Chính phủ",
+        ),
+        (
+            {"title": "2024-12-10 (1)"},
+            _ND_151_PAGE_1,
+            "Nghị định 151/2024/NĐ-CP quy định chi tiết một số điều và biện pháp thi hành Luật "
+            "Trật tự, an toàn giao thông đường bộ",
+        ),
+    ],
+    ids=["nd-168", "nd-238", "luat-duong-bo", "luat-trat-tu", "nd-236", "nd-151"],
+)
+def test_a_vietnamese_legal_document_is_titled_by_its_type_and_summary(metadata, page_1, title):
+    """2026-10-06 gave these "2025-01-02 (1)" -- the scanner's metadata --
+    and "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM", the national motto that opens
+    every one of them. A legal document names itself on page 1: its type on
+    a line of its own, its summary right after, its number above."""
+    assert extract_title(metadata, [{"markdown": page_1}]) == title
+
+
+@pytest.mark.parametrize(
+    "junk", ["2024-12-10 (1)", "2026-06-30", "Microsoft Word - ND168.docx", "scan0001.pdf"]
+)
+def test_metadata_that_is_a_date_or_a_file_name_is_not_a_title(junk):
+    pages = [{"markdown": "# Báo cáo tài chính quý 3\n\nNội dung."}]
+
+    assert extract_title({"title": junk}, pages) == "Báo cáo tài chính quý 3"
+
+
+def test_the_national_motto_is_never_a_title():
+    """The last-resort first line skips the lines every Vietnamese official
+    document opens with."""
+    pages = [
+        {
+            "markdown": "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM\nĐộc lập - Tự do - Hạnh phúc\n"
+            "Số: 12/BC-UBND\nHà Nội, ngày 1 tháng 2 năm 2026\nBáo cáo tình hình kinh tế"
+        }
+    ]
+
+    assert extract_title({}, pages) == "Báo cáo tình hình kinh tế"
