@@ -1,9 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server'
 
-// The browser fetches PDF bytes straight from object storage (presigned
-// URLs), so that origin -- and only that one -- is allowed besides our own.
-const STORAGE_ORIGIN = process.env.STORAGE_PUBLIC_ORIGIN ?? 'http://localhost:9000'
-
 // A strict CSP matters here because the viewer runs pdf.js in this page on
 // PDFs anyone can upload. A nonce + 'strict-dynamic' lets only Next's own
 // scripts (and what they load) run; 'wasm-unsafe-eval' allows compiling
@@ -22,7 +18,7 @@ export function proxy(request: NextRequest) {
     style-src 'self' 'unsafe-inline';
     img-src 'self' blob: data:;
     font-src 'self' data:;
-    connect-src 'self' ${STORAGE_ORIGIN};
+    connect-src 'self';
     worker-src 'self' blob:;
     frame-src 'none';
     object-src 'none';
@@ -45,8 +41,8 @@ export function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     {
-      // Pages only: not static assets, pdf.js data files, or the API rewrite.
-      source: '/((?!backend|pdfjs|_next/static|_next/image|favicon.ico|icon.svg).*)',
+      // Pages only: not static assets, pdf.js data files, or API routes.
+      source: '/((?!api|backend|pdfjs|_next/static|_next/image|favicon.ico|icon.svg).*)',
       missing: [
         { type: 'header', key: 'next-router-prefetch' },
         { type: 'header', key: 'purpose', value: 'prefetch' },

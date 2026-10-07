@@ -38,12 +38,17 @@ type Paginated<T> = { items: T[]; total: number; limit: number; offset: number }
 
 type UploadTarget = { upload_url: string; object_key: string; expires_in: number }
 
-type FileUrl = { url: string; expires_in: number }
-
 const KEY_BY_STATUS: Record<number, ErrorKey> = {
   404: 'document_not_found',
   409: 'already_ingested',
   413: 'file_too_large',
+}
+
+// The bytes route adds its own two: the API (503) or storage (502) down.
+const BYTES_KEY_BY_STATUS: Record<number, ErrorKey> = {
+  ...KEY_BY_STATUS,
+  502: 'storage_unavailable',
+  503: 'backend_unavailable',
 }
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
@@ -83,21 +88,21 @@ export function deleteDocument(id: string) {
   return call<null>(`/documents/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
-// The PDF's bytes, for the in-page viewer. The presigned URL is used once,
-// right here, and never stored or put in the DOM: it is a bearer credential
-// for the file until it expires, and the viewer is the only sanctioned way
-// to read a document.
+// The PDF's bytes, for the in-page viewer. Relayed by this app's own
+// server (app/api/documents/[id]/bytes) rather than fetched from the
+// presigned URL here: see that route for why.
 export async function downloadDocument(id: string, signal?: AbortSignal): Promise<Uint8Array> {
-  const { url } = await call<FileUrl>(`/documents/${encodeURIComponent(id)}/file-url`, { signal })
-
   let res: Response
   try {
-    res = await fetch(url, { signal, credentials: 'omit', referrerPolicy: 'no-referrer' })
+    res = await fetch(`/api/documents/${encodeURIComponent(id)}/bytes`, { signal })
   } catch (error) {
     if (signal?.aborted) throw error
-    throw new BackendError('storage_unavailable', 'Storage unreachable')
+    throw new BackendError('backend_unavailable', 'Backend unreachable')
   }
-  if (!res.ok) throw new BackendError('storage_rejected', `Storage answered HTTP ${res.status}`)
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as Envelope<null> | null
+    throw new BackendError(BYTES_KEY_BY_STATUS[res.status] ?? null, body?.message ?? `HTTP ${res.status}`)
+  }
   return new Uint8Array(await res.arrayBuffer())
 }
 
