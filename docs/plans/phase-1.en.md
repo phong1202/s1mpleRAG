@@ -4522,6 +4522,26 @@ looked stuck:
 
 Suggested commit message: `fix(parse): read pages as a stream and report each one`
 
+### Task 35: Progress for enrich and embed
+
+**Why.** The 2026-10-07 run: enriching luat-trat-tu took 190 s (443 chunks, ~23 OpenAI calls), yet
+the UI showed only "ENRICHING", then jumped straight to COMPLETED. Structure and persist take ~1–2 s,
+embed ~7 s.
+
+**Files:** `worker/steps/enrichment.py`, `worker/steps/embedding.py`, `worker/stages.py`,
+`shared/progress.py` (docstring), their tests, `docs/system-design.md`.
+
+- `enrich_chunks` and `embed_chunks` take `on_progress(done, total)`, called at the start (counting
+  what a deferred run already paid for) and after every batch.
+- The stage reports `progress` with `stage` = ENRICHING/EMBEDDING, in S1's format, so the FE needs
+  no change. The key is cleared when the stage finishes.
+
+- [ ] **Step 1:** Failing tests: (20,50) → (40,50) → (50,50) with 20 already done; the stage reports
+  ENRICHING 0/20/40 of 60, then EMBEDDING 0/60; once done, no key is left.
+- [ ] **Step 2:** Fix; run the suite.
+
+Suggested commit message: `feat(progress): report enrich and embed progress per batch`
+
 ---
 
 ## Definition of Done — Phase 1

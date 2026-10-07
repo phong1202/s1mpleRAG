@@ -714,3 +714,37 @@ def test_progress_lost_to_redis_does_not_fail_the_parse(
     stages.parse.apply(args=(str(seeded_document.id),)).get()
 
     assert reload(seeded_document.id).stage == "PARSING"
+
+
+def test_enrich_and_embed_report_progress_while_they_run(staged_chunks, monkeypatch):
+    """Like S1's pages: the FE sees ENRICHING 20/60, not a stage name alone
+    for minutes. Done, the stage leaves no progress behind."""
+    import shared.llm
+    from shared import progress
+    from shared.llm import StubProvider
+    from worker import stages
+
+    document_id = str(staged_chunks.id)
+    seen = []
+
+    class LookingStub(StubProvider):
+        def enrich(self, chunks):
+            seen.append(progress.read(document_id))
+            return super().enrich(chunks)
+
+        def embed(self, texts):
+            seen.append(progress.read(document_id))
+            return super().embed(texts)
+
+    monkeypatch.setattr(shared.llm, "get_provider", lambda: LookingStub())
+
+    stages.enrich.apply(args=(document_id,)).get()
+    stages.embed.apply(args=(document_id,)).get()
+
+    assert [(p["stage"], p["done"], p["total"]) for p in seen] == [
+        ("ENRICHING", 0, 60),
+        ("ENRICHING", 20, 60),
+        ("ENRICHING", 40, 60),
+        ("EMBEDDING", 0, 60),
+    ]
+    assert progress.read(document_id) is None

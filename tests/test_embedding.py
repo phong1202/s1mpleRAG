@@ -162,3 +162,16 @@ def test_a_zero_vector_is_rejected_since_it_cannot_be_normalised():
 
     with pytest.raises(AssertionError):
         embed_chunks(["a"], provider=ZeroProvider())
+
+
+def test_embed_reports_its_progress_batch_by_batch():
+    reported = []
+
+    embed_chunks(
+        [f"text {i}" for i in range(25)],
+        provider=StubProvider(),
+        batch_size=10,
+        on_progress=lambda done, total: reported.append((done, total)),
+    )
+
+    assert reported == [(0, 25), (10, 25), (20, 25), (25, 25)]

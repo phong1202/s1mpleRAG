@@ -4533,6 +4533,26 @@ nên trông như bị kẹt:
 
 Commit message đề xuất: `fix(parse): read pages as a stream and report each one`
 
+### Task 35: Tiến độ cho enrich và embed
+
+**Vì sao.** Lần chạy 07/10: enrich luat-trat-tu mất 190 s (443 chunk, khoảng 23 lần gọi OpenAI),
+nhưng UI chỉ thấy chữ "ENRICHING" rồi nhảy thẳng sang COMPLETED. Structure và persist chỉ mất
+khoảng 1–2 s, embed khoảng 7 s.
+
+**Files:** `worker/steps/enrichment.py`, `worker/steps/embedding.py`, `worker/stages.py`,
+`shared/progress.py` (docstring), test tương ứng, `docs/system-design.md`.
+
+- `enrich_chunks` và `embed_chunks` nhận thêm `on_progress(done, total)`, gọi lúc bắt đầu (tính cả
+  phần đã có từ lần chạy bị defer) và sau mỗi lô.
+- Stage ghi `progress` với `stage` = ENRICHING/EMBEDDING, cùng định dạng với S1, nên FE không phải
+  sửa gì. Xoá key khi stage xong.
+
+- [ ] **Step 1:** Test đỏ: (20,50) → (40,50) → (50,50) khi đã có sẵn 20; stage báo ENRICHING 0/20/40
+  trên 60 và EMBEDDING 0/60; xong thì không còn key.
+- [ ] **Step 2:** Sửa; chạy suite.
+
+Commit message đề xuất: `feat(progress): report enrich and embed progress per batch`
+
 ---
 
 ## Definition of Done — Phase 1

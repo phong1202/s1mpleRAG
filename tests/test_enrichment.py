@@ -178,3 +178,22 @@ def test_a_provider_429_mid_document_still_hands_back_what_was_paid_for(children
         enrich_chunks(children, provider=RateLimitedOnTheSecondCall(), batch_size=10)
 
     assert sorted(r["id"] for r in exc.value.partial) == list(range(10))
+
+
+def test_enrich_reports_its_progress_batch_by_batch():
+    """Enriching a long document takes minutes -- 190 s for the 443 chunks
+    of the 2026-10-07 run -- and the FE showed only "ENRICHING" throughout.
+    The count starts from what a deferred run already paid for."""
+    children = [{"id": i, "content": f"chunk {i}"} for i in range(50)]
+    first = enrich_chunks(children[:20], provider=StubProvider(), batch_size=20)
+    reported = []
+
+    enrich_chunks(
+        children,
+        provider=StubProvider(),
+        batch_size=20,
+        done=first,
+        on_progress=lambda done, total: reported.append((done, total)),
+    )
+
+    assert reported == [(20, 50), (40, 50), (50, 50)]

@@ -5,6 +5,8 @@ Validate BEFORE writing anything. A broken batch is retried by its exact
 missing ids, one at a time -- never the whole batch of 20 again.
 """
 
+from collections.abc import Callable
+
 from app.config import get_settings
 from app.exceptions import AppException, ErrorCode
 from shared.llm import CATEGORIES, EnrichedChunk, LLMProvider
@@ -40,9 +42,12 @@ def enrich_chunks(
     provider: LLMProvider,
     batch_size: int = 20,
     done: list[dict] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> list[dict]:
     """`done` is what an earlier, deferred run already paid for -- the
-    `partial` of its RateLimited. Those chunks are skipped, not sent again."""
+    `partial` of its RateLimited. Those chunks are skipped, not sent again.
+    `on_progress` gets (chunks enriched, chunks in all) at the start and
+    after every batch."""
     if len(children) > MAX_CHUNKS_PER_DOC:
         raise AppException(
             ErrorCode.PDF_TOO_LARGE,
@@ -54,6 +59,8 @@ def enrich_chunks(
 
     try:
         for start in range(0, len(pending), batch_size):
+            if on_progress:
+                on_progress(len(out), len(children))
             _enrich_batch(pending[start : start + batch_size], provider, out)
     except RateLimited as exc:
         # Whether the local limiter or the provider's own 429 said wait:
@@ -61,6 +68,8 @@ def enrich_chunks(
         exc.partial = list(out.values())
         raise
 
+    if on_progress:
+        on_progress(len(out), len(children))
     return [out[c["id"]] for c in children]
 
 

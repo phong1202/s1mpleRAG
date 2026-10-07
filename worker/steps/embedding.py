@@ -5,6 +5,7 @@ either starve the other.
 
 import io
 import math
+from collections.abc import Callable
 
 import numpy as np
 
@@ -46,20 +47,26 @@ def embed_chunks(
     provider: LLMProvider,
     batch_size: int = 100,
     done: list[list[float]] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> list[list[float]]:
     """`done` is the vectors an earlier, deferred run already paid for -- the
     `partial` of its RateLimited, always a prefix of `texts` since batches
-    go in order. Those texts are skipped, not embedded again."""
+    go in order. Those texts are skipped, not embedded again. `on_progress`
+    gets (texts embedded, texts in all) at the start and after every batch."""
     vectors: list[list[float]] = list(done or [])
 
     try:
         for start in range(len(vectors), len(texts), batch_size):
+            if on_progress:
+                on_progress(len(vectors), len(texts))
             vectors.extend(_embed_batch(texts[start : start + batch_size], provider))
     except RateLimited as exc:
         # Whether the local limiter or the provider's own 429 said wait:
         # hand back the vectors already paid for, so the retry resumes.
         exc.partial = vectors
         raise
+    if on_progress:
+        on_progress(len(vectors), len(texts))
     return vectors
 
 

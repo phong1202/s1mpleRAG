@@ -545,7 +545,8 @@ GET  /documents/{id}/status
   The same object is each item of GET /documents. progress is null unless a stage is reporting.
 
   progress = { stage, done, total, updated_at, stalled }, overlaid from Redis (`progress:{id}`,
-  one JSON string, one MGET per page of results). S1 reports pages read by OCR after every page;
+  one JSON string, one MGET per page of results). S1 reports pages read by OCR after every page, S3 and S4 chunks done after every batch
+  (`unit` is implied by `stage`: pages for PARSING, chunks for ENRICHING/EMBEDDING);
   it writes page_count to the row the moment the PDF opens. Postgres stays the source of truth for
   status — the overlay is a courtesy, and any Redis failure leaves it null rather than failing the
   request or the stage. A key outlives its writer by an hour, so a stage that stopped reporting

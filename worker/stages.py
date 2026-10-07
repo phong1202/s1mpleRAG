@@ -135,6 +135,7 @@ def structure(self, document_id: str) -> str:
 @stage_task("ENRICHING")
 def enrich(self, document_id: str) -> str:
     from app.config import get_settings
+    from shared import progress
     from shared.llm import get_provider
     from shared.storage import get_store
     from worker.steps.enrichment import enrich_chunks
@@ -163,6 +164,9 @@ def enrich(self, document_id: str) -> str:
             provider=get_provider(),
             batch_size=get_settings().enrich_batch_size,
             done=done,
+            on_progress=lambda read, total: progress.report(
+                document_id, "ENRICHING", done=read, total=total
+            ),
         )
     except RateLimited as exc:
         # Saved here, inside the body @stage_task wraps, not in its handler: a
@@ -172,6 +176,7 @@ def enrich(self, document_id: str) -> str:
         raise
     store.put_json(key, {"chunks": enriched})
 
+    progress.clear(document_id)
     advance(document_id, "ENRICHING", stage="ENRICHING")
     return document_id
 
@@ -181,6 +186,7 @@ def enrich(self, document_id: str) -> str:
 @stage_task("EMBEDDING")
 def embed(self, document_id: str) -> str:
     from app.config import get_settings
+    from shared import progress
     from shared.llm import get_provider
     from shared.storage import get_store
     from worker.steps.embedding import (
@@ -222,6 +228,9 @@ def embed(self, document_id: str) -> str:
             provider=get_provider(),
             batch_size=get_settings().embed_batch_size,
             done=done,
+            on_progress=lambda read, total: progress.report(
+                document_id, "EMBEDDING", done=read, total=total
+            ),
         )
     except RateLimited as exc:
         # Inside the wrapped body for the same reason as in enrich.
@@ -234,6 +243,7 @@ def embed(self, document_id: str) -> str:
     store.put_json(f"staging/{document_id}/manifest.json", {"chunk_index_by_row": manifest})
     store.put(key, vectors_to_npy(vectors))
 
+    progress.clear(document_id)
     advance(document_id, "EMBEDDING", stage="EMBEDDING")
     return document_id
 
