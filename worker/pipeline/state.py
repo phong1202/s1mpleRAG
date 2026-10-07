@@ -42,7 +42,7 @@ PERMANENT = {
 # a partial computed from an older input would mix two runs' results under
 # the same ids.
 ARTIFACTS = {
-    "PARSING": ("parsed.json",),
+    "PARSING": ("parsed.json", "parsed.partial.json"),
     "STRUCTURING": ("chunks.json",),
     "ENRICHING": ("enriched.json", "enriched.partial.json"),
     "EMBEDDING": ("manifest.json", "embeddings.npy", "embeddings.partial.npy"),

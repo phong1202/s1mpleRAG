@@ -188,7 +188,7 @@ def ocr_calls(monkeypatch):
     the page numbers listed in `ocr_calls.fail`."""
     calls = {"pages": [], "fail": set()}
 
-    def fake_ocr(data, page_numbers, ocr_url):
+    def fake_ocr(data, page_numbers, ocr_url, on_batch=None):
         calls["pages"] = list(page_numbers)
         return {n: None if n in calls["fail"] else f"# Page {n} by OCR" for n in page_numbers}
 
@@ -250,6 +250,7 @@ def chandra(monkeypatch):
     runs: pages listed in `fail` come back as Chandra's error=True, and
     `health` lists what successive GET /health calls answer -- a status
     code, or an exception to raise. Once the list is empty, /health is 200.
+    `sent` records every page handed to the model.
 
     The distinction under test lives in _ocr: Chandra's library turns a
     dead server, a 500 and a timeout into the very same error=True it uses
@@ -258,13 +259,14 @@ def chandra(monkeypatch):
 
     import httpx
 
-    state = {"fail": set(), "health": []}
+    state = {"fail": set(), "health": [], "sent": []}
 
     class FakeManager:
         def __init__(self, method):
             pass
 
         def generate(self, items, **kwargs):
+            state["sent"].extend(item.image + 1 for item in items)
             # load_pdf_images is faked to hand back the 0-based page index
             # as the "image", so each item knows which page it is.
             return [
@@ -346,3 +348,41 @@ def test_a_page_failing_on_a_healthy_server_is_degraded_alone(store, uploaded, c
         ("chandra", 1.0),
         ("chandra", 1.0),
     ]
+
+
+def test_an_interrupted_parse_resumes_from_its_checkpoint(store, uploaded, chandra, monkeypatch):
+    """OCR results used to live in memory until the whole file was done, so
+    any retry -- a crash, a redelivery, an outage -- read the scan again from
+    page 1: ~25 GPU minutes for the 111-page decree. Each batch is handed to
+    on_batch as it lands, and a rerun given those pages as `done` sends only
+    the rest."""
+    import httpx
+
+    from worker.steps.parsing import OcrUnavailable
+
+    monkeypatch.setattr("worker.steps.parsing._OCR_BATCH_PAGES", 2)
+    key = uploaded("topics.pdf")
+    saved = {}
+
+    chandra["fail"] = {3}
+    chandra["health"] = _down(httpx.ConnectError)
+    with pytest.raises(OcrUnavailable):
+        parse_document(key, store, "http://ocr", ocr_all_pages=True, on_batch=saved.update)
+    assert saved == {1: "# Page 1 by OCR", 2: "# Page 2 by OCR"}
+
+    chandra.update(fail=set(), health=[], sent=[])
+    result = parse_document(key, store, "http://ocr", ocr_all_pages=True, done=dict(saved))
+
+    assert chandra["sent"] == [3, 4]
+    assert [p["markdown"] for p in result["pages"]] == [f"# Page {n} by OCR" for n in range(1, 5)]
+
+
+def test_a_page_already_failed_on_a_healthy_server_is_not_sent_again(store, uploaded, chandra):
+    """None in the checkpoint is a verdict, not a gap: a page the model kept
+    looping on costs minutes each time, and would fail the same way."""
+    key = uploaded("topics.pdf")
+
+    pages = parse_document(key, store, "http://ocr", ocr_all_pages=True, done={1: None})["pages"]
+
+    assert chandra["sent"] == [2, 3, 4]
+    assert (pages[0]["source"], pages[0]["confidence"]) == ("pymupdf", 0.0)

@@ -482,3 +482,53 @@ def test_a_failure_on_a_deleted_document_stops_quietly_too(seeded_document, monk
     result = stages.structure.apply(args=(str(seeded_document.id),))
 
     assert result.state == "IGNORED"
+
+
+@pytest.fixture
+def ocr_every_page(monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "ocr_url", "http://ocr")
+    monkeypatch.setattr(get_settings(), "ocr_all_pages", True)
+
+
+def test_parse_resumes_from_a_saved_ocr_checkpoint(seeded_document, ocr_every_page, monkeypatch):
+    from shared.storage import get_store
+    from worker import stages
+
+    store = get_store()
+    prefix = f"staging/{seeded_document.id}"
+    store.put_json(f"{prefix}/parsed.partial.json", {"ocr": {"1": "# Read before the crash"}})
+    sent = []
+
+    def recording_ocr(data, page_numbers, ocr_url, on_batch=None):
+        sent.extend(page_numbers)
+        return {}
+
+    monkeypatch.setattr("worker.steps.parsing._ocr", recording_ocr)
+
+    stages.parse.apply(args=(str(seeded_document.id),)).get()
+
+    assert sent == []
+    parsed = store.get_json(f"{prefix}/parsed.json")
+    assert parsed["pages"][0]["markdown"] == "# Read before the crash"
+
+
+def test_parse_saves_each_ocr_batch_before_anything_can_fail(
+    seeded_document, ocr_every_page, monkeypatch
+):
+    """Saved as each batch lands, not on the way out: a worker that is
+    OOM-killed or loses its broker channel runs no except clause."""
+    from shared.storage import get_store
+    from worker import stages
+
+    def ocr_then_die(data, page_numbers, ocr_url, on_batch=None):
+        on_batch({1: "# Paid for"})
+        raise RuntimeError("worker lost")
+
+    monkeypatch.setattr("worker.steps.parsing._ocr", ocr_then_die)
+
+    stages.parse.apply(args=(str(seeded_document.id),))
+
+    partial = get_store().get_json(f"staging/{seeded_document.id}/parsed.partial.json")
+    assert partial == {"ocr": {"1": "# Paid for"}}

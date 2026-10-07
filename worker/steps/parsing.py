@@ -10,6 +10,7 @@ import re
 import time
 import unicodedata
 from collections import Counter
+from collections.abc import Callable
 
 import httpx
 import pymupdf
@@ -208,9 +209,15 @@ def _markdown_pages(document: pymupdf.Document) -> list[str]:
     return markdown
 
 
-def _ocr(data: bytes, page_numbers: list[int], ocr_url: str) -> dict[int, str | None]:
+def _ocr(
+    data: bytes,
+    page_numbers: list[int],
+    ocr_url: str,
+    on_batch: Callable[[dict[int, str | None]], None] | None = None,
+) -> dict[int, str | None]:
     """Chandra's markdown for each page, or None for a page it still failed
-    on after its own retries.
+    on after its own retries. `on_batch` gets everything read so far after
+    every batch -- the caller's checkpoint.
 
     Raises if the OCR server itself is down -- checked up front, and again
     after any batch with errors, since a server can die mid-document. An
@@ -250,12 +257,24 @@ def _ocr(data: bytes, page_numbers: list[int], ocr_url: str) -> dict[int, str | 
                 raise OcrUnavailable(f"OCR server {reason} at {ocr_url}")
         for number, result in zip(batch, results, strict=True):
             out[number] = None if result.error else result.markdown
+        if on_batch:
+            on_batch(dict(out))
     return out
 
 
 def parse_document(
-    object_key: str, store: ObjectStore, ocr_url: str | None, ocr_all_pages: bool = False
+    object_key: str,
+    store: ObjectStore,
+    ocr_url: str | None,
+    ocr_all_pages: bool = False,
+    done: dict[int, str | None] | None = None,
+    on_batch: Callable[[dict[int, str | None]], None] | None = None,
 ) -> dict:
+    """`done` is OCR an earlier, interrupted run already paid for -- those
+    pages are not sent again, a None among them included: a page the model
+    failed on a healthy server fails the same way twice, and a looping one
+    costs minutes. `on_batch` gets `done` plus everything read since, after
+    each batch."""
     data = store.get(object_key)
 
     try:
@@ -289,7 +308,14 @@ def parse_document(
         for i, markdown in enumerate(_markdown_pages(document))
     ]
 
-    for page_number, markdown in _ocr(data, needs_ocr, ocr_url).items():
+    done = {n: done[n] for n in needs_ocr if n in (done or {})}
+    todo = [n for n in needs_ocr if n not in done]
+
+    def checkpoint(read: dict[int, str | None]) -> None:
+        on_batch({**done, **read})
+
+    ocr = {**done, **_ocr(data, todo, ocr_url, on_batch=checkpoint if on_batch else None)}
+    for page_number, markdown in ocr.items():
         if markdown is None:
             # Keep PyMuPDF's text, mark confidence 0, and log it -- a
             # degraded page beats a dead document, but the degradation has

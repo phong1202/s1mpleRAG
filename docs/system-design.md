@@ -299,6 +299,11 @@ Seven original nodes, five stages, grouped by contended resource.
    engine is dead) — three tries — and the batch is dropped as an outage, not degraded.
 7. Write `parsed.json`, update `documents.page_count`.
 
+**Checkpoint.** OCR results are saved to `staging/{id}/parsed.partial.json` (`{"ocr": {"<page>":
+markdown | null}}`) after every batch, as it lands — not on the way out: what interrupts a parse is
+a worker killed or cut off from its broker, and neither runs an except clause. A rerun sends only
+the pages missing from it; a `null` page (failed on a healthy server) is not sent again.
+
 The task runs on `worker-cpu` but the *work* happens in the `chandra` container — the worker renders
 pages and holds HTTP connections, not model weights. That's what makes S1 safe to run at concurrency 8.
 
@@ -395,9 +400,12 @@ raw/
 staging/
   {document_id}/
     parsed.json                      # S1 → S2
+    parsed.partial.json              # S1's OCR so far, written after every batch
     chunks.json                      # S2 → S3
     enriched.json                    # S3 → S4
+    enriched.partial.json            # S3's batches so far, saved on a rate-limit deferral
     embeddings.npy                   # S4 → S5
+    embeddings.partial.npy           # S4's batches so far, saved on a rate-limit deferral
     manifest.json                    # row index → chunk_index
 ```
 
