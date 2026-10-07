@@ -253,3 +253,23 @@ async def test_file_url_of_an_unknown_document_is_404(client):
 
     assert response.status_code == 404
     assert response.json()["data"] is None
+
+
+async def test_status_and_list_carry_what_the_fe_shows(client, uploaded_pdf):
+    """Additive: every field an older client read is still there. title,
+    page_count and language stay null until S1/S5 fill them; progress is
+    null while nothing is reporting."""
+    from datetime import datetime
+
+    created = await client.post("/documents", json=uploaded_pdf)
+    document_id = created.json()["data"]["document_id"]
+
+    one = (await client.get(f"/documents/{document_id}/status")).json()["data"]
+    listed = (await client.get("/documents")).json()["data"]["items"]
+
+    assert [d for d in listed if d["id"] == document_id] == [one]
+    assert one["filename"] == "clean_text.pdf"
+    assert one["size_bytes"] == uploaded_pdf["size_bytes"]
+    assert (one["title"], one["page_count"], one["language"]) == (None, None, None)
+    assert (one["completed_at"], one["progress"]) == (None, None)
+    assert datetime.fromisoformat(one["created_at"]) <= datetime.fromisoformat(one["updated_at"])

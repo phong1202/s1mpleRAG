@@ -496,7 +496,10 @@ POST /documents
   Verifies the object exists and its hash matches, then registers + publishes.
 
 GET  /documents/{id}/status
-  → { data: { status, stage, attempts, failed_stage, last_error, progress } }
+  → { data: { id, filename, status, stage, attempts, failed_stage, last_error,
+              title, page_count, size_bytes, language, created_at, updated_at, completed_at,
+              progress } }
+  The same object is each item of GET /documents. progress is null unless a stage is reporting.
 
 GET  /documents            list + filter by status
 DELETE /documents/{id}     cascades to chunks; leaves raw/ intact

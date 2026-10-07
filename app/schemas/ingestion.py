@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -36,6 +37,14 @@ class DocumentAccepted(BaseModel):
     status: str
 
 
+class DocumentProgress(BaseModel):
+    stage: str
+    done: int | None
+    total: int | None
+    updated_at: datetime | None
+    stalled: bool
+
+
 class DocumentStatus(BaseModel):
     # from_attributes lets this be built straight off the ORM model with
     # model_validate(document) -- id stays a real UUID rather than a str
@@ -50,3 +59,15 @@ class DocumentStatus(BaseModel):
     attempts: int
     failed_stage: str | None
     last_error: str | None
+    # Everything below is additive: an older client that never read these
+    # is unaffected. title and page_count arrive with S1, language with S5.
+    title: str | None
+    page_count: int | None
+    size_bytes: int
+    language: str | None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+    # The running stage's live progress, overlaid from Redis -- not a
+    # column, so model_validate(document) leaves it None.
+    progress: DocumentProgress | None = None
