@@ -4210,6 +4210,272 @@ Commit message đề xuất: `refactor(worker): add a sync repository layer and 
 
 ---
 
+## Phase 1d — sửa sau lần chạy thật 06/10/2026
+
+> **Bối cảnh.** Lần chạy 6 văn bản luật thật (14–111 trang, 4 bản scan, ~219 trang cần OCR) lộ ra
+> một chuỗi sự cố nối nhau:
+>
+> 1. 6 file cùng đẩy ảnh vào vLLM.
+> 2. Health check 10 s bị timeout, đốt mất attempt.
+> 3. WSL hết RAM: vLLM giữ ~9 GB RAM host cho một multimodal cache vô dụng, worker-llm chạy
+>    20 process.
+> 4. Toàn VM treo 19 phút, rồi kernel OOM giết EngineCore (chandra exit 0).
+> 5. RabbitMQ chạm `consumer_timeout` 30 phút, worker-cpu exit 1. Compose không có `restart:`
+>    nên hệ thống đứng hẳn.
+> 6. Trong lúc đó 4 task parse vẫn "xong" với **166 trang trắng**, vì Chandra nuốt lỗi kết nối
+>    thành lỗi trang.
+>
+> **Thứ tự:** chống treo máy trước, rồi tới các lỗi làm hỏng dữ liệu, cuối cùng là phần FE cần.
+> Mỗi task một commit; không commit khi chưa được review.
+
+### Task 22: Chặn OOM làm treo WSL
+
+**Vì sao.** Theo dmesg lúc OOM: RAM 15 GB và swap 4 GB đều đầy.
+- vLLM chiếm 9,2 GB RAM host (EngineCore 6,7 + API server 2,5). Nguyên nhân là
+  `mm_processor_cache_gb` mặc định 4 GiB và cache này nằm ở cả hai process. Trang OCR nào cũng là
+  ảnh mới nên cache không bao giờ trúng.
+- Celery chiếm 6,3 GB, phần lớn là 20 process của worker-llm (`-c 20`).
+
+**Files:** `docker-compose.yml`, `docs/system-design.md` (mục vận hành).
+
+- chandra: thêm `--mm-processor-cache-gb 0`.
+- `restart: unless-stopped` cho chandra, worker-cpu, worker-llm (và worker-ocr ở Task 27).
+- worker-llm `-c 8`: throughput thật do rate limiter quyết định, không phải số process.
+- Đo RSS của chandra sau khi tắt cache, rồi đặt `mem_limit` ≈ số đo × 1,5. Khi hết RAM, cgroup
+  chỉ giết chandra (rồi restart), thay vì global OOM làm treo cả VM.
+- Ngoài repo, user tự làm phía Windows: tạo `%USERPROFILE%\.wslconfig` với
+  `[wsl2]` / `memory=24GB` / `swap=8GB`, rồi chạy `wsl --shutdown`.
+
+- [ ] **Step 1:** Ghi baseline: RSS từng container lúc idle và lúc OCR 1 file scan.
+- [ ] **Step 2:** Sửa compose, chạy lại cùng file, so RSS của chandra trước/sau.
+- [ ] **Step 3:** `docker kill` chandra giữa chừng; kiểm tra nó tự restart và healthy lại.
+
+Commit message đề xuất: `fix(compose): keep OCR load from exhausting host memory`
+
+### Task 23: Server OCR chết thì S1 phải fail, không được lưu trang trắng
+
+**Vì sao.** `chandra.model.vllm.generate_vllm` bắt **mọi** `Exception` (connection error, HTTP
+500, timeout) thành `GenerationResult(error=True)`. `_ocr()` hiểu đó là lỗi riêng của trang, nên
+giữ text PyMuPDF rỗng với confidence 0. Kết quả lần chạy 06/10, parse vẫn báo "succeeded":
+- nd-168: 103/111 trang trắng
+- nd-151: 42/58
+- nd-236: 17/36
+
+**Files:** `worker/steps/parsing.py`, lớp `OcrUnavailable` mới (không phải `AppException`),
+test của parsing.
+
+**Thiết kế.** Sau mỗi lô, nếu có trang `error` thì probe `/health` (timeout dài, thử vài lần):
+- Probe hỏng: raise `OcrUnavailable` và bỏ cả lô. Không trang nào của lô bị hạ cấp.
+- Probe tốt: đó là lỗi thật của trang, hạ cấp như hiện nay.
+
+- [ ] **Step 1:** Test đỏ: `generate` giả trả toàn `error=True` và health không kết nối được →
+  `OcrUnavailable`, không trả về trang nào.
+- [ ] **Step 2:** Test: một trang lỗi, health vẫn OK → chỉ trang đó confidence 0, các trang khác
+  giữ nguyên.
+- [ ] **Step 3:** Sửa; chạy suite.
+
+Commit message đề xuất: `fix(parse): treat an OCR outage as a stage failure, not blank pages`
+
+### Task 24: Checkpoint giữa chừng cho S1
+
+**Vì sao.** `_ocr()` giữ toàn bộ kết quả trong RAM; `parsed.json` chỉ được ghi khi xong cả file.
+Retry, crash hay redelivery đều OCR lại từ trang 1 (111 trang ≈ 25 phút GPU).
+
+- Sau mỗi lô, ghi `staging/{id}/parsed.partial.json` dạng `{"ocr": {"<page>": markdown | null}}`.
+  `null` nghĩa là trang đã thử và lỗi thật. Lần chạy sau đọc partial và chỉ OCR các trang chưa có.
+- `ARTIFACTS["PARSING"] = ("parsed.json", "parsed.partial.json")`. File raw được định danh bằng
+  sha256 nên partial luôn khớp input; không cần invalidate gì thêm.
+- Partial được để lại cho bucket tự xoá sau 7 ngày, giống enrich/embed.
+
+- [ ] **Step 1:** Test đỏ: lần chạy 1 raise sau lô đầu → lần chạy 2 chỉ gọi OCR cho các trang còn
+  lại.
+- [ ] **Step 2:** Sửa; chạy suite.
+
+Commit message đề xuất: `feat(parse): checkpoint OCR output per batch and resume from it`
+
+### Task 25: "Server bận" không được tính là "server chết"
+
+**Vì sao.** Health check 10 s chỉ chạy **một lần trước khi OCR**. Từ 12:19:49 đến 12:20:06,
+event loop của vLLM nghẽn 17 s khi tiền xử lý ~48 ảnh, sinh ra 3 ReadTimeout. Mỗi lần đốt 1/3
+attempts, mà `MAX_ATTEMPTS` dùng chung cho cả 5 stage, trong khi chandra vẫn sống.
+
+**Files:** `worker/steps/parsing.py`, `worker/pipeline/errors.py`, `worker/stages.py`, tests.
+
+- Bỏ health check trước OCR; Task 23 đã probe đúng lúc cần.
+- Xử lý `OcrUnavailable` như `RateLimited`: `self.retry(countdown=backoff)`, không gọi
+  `stage_failed`, không tăng attempts; parse đổi sang `max_retries=None`. Nhờ Task 24 nên retry
+  không mất phần đã OCR.
+- Trần: nếu OCR không khả dụng liên tục quá `OCR_OUTAGE_MAX_S` (mặc định 1800 s, tính từ lần đầu,
+  lưu ở Redis `ocr:outage:{document_id}`) thì mới tính một lần thất bại bình thường.
+
+- [ ] **Step 1:** Test đỏ: (a) `OcrUnavailable` không tăng attempts; (b) quá trần thì tăng.
+- [ ] **Step 2:** Sửa; chạy suite.
+
+Commit message đề xuất: `fix(parse): defer while the OCR server is busy or restarting`
+
+### Task 26: Chia task parse thành các lát theo thời gian (consumer_timeout)
+
+**Vì sao.** RabbitMQ đặt `consumer_timeout` = 1 800 000 ms và Celery bật `task_acks_late=True`.
+Log 06/10 có `PRECONDITION_FAILED - delivery acknowledgement on channel 1 timed out`, Celery báo
+"Unrecoverable error" và worker-cpu exit 1. Ở tốc độ ~5 trang/phút, 500 trang (`MAX_PAGE_COUNT`)
+mất 100 phút. Muốn nâng timeout cho đủ thì phải lên 3–4 giờ, và khi worker chết thật, message
+phải chờ ngần ấy mới được giao lại. Đã chốt với user: chia lát.
+
+- Parse OCR tối đa `PARSE_SLICE_S` (mặc định 300 s), kiểm tra thời gian giữa các lô. Hết lát thì:
+  ghi partial (Task 24), raise `ParseContinues` → `self.retry(countdown=0)`, không tính attempt.
+  Chain giữ nguyên vì retry mang theo callbacks.
+- Mỗi lần giao message chỉ tốn tối đa một lát cộng một lô (~10 phút), thấp hơn hẳn 30 phút, nên
+  `consumer_timeout` giữ mặc định.
+- Hệ quả có lợi: retry vào cuối queue nên các file xoay vòng, file nhỏ tự xong trước.
+
+- [ ] **Step 1:** Test đỏ (dùng clock giả): lát hết sau lô 1 → task retry, partial có lô 1,
+  attempts vẫn 0.
+- [ ] **Step 2:** Sửa; chạy suite.
+- [ ] **Step 3:** Chạy thật file scan 111 trang trong container: không có `PRECONDITION_FAILED`,
+  log thấy nhiều lát.
+
+Commit message đề xuất: `fix(parse): run long OCR in time slices that stay under the ack timeout`
+
+### Task 27: Queue riêng cho OCR
+
+**Vì sao.** worker-cpu `-c 8`, mỗi task đẩy lô 8 trang, 6 file chạy cùng lúc → vLLM có 8 request
+đang chạy và 38 đang chờ. File 14 trang mất 14 phút; file chỉ có 9 trang cần OCR mất 16 phút.
+
+- Route `worker.stages.parse` sang queue `ocr`, chạy bằng service mới `worker-ocr` `-Q ocr -c 2`.
+  2 file × lô 8 trang ≥ `--max-num-seqs 8`, nên GPU luôn đầy kể cả khi một process đang render.
+  `structure` và `persist` ở lại `cpu`.
+- Giữ `worker_prefetch_multiplier=1`: message chờ nằm ở broker, không bị worker giữ (nên không
+  tính vào consumer timeout).
+
+- [ ] **Step 1:** Test route.
+- [ ] **Step 2:** Chạy 6 file: nd-238 (14 trang) và hai luật có lớp chữ phải xong trước nd-168.
+
+Commit message đề xuất: `feat(worker): give OCR its own queue and concurrency`
+
+### Task 28: Title đúng cho văn bản pháp luật Việt Nam
+
+**Vì sao.** Lần chạy 06/10 ra các title "2026-06-30 (1)" (metadata của máy scan), "CỘNG HÒA XÃ HỘI
+CHỦ NGHĨA VIỆT NAM" (quốc hiệu) và "xAc THUC VAN BAN HOP NHAT".
+
+- Bỏ title metadata trông như ngày hoặc tên file: dạng `^\d{4}-\d{2}-\d{2}`, có đuôi `(n)`, hoặc
+  trùng filename sau khi bỏ đuôi.
+- Bỏ các dòng quốc hiệu, tiêu ngữ, tên cơ quan, số hiệu ở đầu trang 1.
+- Ưu tiên dòng loại văn bản (`LUẬT`, `NGHỊ ĐỊNH`, `THÔNG TƯ`, `QUYẾT ĐỊNH`, `VĂN BẢN HỢP NHẤT`…)
+  ghép với dòng trích yếu ngay sau nó, ví dụ "Nghị định … quy định xử phạt …".
+- Không tìm được thì dùng filename, như hiện nay.
+
+- [ ] **Step 1:** Test với markdown trang 1 thật của 6 văn bản (fixture dạng text, không cần PDF).
+- [ ] **Step 2:** Sửa `extract_title`; chạy suite.
+
+Commit message đề xuất: `fix(parse): pick real titles for Vietnamese legal documents`
+
+### Task 29: `GET /documents/{id}/file-url` cho PDF viewer
+
+- Response `ApiResponse[FileUrl]`, với `FileUrl = {url: str, expires_in: int}`. `expires_in` = 300:
+  FE tải bytes ngay rồi đưa cho pdf.js, không giữ URL.
+- Ký bằng `get_public_store()` trên `raw/{sha256}.pdf`, qua method mới
+  `ObjectStore.presigned_get(key, expires_in, filename)`.
+- **Bắt buộc** đặt `ResponseContentType="application/pdf"` và
+  `ResponseContentDisposition="inline; filename*=UTF-8''" + quote(filename, safe="")`. Lý do:
+  presigned PUT không ký Content-Type nên MinIO lưu nguyên header client gửi. Nếu không ép, một
+  file HTML đội lốt .pdf sẽ chạy được trên origin MinIO.
+- Document không tồn tại thì trả 404 theo envelope chuẩn. Không chặn theo status: FE tự quyết hiện
+  viewer cho file nào.
+
+- [ ] **Step 1:** Test theo kiểu `tests/test_ingestion_api.py`:
+  - 200, URL có `X-Amz-Expires=300`;
+  - tải thật qua URL thì nhận `Content-Type: application/pdf` và `Content-Disposition: inline;
+    filename*=UTF-8''…`, với tên tiếng Việt có dấu được encode đúng;
+  - 404.
+- [ ] **Step 2:** Viết endpoint; chạy suite.
+
+Commit message đề xuất: `feat(api): add a short-lived file URL for the PDF viewer`
+
+### Task 30: Bổ sung field cho `DocumentStatus`
+
+Chỉ thêm field, không phá client cũ: `title`, `page_count`, `size_bytes`, `language`,
+`created_at`, `updated_at`, `completed_at`, và `progress` (Task 31; `null` khi không có).
+
+- [ ] **Step 1:** Test: GET một document và GET list trả đủ field, đúng kiểu.
+- [ ] **Step 2:** Sửa schema; chạy suite.
+
+Commit message đề xuất: `feat(api): expose document metadata in DocumentStatus`
+
+### Task 31: Tiến độ theo trang — Redis giữ tiến độ, Postgres giữ trạng thái
+
+**Quyết định (đã chốt).** Postgres vẫn là nguồn sự thật cho `status`, `stage`, `attempts`,
+`failed_stage`, `last_error`:
+- mỗi document chỉ đổi trạng thái khoảng 10 lần, không nặng;
+- S5 cần ghi chunk và COMPLETED trong cùng một transaction;
+- Redis hiện không có volume cũng không bật AOF, recreate container là mất sạch.
+
+Redis chỉ giữ dữ liệu được ghi dày và nhanh hết hạn:
+- `page_count` được ghi vào DB **ngay đầu S1**, vì PyMuPDF biết số trang ngay khi mở file.
+- Redis hash `progress:{document_id}` = `{stage, done, total, unit: "pages", updated_at}`, ghi sau
+  mỗi lô OCR. TTL 15 phút, gia hạn mỗi lần ghi, nên key cũng đóng vai heartbeat. Xoá key khi stage
+  xong.
+- API phủ tiến độ lên dữ liệu DB: `progress = {stage, done, total, updated_at, stalled}`.
+  `stalled = true` khi status đang chạy mà key đã mất hoặc `updated_at` cũ hơn 2 phút. Không có
+  key và không có gì đang chạy thì `progress = null`.
+- Redis lỗi khi ghi tiến độ không được làm hỏng stage: log warning rồi bỏ qua.
+- Để sau, không làm ở đây: tiến độ theo chunk cho enrich/embed, cùng định dạng này.
+
+- [ ] **Step 1:** Test: S1 ghi progress sau mỗi lô (OCR giả); API trả progress; `stalled` đúng;
+  Redis sập không làm parse fail.
+- [ ] **Step 2:** Sửa; chạy suite; chạy thật một file scan và xem `progress.done` tăng dần.
+
+Commit message đề xuất: `feat(progress): report OCR progress per batch through Redis`
+
+### Task 32 (làm ở phase chat — chốt định dạng ngay): vị trí nguồn của chunk
+
+**Vì sao.** Trích dẫn trong chat cần FE cuộn tới và tô sáng đúng vùng của chunk trong PDF.
+- Chandra (`prompt_type="ocr_layout"`) đã trả block kèm bbox: `BatchOutputItem.chunks[i].bbox`
+  tính theo pixel của ảnh render, và `page_box` là kích thước ảnh đó.
+- Nhưng `_ocr()` chỉ lấy `result.markdown` và bỏ bbox.
+- Trang đọc bằng PyMuPDF cũng có bbox theo block (`get_text("dict")`).
+
+**Định dạng — hợp đồng với FE:**
+
+```json
+"locations": [
+  {"page": 12, "rect": [0.0812, 0.1544, 0.9120, 0.2381]},
+  {"page": 13, "rect": [0.0812, 0.0700, 0.9120, 0.1205]}
+]
+```
+
+- `page`: số trang, đánh từ 1.
+- `rect`: `[x0, y0, x1, y1]`, chuẩn hoá về 0..1 theo kích thước trang **đang hiển thị** (sau
+  `/Rotate`, giống pdf.js), gốc ở góc trên-trái, làm tròn 4 chữ số thập phân.
+- Một chunk có thể có nhiều rect (nhiều block, nhiều trang), xếp theo thứ tự đọc. Các rect liền
+  nhau trong cùng cột có thể gộp lại.
+- Chunk không định vị được thì `[]`; FE lùi về dùng `page_number`.
+
+**Lưu ở đâu.** Cột `child_chunks.locations JSONB NOT NULL DEFAULT '[]'`. Không làm bảng riêng, vì:
+- locations luôn được đọc cùng chunk, mỗi chunk chỉ vài rect;
+- không có truy vấn theo toạ độ;
+- lọc theo trang đã có `page_number`.
+
+Parent không lưu: FE chỉ tô child được trích. Migration là một `add_column` với
+`server_default '[]'::jsonb`: không khoá bảng lâu, row cũ thành `[]` (phải ingest lại mới có vị
+trí).
+
+**Cách làm (khi tới phase chat):**
+- S1: mỗi trang thêm `blocks: [{text, rect}]`.
+  - Chandra: `bbox / page_box`.
+  - PyMuPDF: bbox của block nhân `page.rotation_matrix`, rồi chia cho `page.rect` (đã xoay).
+- S2: ghép block với child theo dòng từ.
+  - Mỗi trang dựng danh sách từ, mỗi từ kèm chỉ số block của nó.
+  - Các child nối tiếp nhau theo thứ tự tài liệu, nên chỉ cần một con trỏ đi tuần tự.
+  - Chỗ lệch (markup heading, chuẩn hoá khoảng trắng) xử lý bằng so khớp mờ trong một cửa sổ nhỏ.
+- S5: ghi `locations`; API/chat trả kèm citation.
+
+- [ ] **Step 1 (phase chat):** Migration + test.
+- [ ] **Step 2:** S1 sinh `blocks`.
+- [ ] **Step 3:** S2 alignment, test với fixture có toạ độ biết trước.
+- [ ] **Step 4:** S5 ghi cột; test round-trip với một PDF xoay 90°.
+
+---
+
 ## Definition of Done — Phase 1
 
 1. `docker compose up -d` cho **8 container healthy**.
@@ -4223,3 +4489,29 @@ Commit message đề xuất: `refactor(worker): add a sync repository layer and 
 9. Similarity smoke test xếp đúng chunk lên đầu.
 10. Toàn bộ suite xanh; `ruff check .` sạch.
 11. **`app/core/` không tồn tại.**
+
+## Definition of Done — Phase 1d
+
+12. Chạy lại cùng lúc 6 văn bản của lần chạy 06/10: không container nào thoát, không có OOM trong
+    `dmesg`, RAM đỉnh của WSL dưới 80%.
+13. Không document nào có `attempts > 0` chỉ vì OCR bận.
+14. `docker kill` chandra giữa chừng: task chờ, rồi chạy tiếp từ partial; không có trang trắng.
+15. Không có `PRECONDITION_FAILED` trong log; file 111 trang chạy qua nhiều lát.
+16. Các file nhỏ (nd-238 và hai luật có lớp chữ) COMPLETED trước nd-168.
+17. Title của 6 văn bản là tên văn bản thật.
+18. `GET /documents/{id}` trả đủ các field mới, `progress.done` tăng dần khi OCR, và URL của
+    `/file-url` mở được trong pdf.js với tên tiếng Việt có dấu.
+19. Định dạng `locations` (Task 32) được ghi vào `docs/system-design.md` để FE dựng sẵn.
+
+## Rủi ro đã biết / việc tồn đọng
+
+- **API chưa có xác thực.** Ai gọi được tới :8000 cũng list, delete và lấy URL tải file được.
+  Chấp nhận ở phase này vì chỉ chạy local. Phải có trước khi mở ra ngoài localhost: tối thiểu API
+  key hoặc session, kèm phân quyền theo chủ sở hữu document.
+- **Presigned PUT không ký Content-Type**, nên MinIO lưu nguyên header client gửi. Task 29 đã chặn
+  ở phía đọc. Khi làm xác thực, nên ký thêm `ContentType="application/pdf"` vào PUT (FE phải gửi
+  đúng header đó).
+- **Redis và RabbitMQ không có volume.** Recreate container là mất các message đang chờ và trạng
+  thái rate limiter / tiến độ. Chấp nhận được vì Postgres và staging là nguồn sự thật. Nhưng mất
+  message thì document kẹt ở trạng thái đang chạy, nên cần một job quét document kẹt; heartbeat
+  của Task 31 chính là tín hiệu cho job đó.

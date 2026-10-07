@@ -4175,6 +4175,294 @@ Suggested commit message: `refactor(worker): add a sync repository layer and spl
 
 ---
 
+## Phase 1d — fixes from the real run of 2026-10-06
+
+> **Context.** Running 6 real legal documents (14–111 pages, 4 of them scans, ~219 pages to OCR)
+> exposed a chain of failures:
+>
+> 1. All 6 files pushed page images into vLLM at once.
+> 2. The 10 s health check timed out and burned attempts.
+> 3. WSL ran out of RAM: vLLM held ~9 GB of host RAM for a multimodal cache that never hits, and
+>    worker-llm ran 20 processes.
+> 4. The whole VM stalled for 19 minutes, then the kernel OOM killer took vLLM's EngineCore
+>    (chandra exit 0).
+> 5. RabbitMQ hit its 30-minute `consumer_timeout`, and worker-cpu exited 1. With no `restart:`
+>    in compose, everything stayed down.
+> 6. Meanwhile 4 parse tasks still "succeeded" with **166 blank pages**, because Chandra turns
+>    connection errors into page errors.
+>
+> **Order:** keep the machine from stalling first, then the bugs that corrupt data, then what the
+> FE needs. One commit per task; nothing is committed before review.
+
+### Task 22: Stop OOM from freezing WSL
+
+**Why.** dmesg at the OOM: 15 GB RAM and 4 GB swap both full.
+- vLLM held 9.2 GB of host RAM (EngineCore 6.7 + API server 2.5). The cause is
+  `mm_processor_cache_gb`, which defaults to 4 GiB and lives in both processes. Every OCR page is
+  a new image, so the cache never hits.
+- Celery held 6.3 GB, mostly worker-llm's 20 processes (`-c 20`).
+
+**Files:** `docker-compose.yml`, `docs/system-design.md` (operations).
+
+- chandra: add `--mm-processor-cache-gb 0`.
+- `restart: unless-stopped` for chandra, worker-cpu, worker-llm (and worker-ocr from Task 27).
+- worker-llm `-c 8`: the rate limiter sets real throughput, not the process count.
+- Measure chandra's RSS with the cache off, then set `mem_limit` to about 1.5× that. Running out
+  of memory then kills only chandra (which restarts) through its cgroup, instead of a global OOM
+  freezing the whole VM.
+- Outside the repo, done by the user on Windows: create `%USERPROFILE%\.wslconfig` with
+  `[wsl2]` / `memory=24GB` / `swap=8GB`, then run `wsl --shutdown`.
+
+- [ ] **Step 1:** Record a baseline: each container's RSS at idle and while OCRing one scan.
+- [ ] **Step 2:** Change compose, rerun the same file, and compare chandra's RSS before/after.
+- [ ] **Step 3:** `docker kill` chandra mid-run; check it restarts and becomes healthy again.
+
+Suggested commit message: `fix(compose): keep OCR load from exhausting host memory`
+
+### Task 23: An OCR outage must fail S1, not save blank pages
+
+**Why.** `chandra.model.vllm.generate_vllm` catches **every** `Exception` (connection error,
+HTTP 500, timeout) as `GenerationResult(error=True)`. `_ocr()` reads that as a page-level
+failure and keeps PyMuPDF's empty text at confidence 0. Result of the 2026-10-06 run, with parse
+still reporting "succeeded":
+- nd-168: 103/111 pages blank
+- nd-151: 42/58
+- nd-236: 17/36
+
+**Files:** `worker/steps/parsing.py`, a new `OcrUnavailable` class (not an `AppException`),
+parsing tests.
+
+**Design.** After each batch, if any page has `error`, probe `/health` (long timeout, a few
+tries):
+- The probe fails: raise `OcrUnavailable` and drop the whole batch. No page of the batch is
+  degraded.
+- The probe succeeds: it is a real page failure, degraded as today.
+
+- [ ] **Step 1:** Failing test: a fake `generate` returns all `error=True` and health cannot
+  connect → `OcrUnavailable`, no pages returned.
+- [ ] **Step 2:** Test: one page fails while health is OK → only that page gets confidence 0; the
+  others are kept.
+- [ ] **Step 3:** Fix; run the suite.
+
+Suggested commit message: `fix(parse): treat an OCR outage as a stage failure, not blank pages`
+
+### Task 24: Mid-run checkpoint for S1
+
+**Why.** `_ocr()` keeps every result in memory, and `parsed.json` is written only once the whole
+file is done. A retry, crash or redelivery OCRs again from page 1 (111 pages ≈ 25 GPU minutes).
+
+- After each batch, write `staging/{id}/parsed.partial.json` as
+  `{"ocr": {"<page>": markdown | null}}`. `null` means the page was tried and genuinely failed. The
+  next run reads the partial and OCRs only the pages it lacks.
+- `ARTIFACTS["PARSING"] = ("parsed.json", "parsed.partial.json")`. The raw file is keyed by its
+  sha256, so a partial always matches its input; nothing else needs invalidating.
+- The partial is left for the bucket's 7-day expiry, as enrich and embed do.
+
+- [ ] **Step 1:** Failing test: run 1 raises after the first batch → run 2 calls OCR only for the
+  remaining pages.
+- [ ] **Step 2:** Fix; run the suite.
+
+Suggested commit message: `feat(parse): checkpoint OCR output per batch and resume from it`
+
+### Task 25: A busy server must not count as a dead one
+
+**Why.** The 10 s health check runs **once, before OCR**. From 12:19:49 to 12:20:06, vLLM's event
+loop stalled for 17 s while preprocessing ~48 images, which produced 3 ReadTimeouts. Each one
+burned 1 of 3 attempts, and `MAX_ATTEMPTS` is shared by all 5 stages, while chandra was alive the
+whole time.
+
+**Files:** `worker/steps/parsing.py`, `worker/pipeline/errors.py`, `worker/stages.py`, tests.
+
+- Drop the pre-OCR health check; Task 23 probes at the point where it matters.
+- Handle `OcrUnavailable` like `RateLimited`: `self.retry(countdown=backoff)`, no `stage_failed`,
+  no attempt counted; parse moves to `max_retries=None`. Task 24 means a retry loses no OCR work.
+- Ceiling: only if OCR stays unavailable for more than `OCR_OUTAGE_MAX_S` (default 1800 s,
+  counted from the first failure and kept in Redis at `ocr:outage:{document_id}`) does it count
+  as an ordinary failure.
+
+- [ ] **Step 1:** Failing tests: (a) `OcrUnavailable` does not count an attempt; (b) past the
+  ceiling, it does.
+- [ ] **Step 2:** Fix; run the suite.
+
+Suggested commit message: `fix(parse): defer while the OCR server is busy or restarting`
+
+### Task 26: Split parse into time slices (consumer_timeout)
+
+**Why.** RabbitMQ sets `consumer_timeout` to 1 800 000 ms, and Celery has `task_acks_late=True`.
+The 2026-10-06 log shows `PRECONDITION_FAILED - delivery acknowledgement on channel 1 timed out`;
+Celery reported "Unrecoverable error" and worker-cpu exited 1. At ~5 pages per minute, 500 pages
+(`MAX_PAGE_COUNT`) take 100 minutes. Raising the timeout far enough would mean 3–4 hours, and when
+a worker really dies, its message would wait that long to be redelivered. Agreed with the user:
+time slices.
+
+- Parse OCRs for at most `PARSE_SLICE_S` (default 300 s), checking the clock between batches.
+  When the slice ends: write the partial (Task 24), raise `ParseContinues` →
+  `self.retry(countdown=0)`, with no attempt counted. The chain survives because a retry carries
+  its callbacks.
+- Each delivery then costs at most one slice plus one batch (~10 minutes), well below 30 minutes,
+  so `consumer_timeout` keeps its default.
+- A useful side effect: retries go to the back of the queue, so files take turns and small files
+  finish first.
+
+- [ ] **Step 1:** Failing test (fake clock): the slice ends after batch 1 → the task retries, the
+  partial holds batch 1, attempts stay 0.
+- [ ] **Step 2:** Fix; run the suite.
+- [ ] **Step 3:** Real run of the 111-page scan in the containers: no `PRECONDITION_FAILED`, and
+  the log shows several slices.
+
+Suggested commit message: `fix(parse): run long OCR in time slices that stay under the ack timeout`
+
+### Task 27: A queue of its own for OCR
+
+**Why.** worker-cpu runs `-c 8`, each task pushes 8-page batches, and with 6 files at once vLLM
+had 8 requests running and 38 waiting. A 14-page file took 14 minutes; a file with only 9 pages
+to OCR took 16.
+
+- Route `worker.stages.parse` to a new `ocr` queue, served by a new `worker-ocr` service with
+  `-Q ocr -c 2`. 2 files × 8-page batches ≥ `--max-num-seqs 8`, so the GPU stays full even while
+  one process is rendering. `structure` and `persist` stay on `cpu`.
+- Keep `worker_prefetch_multiplier=1`: waiting messages stay on the broker rather than being held
+  by a worker, so they do not count against the consumer timeout.
+
+- [ ] **Step 1:** Routing test.
+- [ ] **Step 2:** Run the 6 files: nd-238 (14 pages) and the two text-layer laws must finish
+  before nd-168.
+
+Suggested commit message: `feat(worker): give OCR its own queue and concurrency`
+
+### Task 28: Real titles for Vietnamese legal documents
+
+**Why.** The 2026-10-06 run produced the titles "2026-06-30 (1)" (scanner metadata), "CỘNG HÒA XÃ
+HỘI CHỦ NGHĨA VIỆT NAM" (the national motto) and "xAc THUC VAN BAN HOP NHAT".
+
+- Reject metadata titles that look like a date or a file name: `^\d{4}-\d{2}-\d{2}`, a trailing
+  `(n)`, or the filename minus its extension.
+- Skip the motto, slogan, issuing body and document number lines at the top of page 1.
+- Prefer the document-type line (`LUẬT`, `NGHỊ ĐỊNH`, `THÔNG TƯ`, `QUYẾT ĐỊNH`,
+  `VĂN BẢN HỢP NHẤT`…) joined with the summary line right after it, e.g. "Nghị định … quy định xử
+  phạt …".
+- If none is found, fall back to the filename, as today.
+
+- [ ] **Step 1:** Tests on the real page-1 markdown of the 6 documents (text fixtures, no PDFs
+  needed).
+- [ ] **Step 2:** Fix `extract_title`; run the suite.
+
+Suggested commit message: `fix(parse): pick real titles for Vietnamese legal documents`
+
+### Task 29: `GET /documents/{id}/file-url` for the PDF viewer
+
+- Response `ApiResponse[FileUrl]`, with `FileUrl = {url: str, expires_in: int}`. `expires_in` is
+  300: the FE fetches the bytes immediately and hands them to pdf.js, without keeping the URL.
+- Signed with `get_public_store()` on `raw/{sha256}.pdf`, through a new method
+  `ObjectStore.presigned_get(key, expires_in, filename)`.
+- **Must** set `ResponseContentType="application/pdf"` and
+  `ResponseContentDisposition="inline; filename*=UTF-8''" + quote(filename, safe="")`. Why: the
+  presigned PUT does not sign Content-Type, so MinIO stores whatever header the client sent.
+  Without forcing it, an HTML file posing as a .pdf would run on the MinIO origin.
+- A missing document returns 404 in the standard envelope. No gating on status: the FE decides
+  which files to show in the viewer.
+
+- [ ] **Step 1:** Tests in the style of `tests/test_ingestion_api.py`:
+  - 200, and the URL carries `X-Amz-Expires=300`;
+  - a real fetch through the URL returns `Content-Type: application/pdf` and
+    `Content-Disposition: inline; filename*=UTF-8''…`, with a Vietnamese name correctly encoded;
+  - 404.
+- [ ] **Step 2:** Write the endpoint; run the suite.
+
+Suggested commit message: `feat(api): add a short-lived file URL for the PDF viewer`
+
+### Task 30: More fields on `DocumentStatus`
+
+Additive only, so old clients keep working: `title`, `page_count`, `size_bytes`, `language`,
+`created_at`, `updated_at`, `completed_at`, and `progress` (Task 31; `null` when absent).
+
+- [ ] **Step 1:** Test: GET one document and GET the list both return every field with the right
+  type.
+- [ ] **Step 2:** Change the schema; run the suite.
+
+Suggested commit message: `feat(api): expose document metadata in DocumentStatus`
+
+### Task 31: Page progress — Redis holds progress, Postgres holds state
+
+**Decision (agreed).** Postgres stays the source of truth for `status`, `stage`, `attempts`,
+`failed_stage` and `last_error`:
+- a document changes state only about 10 times, which is cheap;
+- S5 must write the chunks and COMPLETED in one transaction;
+- Redis currently has no volume and no AOF, so recreating the container loses everything.
+
+Redis holds only data that is written often and expires quickly:
+- `page_count` is written to the DB **at the start of S1**, since PyMuPDF knows the page count as
+  soon as it opens the file.
+- A Redis hash `progress:{document_id}` = `{stage, done, total, unit: "pages", updated_at}`,
+  written after each OCR batch. Its TTL is 15 minutes, renewed on every write, so the key doubles
+  as a heartbeat. The key is deleted when the stage finishes.
+- The API overlays progress on the DB data: `progress = {stage, done, total, updated_at,
+  stalled}`. `stalled = true` when the status says running but the key is gone or `updated_at` is
+  older than 2 minutes. With no key and nothing running, `progress = null`.
+- A Redis failure while writing progress must not break the stage: log a warning and move on.
+- Later, not here: chunk-level progress for enrich and embed, in the same format.
+
+- [ ] **Step 1:** Tests: S1 writes progress after each batch (fake OCR); the API returns progress;
+  `stalled` is correct; Redis being down does not fail parse.
+- [ ] **Step 2:** Fix; run the suite; run a real scan and watch `progress.done` rise.
+
+Suggested commit message: `feat(progress): report OCR progress per batch through Redis`
+
+### Task 32 (built in the chat phase — format locked now): where each chunk came from
+
+**Why.** Citations in chat need the FE to scroll to and highlight the chunk's exact region in the
+PDF.
+- Chandra (`prompt_type="ocr_layout"`) already returns blocks with bboxes:
+  `BatchOutputItem.chunks[i].bbox` in pixels of the rendered image, and `page_box` is that image's
+  size.
+- But `_ocr()` keeps only `result.markdown` and drops the bboxes.
+- PyMuPDF pages also carry per-block bboxes (`get_text("dict")`).
+
+**Format — the contract with the FE:**
+
+```json
+"locations": [
+  {"page": 12, "rect": [0.0812, 0.1544, 0.9120, 0.2381]},
+  {"page": 13, "rect": [0.0812, 0.0700, 0.9120, 0.1205]}
+]
+```
+
+- `page`: page number, starting at 1.
+- `rect`: `[x0, y0, x1, y1]`, normalised to 0..1 against the page **as displayed** (after
+  `/Rotate`, as pdf.js shows it), origin at the top-left, rounded to 4 decimal places.
+- A chunk may have several rects (several blocks, several pages), in reading order. Adjacent rects
+  in the same column may be merged.
+- A chunk that cannot be located gets `[]`; the FE falls back to `page_number`.
+
+**Where it lives.** A column `child_chunks.locations JSONB NOT NULL DEFAULT '[]'`. Not a separate
+table, because:
+- locations are always read together with their chunk, and each chunk has only a few rects;
+- nothing queries by coordinates;
+- filtering by page already has `page_number`.
+
+Parents get no locations: the FE highlights only the cited child. The migration is one
+`add_column` with `server_default '[]'::jsonb`: no long table lock, and existing rows become `[]`
+(they need re-ingesting to get locations).
+
+**How (in the chat phase):**
+- S1: each page gains `blocks: [{text, rect}]`.
+  - Chandra: `bbox / page_box`.
+  - PyMuPDF: the block bbox multiplied by `page.rotation_matrix`, then divided by `page.rect`
+    (already rotated).
+- S2: match blocks to children by word stream.
+  - Each page builds a list of words, each word tagged with its block's index.
+  - Children follow one another in document order, so one cursor moving forward is enough.
+  - Drift (heading markup, whitespace normalisation) is handled by fuzzy matching in a small
+    window.
+- S5: write `locations`; the API and chat return them with each citation.
+
+- [ ] **Step 1 (chat phase):** Migration + test.
+- [ ] **Step 2:** S1 emits `blocks`.
+- [ ] **Step 3:** S2 alignment, tested on a fixture with known coordinates.
+- [ ] **Step 4:** S5 writes the column; round-trip test on a PDF rotated 90°.
+
+---
+
 ## Definition of Done — Phase 1
 
 1. `docker compose up -d` brings up **8 healthy containers**.
@@ -4188,3 +4476,31 @@ Suggested commit message: `refactor(worker): add a sync repository layer and spl
 9. The similarity smoke test ranks the expected chunk first.
 10. Full suite green; `ruff check .` clean.
 11. **`app/core/` does not exist.**
+
+## Definition of Done — Phase 1d
+
+12. Rerunning the 6 documents of 2026-10-06 together: no container exits, no OOM in `dmesg`, and
+    WSL's peak RAM stays below 80%.
+13. No document has `attempts > 0` merely because OCR was busy.
+14. `docker kill` chandra mid-run: the task waits, then resumes from its partial; no blank pages.
+15. No `PRECONDITION_FAILED` in the logs; the 111-page file runs in several slices.
+16. The small files (nd-238 and the two text-layer laws) reach COMPLETED before nd-168.
+17. The titles of the 6 documents are their real titles.
+18. `GET /documents/{id}` returns every new field, `progress.done` rises during OCR, and the
+    `/file-url` URL opens in pdf.js with a Vietnamese name intact.
+19. The `locations` format (Task 32) is recorded in `docs/system-design.md`, so the FE can build
+    against it now.
+
+## Known risks / open items
+
+- **The API has no authentication.** Anyone who can reach :8000 can list and delete documents and
+  get file download URLs. Acceptable for this phase, since it runs only locally. It must exist
+  before anything is exposed beyond localhost: at least an API key or a session, plus per-owner
+  authorisation on documents.
+- **The presigned PUT does not sign Content-Type**, so MinIO stores whatever header the client
+  sent. Task 29 already blocks this on the read side. When adding authentication, also sign
+  `ContentType="application/pdf"` into the PUT (the FE must then send that exact header).
+- **Redis and RabbitMQ have no volumes.** Recreating either container loses queued messages and
+  the rate-limiter / progress state. Acceptable, since Postgres and staging are the source of
+  truth. But a lost message leaves a document stuck in a running state, so a job that sweeps stuck
+  documents is needed; Task 31's heartbeat is exactly the signal for it.
