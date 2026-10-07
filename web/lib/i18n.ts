@@ -33,6 +33,11 @@ export const dictionary = {
     stalledHint: 'The worker has not reported progress for a while. It may have stopped.',
     noDocuments: 'No documents yet. Upload one to get started.',
     remove: 'Remove',
+    deleteTitle: 'Delete this document?',
+    deleteBody:
+      'It will be removed from the knowledge base along with its indexed passages. You can upload it again later.',
+    cancel: 'Cancel',
+    confirmDelete: 'Delete',
     emptyTitle: 'Ask anything about your documents',
     emptyBody:
       'Upload files on the left, then ask a question. Answers are grounded in your documents with cited sources.',
@@ -108,6 +113,10 @@ export const dictionary = {
     stalledHint: 'Worker đã lâu không báo tiến độ, có thể đã dừng.',
     noDocuments: 'Chưa có tài liệu. Hãy tải lên để bắt đầu.',
     remove: 'Xóa',
+    deleteTitle: 'Xóa tài liệu này?',
+    deleteBody: 'Tài liệu sẽ bị xóa khỏi kho tri thức cùng các đoạn đã lập chỉ mục. Bạn có thể tải lên lại sau.',
+    cancel: 'Hủy',
+    confirmDelete: 'Xóa',
     emptyTitle: 'Hỏi bất cứ điều gì về tài liệu của bạn',
     emptyBody:
       'Tải tệp lên ở bên trái, sau đó đặt câu hỏi. Câu trả lời dựa trên tài liệu của bạn và có trích dẫn nguồn.',

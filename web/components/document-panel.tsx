@@ -14,6 +14,7 @@ import {
 import { displayName, formatBytes, isStalled, stageProgress } from '@/lib/documents'
 import type { DocumentSummary } from '@/lib/types'
 import type { Dictionary } from '@/lib/i18n'
+import { ConfirmDialog } from './confirm-dialog'
 import { useLocale } from './locale-provider'
 import { useToast } from './toast-provider'
 import { useViewer } from './viewer/viewer-provider'
@@ -137,6 +138,9 @@ export function DocumentPanel() {
   const [uploading, setUploading] = useState<PendingUpload[]>([])
   const { notify } = useToast()
   const [dragging, setDragging] = useState(false)
+  // Deleting is a click away from losing an indexed document, so the trash
+  // button only asks; the dialog's confirm is what deletes.
+  const [pendingDelete, setPendingDelete] = useState<DocumentSummary | null>(null)
 
   async function uploadFiles(files: FileList | File[]) {
     const list = Array.from(files).map((file) => ({ id: crypto.randomUUID(), file }))
@@ -283,7 +287,7 @@ export function DocumentPanel() {
             )}
             <button
               type="button"
-              onClick={() => deleteDocument(doc.id)}
+              onClick={() => setPendingDelete(doc)}
               className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
               aria-label={`${t.remove} ${displayName(doc)}`}
             >
@@ -297,6 +301,25 @@ export function DocumentPanel() {
         <Globe className="size-3.5" aria-hidden="true" />
         {t.comingSoon}
       </div>
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={t.deleteTitle}
+        description={
+          <>
+            <span className="mb-1 block break-words font-medium text-foreground">
+              {pendingDelete && displayName(pendingDelete)}
+            </span>
+            {t.deleteBody}
+          </>
+        }
+        cancelLabel={t.cancel}
+        confirmLabel={t.confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          if (pendingDelete) deleteDocument(pendingDelete.id)
+          setPendingDelete(null)
+        }}
+      />
     </aside>
   )
 }
