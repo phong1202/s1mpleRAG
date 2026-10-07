@@ -4145,7 +4145,7 @@ Nếu đỏ, kiểm theo thứ tự: (1) vector đã chuẩn hoá L2 chưa, (2) 
 - [ ] **Step 4: Chạy trọn Definition of Done**
 
 ```bash
-docker compose up -d --build          # 8 container healthy
+docker compose up -d --build          # 8 container healthy (9 từ Task 27)
 uv run alembic upgrade head
 uv run pytest -q                      # toàn bộ xanh
 uv run ruff check .                   # sạch
@@ -4478,7 +4478,7 @@ trí).
 
 ## Definition of Done — Phase 1
 
-1. `docker compose up -d` cho **8 container healthy**.
+1. `docker compose up -d` cho **8 container healthy** (9 từ Task 27, thêm `worker-ocr`).
 2. `alembic upgrade head` áp sạch lên database rỗng.
 3. Presigned upload → `POST /documents` → 202 kèm `document_id`.
 4. Upload lại cùng file → **409, không publish message thứ hai**.

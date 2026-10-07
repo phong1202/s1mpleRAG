@@ -28,9 +28,12 @@ def reload(document_id):
         return session.get(Document, uuid.UUID(str(document_id)))
 
 
-def test_task_routes_split_cpu_and_llm():
+def test_task_routes_split_ocr_cpu_and_llm():
+    """parse has a queue of its own so its worker's concurrency can be set
+    by the GPU, not the CPU: on 2026-10-06, 8 parses at once queued 46 page
+    requests on a server that runs 8, and no document finished early."""
     routes = celery_app.conf.task_routes
-    assert routes["worker.stages.parse"]["queue"] == "cpu"
+    assert routes["worker.stages.parse"]["queue"] == "ocr"
     assert routes["worker.stages.structure"]["queue"] == "cpu"
     assert routes["worker.stages.enrich"]["queue"] == "llm"
     assert routes["worker.stages.embed"]["queue"] == "llm"

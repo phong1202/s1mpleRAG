@@ -1,8 +1,9 @@
 """S1 -- Parse. PyMuPDF for a fast first pass, Chandra OCR for the hard pages.
 
-The task runs on worker-cpu but the model runs inside the chandra container
+The task runs on worker-ocr but the model runs inside the chandra container
 (vLLM): the worker renders pages and holds HTTP connections, not model
-weights. That is why S1 is safe at concurrency 8.
+weights. Its concurrency is sized to the GPU, not the CPU -- see the
+worker-ocr service in docker-compose.yml.
 """
 
 import logging

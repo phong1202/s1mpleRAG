@@ -11,7 +11,8 @@ app.conf.update(
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,  # don't hoard tasks behind a slow stage
     task_routes={
-        "worker.stages.parse": {"queue": "cpu"},
+        # Its own queue: worker-ocr's concurrency is sized to the GPU.
+        "worker.stages.parse": {"queue": "ocr"},
         "worker.stages.structure": {"queue": "cpu"},
         "worker.stages.enrich": {"queue": "llm"},
         "worker.stages.embed": {"queue": "llm"},

@@ -4108,7 +4108,7 @@ If it fails, check in this order: (1) are the vectors L2-normalized, (2) does `E
 - [ ] **Step 4: Run the full Definition of Done**
 
 ```bash
-docker compose up -d --build          # 8 healthy containers
+docker compose up -d --build          # 8 healthy containers (9 from Task 27)
 uv run alembic upgrade head
 uv run pytest -q                      # all green
 uv run ruff check .                   # clean
@@ -4465,7 +4465,7 @@ Parents get no locations: the FE highlights only the cited child. The migration 
 
 ## Definition of Done — Phase 1
 
-1. `docker compose up -d` brings up **8 healthy containers**.
+1. `docker compose up -d` brings up **8 healthy containers** (9 from Task 27, adding `worker-ocr`).
 2. `alembic upgrade head` applies cleanly to an empty database.
 3. Presigned upload → `POST /documents` → 202 with a `document_id`.
 4. Re-uploading the same file returns **409 and publishes nothing**.

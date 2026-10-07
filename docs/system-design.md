@@ -45,7 +45,7 @@ with a row here, the implementation is wrong.
 | 10 | Rate limiter | **Redis** (only job) | RabbitMQ can't do atomic token buckets |
 | 11 | Result backend | **None** — Postgres is authoritative | `documents.status` is durable and queryable |
 | 12 | Backpressure | Requeue with delay + jitter | Sleeping workers look healthy while idle |
-| 13 | Worker pools | 3 containers | 5-pool split is a `task_routes` change later |
+| 13 | Worker pools | 3 containers: `ocr`, `cpu`, `llm` | `ocr` sized to the GPU, `llm` to the rate limit |
 | 14 | Worker DB | **Sync** SQLAlchemy (`psycopg`) | No event-loop binding; plain `def` tasks |
 | 15 | API DB | **Async** (`asyncpg`) — unchanged | Existing scaffold |
 | 16 | Upload | Presigned PUT to MinIO | Keeps large transfers off the API request path |
@@ -64,19 +64,18 @@ with a row here, the implementation is wrong.
        │              │ rabbitmq     │  broker :5672 / UI :15672
        │              └──────┬───────┘
        ▼                     │ consume
-┌─────────────┐              ├────────────────────┐
-│ minio :9000 │              ▼                    ▼
-│  UI :9001   │      ┌──────────────┐     ┌──────────────┐
-└──────┬──────┘      │ worker-cpu   │     │ worker-llm   │
-       │             │ -Q cpu -c 8  │     │ -Q llm -c 8  │
-       │             │ S2, S5       │     │ S3, S4       │
-       │             └──────┬───────┘     └──────┬───────┘
-       │                    │                    │
-       │                    │  S1 over HTTP      │ token bucket
-       │             ┌──────▼───────┐     ┌──────▼───────┐
-       └────────────▶│ chandra      │     │ redis :6379  │
-                     │ :8100        │     │ rate limiter │
-                     └──────────────┘     └──────────────┘
+┌─────────────┐              ├──────────────────┬──────────────────┐
+│ minio :9000 │              ▼                  ▼                  ▼
+│  UI :9001   │      ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+└──────┬──────┘      │ worker-ocr   │   │ worker-cpu   │   │ worker-llm   │
+       │             │ -Q ocr -c 2  │   │ -Q cpu -c 8  │   │ -Q llm -c 8  │
+       │             │ S1           │   │ S2, S5       │   │ S3, S4       │
+       │             └──────┬───────┘   └──────────────┘   └──────┬───────┘
+       │                    │ pages over HTTP                     │ token bucket
+       │             ┌──────▼───────┐                     ┌──────▼───────┐
+       └────────────▶│ chandra      │                     │ redis :6379  │
+                     │ :8100        │                     │ rate limiter │
+                     └──────────────┘                     └──────────────┘
                                 │
                          ┌──────▼──────────────────┐
                          │ db :5433                │
@@ -84,7 +83,7 @@ with a row here, the implementation is wrong.
                          └─────────────────────────┘
 ```
 
-**Eight containers.** `chandra` is the heavy one: ~10 GB of BF16 weights on the GPU, which it
+**Nine containers.** `chandra` is the heavy one: ~10 GB of BF16 weights on the GPU, which it
 cannot share on a 16 GB card. RabbitMQ (~200MB) comes next. The first start downloads the weights
 and looks exactly like a hang.
 
@@ -101,6 +100,7 @@ both workers have `restart: unless-stopped`. WSL itself is given 24 GB + 8 GB sw
 | Service | Image / build | Ports | Notes |
 |---------|---------------|-------|-------|
 | `api` | build `.` | 8000 | FastAPI, async, existing |
+| `worker-ocr` | build `.` | — | `celery -A worker.celery_app worker -Q ocr -c 2` — S1 only |
 | `worker-cpu` | build `.` | — | `celery -A worker.celery_app worker -Q cpu -c 8` |
 | `worker-llm` | build `.` | — | `celery -A worker.celery_app worker -Q llm -c 8` |
 | `chandra` | `vllm/vllm-openai:v0.17.0` | 8100→8000 | Chandra OCR 2, OpenAI-style API; healthy once weights are loaded |
@@ -269,7 +269,7 @@ neighbors with no error.
 
 Seven original nodes, five stages, grouped by contended resource.
 
-### S1 — Parse · queue `cpu` → HTTP to `chandra`
+### S1 — Parse · queue `ocr` → HTTP to `chandra`
 
 **In:** `document_id`  **Out:** `staging/{doc_id}/parsed.json`
 
@@ -321,8 +321,16 @@ pages runs well past that. A slice plus the one batch it can overrun by stays fa
 page count. Requeued to the back of the queue, documents also take turns: a short one is not stuck
 behind a long one.
 
-The task runs on `worker-cpu` but the *work* happens in the `chandra` container — the worker renders
-pages and holds HTTP connections, not model weights. That's what makes S1 safe to run at concurrency 8.
+The task runs on `worker-ocr` but the *work* happens in the `chandra` container — the worker renders
+pages and holds HTTP connections, not model weights. Its concurrency is set by the GPU, not the CPU:
+each parse keeps one 8-page batch in flight and chandra runs 8 sequences, so **2** parses keep it
+full. On 2026-10-06, 8 parses at once queued 46 page requests: every document crawled, none
+finished early, and vLLM's host RAM grew with the queue.
+
+Routing happens where a task is **published**, not where it is consumed: `api` publishes S1 (the
+first link of the chain), and a retry goes back to the queue it came from. So a change to
+`task_routes` takes effect only once `api` is restarted too — on 2026-10-07 a stale `api` kept
+sending S1 to `cpu`, where it deferred against an `OCR_URL` that worker never needs.
 
 **Chandra server:** vLLM's OpenAI-style API under `/v1`; `GET /health` only after a failed batch. Pages go
 as images rendered by `chandra-ocr`'s own renderer (≥192 DPI, form fields flattened) with Chandra's
@@ -560,7 +568,7 @@ app.conf.update(
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,           # don't hoard tasks on slow stages
     task_routes={
-        "worker.stages.parse":     {"queue": "cpu"},
+        "worker.stages.parse":     {"queue": "ocr"},   # worker-ocr, sized to the GPU
         "worker.stages.structure": {"queue": "cpu"},
         "worker.stages.enrich":    {"queue": "llm"},
         "worker.stages.embed":     {"queue": "llm"},

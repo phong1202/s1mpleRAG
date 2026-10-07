@@ -221,9 +221,6 @@ services:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
       REDIS_URL: redis://redis:6379/0
-      # Only this worker calls Chandra: S1 parse is the only stage that
-      # does, and it is routed to the cpu queue.
-      OCR_URL: http://chandra:8000
       # celery's own process gets /code on sys.path to resolve `-A
       # worker.celery_app`, but its prefork pool forks task-executing child
       # processes that do NOT inherit that -- found because every stage
@@ -238,13 +235,6 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-      # Not service_healthy: that would block worker-cpu -- which also
-      # runs structure/persist, neither touching Chandra -- on the full
-      # model load every time. A parse task that lands before Chandra is
-      # ready fails its /health check and retries with backoff, the same as
-      # any other transient failure.
-      chandra:
-        condition: service_started
     volumes:
       - .:/code
     healthcheck:
@@ -252,6 +242,50 @@ services:
       # only if the worker is up, connected, and its main loop not wedged --
       # a process that merely exists would pass a `pgrep`. $$ stops compose
       # from expanding HOSTNAME itself.
+      test:
+        - CMD-SHELL
+        - celery -A worker.celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+
+  # S1 alone, on a queue of its own, so its concurrency is set by the GPU
+  # rather than the CPU. Each parse keeps one 8-page batch in flight and
+  # chandra runs 8 sequences, so 2 parses keep it full -- one batch running
+  # while the other's pages render -- without queueing more requests than
+  # it can start. On 2026-10-06, 8 parses at once queued 46, every document
+  # crawled, none finished early, and vLLM's host RAM grew with the queue.
+  worker-ocr:
+    build: .
+    command: celery -A worker.celery_app worker -Q ocr -c 2 -l info
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      MINIO_HOST: minio
+      MINIO_PORT: 9000
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      REDIS_URL: redis://redis:6379/0
+      # The only worker that calls Chandra.
+      OCR_URL: http://chandra:8000
+      # Same reason as worker-cpu: prefork children do not inherit /code.
+      PYTHONPATH: /code
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      # Not service_healthy: a parse that lands while Chandra is still
+      # loading finds it down and defers, as for any outage.
+      chandra:
+        condition: service_started
+    volumes:
+      - .:/code
+    healthcheck:
       test:
         - CMD-SHELL
         - celery -A worker.celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10
