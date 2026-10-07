@@ -4,14 +4,14 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { AlertTriangle, X } from 'lucide-react'
 import { useLocale } from './locale-provider'
 
-type Toast = { id: number; message: string }
+// `key` lets a caller keep updating one toast instead of adding another:
+// a batch upload reports each failure reason once, with a growing list.
+type Toast = { id: number; key?: string; message: string }
+type Notify = (message: string, key?: string) => void
 
 const DURATION_MS = 6000
-// Older toasts give way rather than stacking up the screen when a whole
-// batch of uploads fails at once.
-const MAX_VISIBLE = 4
 
-const ToastContext = createContext<((message: string) => void) | null>(null)
+const ToastContext = createContext<Notify | null>(null)
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const { t } = useLocale()
@@ -19,10 +19,17 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const nextId = useRef(0)
 
   // Newest first: the stack grows down from the header, so the latest is
-  // the one nearest the top of the eye line.
-  const notify = useCallback((message: string) => {
-    const id = ++nextId.current
-    setToasts((prev) => [{ id, message }, ...prev].slice(0, MAX_VISIBLE))
+  // the one nearest the top of the eye line. Nothing is ever dropped to
+  // make room -- a toast only leaves when dismissed or timed out -- since a
+  // dropped error is a failure nobody hears about.
+  const notify = useCallback<Notify>((message, key) => {
+    setToasts((prev) => {
+      const existing = key ? prev.find((toast) => toast.key === key) : undefined
+      // Same id when updating, so the element stays put and its timer
+      // restarts on the new message rather than a fresh toast appearing.
+      const toast = { id: existing?.id ?? ++nextId.current, key, message }
+      return [toast, ...prev.filter((t) => t !== existing)]
+    })
   }, [])
 
   const dismiss = useCallback((id: number) => setToasts((prev) => prev.filter((t) => t.id !== id)), [])
@@ -34,7 +41,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         aria-label={t.notifications}
         // Top right, just under the header: where the eye goes, unlike the
         // bottom-left corner, which is easy to miss entirely.
-        className="pointer-events-none fixed inset-x-4 top-16 z-[60] flex flex-col gap-2 md:left-auto md:w-96"
+        className="pointer-events-none fixed inset-x-4 top-16 z-[60] flex max-h-[calc(100dvh-5rem)] flex-col gap-2 overflow-y-auto md:left-auto md:w-96"
       >
         {toasts.map((toast) => (
           <ToastItem key={toast.id} toast={toast} onDismiss={dismiss} />
@@ -48,13 +55,14 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
   const { t } = useLocale()
   const [paused, setPaused] = useState(false)
 
-  // Restarts from the full duration after a pause: someone who stopped to
-  // read it gets the whole time again, not a sliver.
+  // Restarts from the full duration after a pause, and whenever the message
+  // changes: someone who stopped to read it, or a toast that just gained a
+  // line, gets the whole time again, not a sliver.
   useEffect(() => {
     if (paused) return
     const timer = setTimeout(() => onDismiss(toast.id), DURATION_MS)
     return () => clearTimeout(timer)
-  }, [paused, toast.id, onDismiss])
+  }, [paused, toast.id, toast.message, onDismiss])
 
   return (
     <li

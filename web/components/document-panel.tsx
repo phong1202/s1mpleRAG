@@ -25,6 +25,15 @@ function describePhase(upload: PendingUpload, t: Dictionary) {
   return t.phases[upload.phase]
 }
 
+const LISTED_NAMES = 5
+
+function describeFailure(reason: string, names: string[], t: Dictionary) {
+  if (names.length === 1) return `${names[0]}: ${reason}`
+  const listed = names.slice(0, LISTED_NAMES).join(', ')
+  const rest = names.length - LISTED_NAMES
+  return `${reason} (${names.length} ${t.files}): ${listed}${rest > 0 ? `, +${rest}` : ''}`
+}
+
 function errorMessage(error: unknown, t: Dictionary) {
   if (error instanceof BackendError) return (error.key && t.errors[error.key]) || error.message
   return t.errorGeneric
@@ -137,6 +146,11 @@ export function DocumentPanel() {
       ...list.map(({ id, file }) => ({ id, name: file.name, phase: 'hashing' as const })),
     ])
 
+    // One toast per failure reason for the whole drop, listing its files and
+    // updated as more fail -- ten files must not mean ten toasts.
+    const batch = crypto.randomUUID()
+    const failed = new Map<string, string[]>()
+
     await Promise.all(
       list.map(async ({ id, file }) => {
         try {
@@ -144,7 +158,10 @@ export function DocumentPanel() {
             setUploading((prev) => prev.map((u) => (u.id === id ? { ...u, ...phase } : u))),
           )
         } catch (error) {
-          notify(`${file.name}: ${errorMessage(error, t)}`)
+          const reason = errorMessage(error, t)
+          const names = [...(failed.get(reason) ?? []), file.name]
+          failed.set(reason, names)
+          notify(describeFailure(reason, names, t), `${batch}:${reason}`)
         } finally {
           setUploading((prev) => prev.filter((u) => u.id !== id))
         }
