@@ -58,6 +58,8 @@ export const dictionary = {
       document_not_found: 'This document could not be found.',
     } as Record<string, string>,
     language: 'Language',
+    notifications: 'Notifications',
+    dismiss: 'Dismiss notification',
     comingSoon: 'Web search & fetch — coming soon',
     viewer: {
       title: 'Document viewer',
@@ -130,6 +132,8 @@ export const dictionary = {
       document_not_found: 'Không tìm thấy tài liệu này.',
     } as Record<string, string>,
     language: 'Ngôn ngữ',
+    notifications: 'Thông báo',
+    dismiss: 'Đóng thông báo',
     comingSoon: 'Tìm kiếm & đọc web — sắp ra mắt',
     viewer: {
       title: 'Trình xem tài liệu',

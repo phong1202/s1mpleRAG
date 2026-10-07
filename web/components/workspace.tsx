@@ -8,6 +8,7 @@ import { displayName } from '@/lib/documents'
 import { ChatPanel } from './chat-panel'
 import { DocumentPanel } from './document-panel'
 import { useLocale } from './locale-provider'
+import { ToastProvider } from './toast-provider'
 import { useViewer, ViewerProvider } from './viewer/viewer-provider'
 
 // pdf.js needs browser APIs and ships a ~1 MB worker: load it only on the
@@ -49,16 +50,18 @@ function useIsDesktop() {
 
 export function Workspace() {
   return (
-    <ViewerProvider>
-      <main className="flex min-h-0 flex-1 flex-col md:flex-row">
-        <div className="max-h-[45dvh] shrink-0 md:max-h-none md:w-80 lg:w-96">
-          <DocumentPanel />
-        </div>
-        <div className="min-h-0 flex-1">
-          <ChatArea />
-        </div>
-      </main>
-    </ViewerProvider>
+    <ToastProvider>
+      <ViewerProvider>
+        <main className="flex min-h-0 flex-1 flex-col md:flex-row">
+          <div className="max-h-[45dvh] shrink-0 md:max-h-none md:w-80 lg:w-96">
+            <DocumentPanel />
+          </div>
+          <div className="min-h-0 flex-1">
+            <ChatArea />
+          </div>
+        </main>
+      </ViewerProvider>
+    </ToastProvider>
   )
 }
 

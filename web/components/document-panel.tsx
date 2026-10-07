@@ -15,6 +15,7 @@ import { displayName, formatBytes, isStalled, stageProgress } from '@/lib/docume
 import type { DocumentSummary } from '@/lib/types'
 import type { Dictionary } from '@/lib/i18n'
 import { useLocale } from './locale-provider'
+import { useToast } from './toast-provider'
 import { useViewer } from './viewer/viewer-provider'
 
 type PendingUpload = { id: string; name: string } & UploadPhase
@@ -125,13 +126,12 @@ export function DocumentPanel() {
   const viewer = useViewer()
   const inputRef = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState<PendingUpload[]>([])
-  const [errors, setErrors] = useState<string[]>([])
+  const { notify } = useToast()
   const [dragging, setDragging] = useState(false)
 
   async function uploadFiles(files: FileList | File[]) {
     const list = Array.from(files).map((file) => ({ id: crypto.randomUUID(), file }))
     if (list.length === 0) return
-    setErrors([])
     setUploading((prev) => [
       ...prev,
       ...list.map(({ id, file }) => ({ id, name: file.name, phase: 'hashing' as const })),
@@ -144,7 +144,7 @@ export function DocumentPanel() {
             setUploading((prev) => prev.map((u) => (u.id === id ? { ...u, ...phase } : u))),
           )
         } catch (error) {
-          setErrors((prev) => [...prev, `${file.name}: ${errorMessage(error, t)}`])
+          notify(`${file.name}: ${errorMessage(error, t)}`)
         } finally {
           setUploading((prev) => prev.filter((u) => u.id !== id))
         }
@@ -164,7 +164,7 @@ export function DocumentPanel() {
         { optimisticData: without, rollbackOnError: true, revalidate: false },
       )
     } catch (error) {
-      setErrors([errorMessage(error, t)])
+      notify(errorMessage(error, t))
     }
   }
 
@@ -219,14 +219,6 @@ export function DocumentPanel() {
           }}
         />
       </div>
-
-      {errors.length > 0 && (
-        <ul role="alert" className="flex flex-col gap-1 rounded-lg bg-destructive/10 p-3 text-xs text-destructive">
-          {errors.map((error) => (
-            <li key={error}>{error}</li>
-          ))}
-        </ul>
-      )}
 
       <ul className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto" aria-label={t.knowledgeBase}>
         {uploading.map((upload) => (
