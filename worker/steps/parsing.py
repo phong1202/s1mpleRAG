@@ -83,6 +83,12 @@ class OcrUnavailable(Exception):
         self.countdown = countdown
 
 
+class ParseContinues(Exception):
+    """The parse's time slice is over, with pages still to read. Not a
+    failure: everything read so far is checkpointed, and the task requeues
+    itself to go on -- see `deadline` in parse_document."""
+
+
 def _ocr_outage(ocr_url: str) -> OcrUnavailable | None:
     """The outage, or None when /health says the server is up.
 
@@ -236,10 +242,12 @@ def _ocr(
     page_numbers: list[int],
     ocr_url: str,
     on_batch: Callable[[dict[int, str | None]], None] | None = None,
+    deadline: float | None = None,
 ) -> dict[int, str | None]:
     """Chandra's markdown for each page, or None for a page it still failed
     on after its own retries. `on_batch` gets everything read so far after
-    every batch -- the caller's checkpoint.
+    every batch -- the caller's checkpoint. Past `deadline` (a
+    time.monotonic() value), raises ParseContinues between batches.
 
     Raises OcrUnavailable if the OCR server itself is down -- checked after
     any batch with errors, since a server can die mid-document. An outage is
@@ -291,6 +299,10 @@ def _ocr(
             out[number] = None if result.error else result.markdown
         if on_batch:
             on_batch(dict(out))
+        # Checked only after a batch, so every slice reads at least one.
+        more = start + _OCR_BATCH_PAGES < len(page_numbers)
+        if more and deadline is not None and time.monotonic() >= deadline:
+            raise ParseContinues(f"slice over after {len(out)} of {len(page_numbers)} pages")
     return out
 
 
@@ -301,12 +313,18 @@ def parse_document(
     ocr_all_pages: bool = False,
     done: dict[int, str | None] | None = None,
     on_batch: Callable[[dict[int, str | None]], None] | None = None,
+    deadline: float | None = None,
 ) -> dict:
     """`done` is OCR an earlier, interrupted run already paid for -- those
     pages are not sent again, a None among them included: a page the model
     failed on a healthy server fails the same way twice, and a looping one
     costs minutes. `on_batch` gets `done` plus everything read since, after
-    each batch."""
+    each batch.
+
+    `deadline` (a time.monotonic() value) ends the call with ParseContinues
+    once it passes, between batches -- the caller resumes from `on_batch`'s
+    checkpoint. That is what keeps one delivery of a long scan under
+    RabbitMQ's consumer_timeout."""
     data = store.get(object_key)
 
     try:
@@ -346,7 +364,10 @@ def parse_document(
     def checkpoint(read: dict[int, str | None]) -> None:
         on_batch({**done, **read})
 
-    ocr = {**done, **_ocr(data, todo, ocr_url, on_batch=checkpoint if on_batch else None)}
+    ocr = {
+        **done,
+        **_ocr(data, todo, ocr_url, on_batch=checkpoint if on_batch else None, deadline=deadline),
+    }
     for page_number, markdown in ocr.items():
         if markdown is None:
             # Keep PyMuPDF's text, mark confidence 0, and log it -- a

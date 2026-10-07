@@ -188,7 +188,7 @@ def ocr_calls(monkeypatch):
     the page numbers listed in `ocr_calls.fail`."""
     calls = {"pages": [], "fail": set()}
 
-    def fake_ocr(data, page_numbers, ocr_url, on_batch=None):
+    def fake_ocr(data, page_numbers, ocr_url, on_batch=None, deadline=None):
         calls["pages"] = list(page_numbers)
         return {n: None if n in calls["fail"] else f"# Page {n} by OCR" for n in page_numbers}
 
@@ -445,3 +445,37 @@ def test_pages_lost_to_a_restart_inside_one_batch_are_read_again(store, uploaded
 
     assert {(p["source"], p["confidence"]) for p in pages} == {("chandra", 1.0)}
     assert chandra["sent"] == [1, 2, 3, 4, 1, 2, 3, 4]
+
+
+def test_a_parse_past_its_deadline_stops_after_the_batch_in_hand(
+    store, uploaded, chandra, monkeypatch
+):
+    """RabbitMQ takes a message back from a consumer that holds it unacked
+    past consumer_timeout (30 min), and Celery then exits: on 2026-10-06
+    that ended the 111-page decree, and the worker with it. A parse runs in
+    slices well under that: past its deadline it stops between batches --
+    never before finishing one, so every slice makes progress -- with the
+    batch already checkpointed."""
+    from worker.steps.parsing import ParseContinues
+
+    monkeypatch.setattr("worker.steps.parsing._OCR_BATCH_PAGES", 2)
+    key = uploaded("topics.pdf")
+    saved = {}
+
+    with pytest.raises(ParseContinues):
+        parse_document(
+            key, store, "http://ocr", ocr_all_pages=True, on_batch=saved.update, deadline=0
+        )
+
+    assert chandra["sent"] == [1, 2]
+    assert saved == {1: "# Page 1 by OCR", 2: "# Page 2 by OCR"}
+
+
+def test_a_deadline_reached_on_the_last_batch_still_finishes(store, uploaded, chandra):
+    """Nothing is left to continue with, so there is no slice to end."""
+    key = uploaded("topics.pdf")
+
+    result = parse_document(key, store, "http://ocr", ocr_all_pages=True, deadline=0)
+
+    assert chandra["sent"] == [1, 2, 3, 4]
+    assert len(result["pages"]) == 4

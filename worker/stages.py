@@ -11,6 +11,7 @@ module must not rename them. Each stage imports its step inside the body,
 which @stage_task wraps -- see worker/pipeline/errors.py for why.
 """
 
+import time
 import uuid
 
 from celery import chain
@@ -70,6 +71,7 @@ def parse(self, document_id: str) -> str:
         settings.ocr_all_pages,
         done=done,
         on_batch=checkpoint,
+        deadline=time.monotonic() + settings.parse_slice_s,
     )
     store.put_json(key, result)
 

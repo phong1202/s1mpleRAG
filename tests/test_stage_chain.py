@@ -501,7 +501,7 @@ def test_parse_resumes_from_a_saved_ocr_checkpoint(seeded_document, ocr_every_pa
     store.put_json(f"{prefix}/parsed.partial.json", {"ocr": {"1": "# Read before the crash"}})
     sent = []
 
-    def recording_ocr(data, page_numbers, ocr_url, on_batch=None):
+    def recording_ocr(data, page_numbers, ocr_url, on_batch=None, deadline=None):
         sent.extend(page_numbers)
         return {}
 
@@ -522,7 +522,7 @@ def test_parse_saves_each_ocr_batch_before_anything_can_fail(
     from shared.storage import get_store
     from worker import stages
 
-    def ocr_then_die(data, page_numbers, ocr_url, on_batch=None):
+    def ocr_then_die(data, page_numbers, ocr_url, on_batch=None, deadline=None):
         on_batch({1: "# Paid for"})
         raise RuntimeError("worker lost")
 
@@ -561,7 +561,7 @@ def test_an_ocr_outage_is_deferred_without_counting_an_attempt(
 
     calls = {"n": 0}
 
-    def down_once(data, page_numbers, ocr_url, on_batch=None):
+    def down_once(data, page_numbers, ocr_url, on_batch=None, deadline=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise OcrUnavailable("OCR server not answering", countdown=20)
@@ -590,7 +590,7 @@ def test_an_outage_past_the_ceiling_counts_like_any_failure(
     from worker.pipeline.state import MAX_ATTEMPTS
     from worker.steps.parsing import OcrUnavailable
 
-    def always_down(data, page_numbers, ocr_url, on_batch=None):
+    def always_down(data, page_numbers, ocr_url, on_batch=None, deadline=None):
         raise OcrUnavailable("OCR server unreachable (ConnectError)", countdown=60)
 
     monkeypatch.setattr("worker.steps.parsing._ocr", always_down)
@@ -611,7 +611,7 @@ def test_an_outage_with_redis_down_is_counted_not_deferred_forever(
     from worker import stages
     from worker.steps.parsing import OcrUnavailable
 
-    def down(data, page_numbers, ocr_url, on_batch=None):
+    def down(data, page_numbers, ocr_url, on_batch=None, deadline=None):
         raise OcrUnavailable("OCR server unreachable (ConnectError)", countdown=60)
 
     def no_redis(document_id):
@@ -623,3 +623,30 @@ def test_an_outage_with_redis_down_is_counted_not_deferred_forever(
     stages.parse.apply(args=(str(seeded_document.id),))
 
     assert reload(seeded_document.id).status == "DEAD_LETTER"
+
+
+def test_a_parse_slice_that_runs_out_continues_without_costing_an_attempt(
+    seeded_document, ocr_every_page, monkeypatch
+):
+    """The end of a slice is not a failure: the task requeues itself -- to
+    the back of the queue, so documents take turns and a short one is not
+    stuck behind a long one -- and picks up from the checkpoint."""
+    from worker import stages
+    from worker.steps.parsing import ParseContinues
+
+    calls = []
+
+    def one_batch_per_slice(data, page_numbers, ocr_url, on_batch=None, deadline=None):
+        calls.append(list(page_numbers))
+        if len(calls) == 1:
+            on_batch({1: "# Read in the first slice"})
+            raise ParseContinues("slice over")
+        return {}
+
+    monkeypatch.setattr("worker.steps.parsing._ocr", one_batch_per_slice)
+
+    stages.parse.apply(args=(str(seeded_document.id),)).get()
+
+    document = reload(seeded_document.id)
+    assert calls == [[1], []]
+    assert (document.stage, document.attempts) == ("PARSING", 0)

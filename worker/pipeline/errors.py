@@ -19,7 +19,7 @@ from shared.rate_limiter import RateLimited
 from worker.pipeline.outage import outage_seconds
 from worker.pipeline.state import MAX_BACKOFF_S, stage_failed
 from worker.repositories.documents import DocumentGone
-from worker.steps.parsing import OcrUnavailable
+from worker.steps.parsing import OcrUnavailable, ParseContinues
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,10 @@ def _with_failure_policy(self, body, document_id: str, stage: str) -> str:
         # rate limited is not a failure. Nothing is recorded, and this is the
         # one and only retry published for it.
         raise self.retry(exc=exc, countdown=exc.countdown) from exc
+    except ParseContinues as exc:
+        # A slice ending is progress, not a failure: requeued at once, to
+        # the back of the queue, with nothing recorded.
+        raise self.retry(exc=exc, countdown=0) from exc
     except OcrUnavailable as exc:
         # Also before `except Exception`, for the same reason: the server is
         # busy or restarting, which is not this document's failure -- on

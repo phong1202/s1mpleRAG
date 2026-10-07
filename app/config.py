@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     # enough for a restart (~80 s) many times over; short enough that a
     # server that is not coming back dead-letters within the hour.
     ocr_outage_max_s: int = 1800
+    # How long one delivery of S1 OCRs before it checkpoints and requeues
+    # itself. RabbitMQ takes back a message held unacked past its
+    # consumer_timeout (30 min), and Celery exits on that; a slice plus the
+    # one batch it may overrun by stays well under it, whatever the page
+    # count. Requeued to the back, so documents also take turns.
+    parse_slice_s: int = 300
     # False: only the pages PyMuPDF cannot do well go to OCR -- scans, and
     # pages with a detected table or an image. True: every page, for the
     # best output, at the cost of a GPU pass per page. Borderless tables are

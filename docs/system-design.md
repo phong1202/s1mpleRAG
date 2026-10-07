@@ -313,6 +313,14 @@ markdown | null}}`) after every batch, as it lands — not on the way out: what 
 a worker killed or cut off from its broker, and neither runs an except clause. A rerun sends only
 the pages missing from it; a `null` page (failed on a healthy server) is not sent again.
 
+**Time slices.** One delivery of S1 OCRs for at most `PARSE_SLICE_S` (300 s), checking between
+batches; then it checkpoints and requeues itself (`ParseContinues` → `retry(countdown=0)`, no
+attempt counted). RabbitMQ takes back a message held unacked past its `consumer_timeout` (30 min) —
+on 2026-10-06 that ended a 111-page scan and Celery exited with it — and a scan of `MAX_PAGE_COUNT`
+pages runs well past that. A slice plus the one batch it can overrun by stays far under it, at any
+page count. Requeued to the back of the queue, documents also take turns: a short one is not stuck
+behind a long one.
+
 The task runs on `worker-cpu` but the *work* happens in the `chandra` container — the worker renders
 pages and holds HTTP connections, not model weights. That's what makes S1 safe to run at concurrency 8.
 
@@ -657,6 +665,7 @@ EMBED_DIMENSIONS=1536
 OCR_URL=http://chandra:8000
 OCR_ALL_PAGES=false
 OCR_OUTAGE_MAX_S=1800      # S1 defers through an OCR outage this long before it costs attempts
+PARSE_SLICE_S=300          # one S1 delivery OCRs this long, then checkpoints and requeues
 
 # limits
 MAX_FILE_SIZE_MB=50
