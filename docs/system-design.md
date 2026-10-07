@@ -320,21 +320,26 @@ Seven original nodes, five stages, grouped by contended resource.
 5. **Per-page routing:** pages with detected tables/images → Chandra, 8 pages per batch.
    `OCR_ALL_PAGES=true` sends every page — the only way a borderless table, which PyMuPDF does not
    detect, gets read as a table.
-6. **A page Chandra still fails after its own retries** → fall back to PyMuPDF text for that page,
-   `confidence: 0.0`, log it. **Server down** → the batch is dropped and the stage defers:
-   degrading every page of a scan to its empty text layer would read as a blank document.
-   Chandra's library reports a dead server exactly as it reports an unreadable page
-   (`error=True`), so any batch with errors is followed by `GET /health` — three tries; unreachable,
-   silent for 30 s, or 503 (vLLM's answer once its engine is dead) is an outage. A healthy answer is
-   not yet a verdict: a restart can begin and end inside one batch (seen 2026-10-07), so the failed
-   pages are sent once more, and only a second failure on a server still up degrades them.
+6. **A page the server refuses** (a 4xx — e.g. more tokens than the model takes) → fall back to
+   PyMuPDF text for that page, `confidence: 0.0`, log it. **Anything else failing is the server's**
+   — no answer within `_PAGE_TIMEOUT_S` (300 s), no connection, a 5xx (vLLM answers 503 once its
+   engine is dead) — and the batch is dropped and the stage defers: degrading every page of a scan
+   to its empty text layer would read as a blank document. S1 calls vLLM itself, with that timeout,
+   rather than through Chandra's client, which reports all of these exactly as it reports an
+   unreadable page (`error=True`) and waits 600 s per try. Telling them apart after the fact went
+   wrong twice: a probe of `/health` called a server up that had just restarted mid-batch, and on
+   2026-10-07 one wedged by a game sharing the GPU answered `/health` in 0.4 s while a 5-token
+   request hung for minutes. Chandra's renderer, prompt, image sizing, markdown parser and its retry
+   of a looping page are used as they are.
 
    An outage is the server's, not the document's: like a rate limit, it defers without counting an
-   attempt — 20 s when the server is busy (silent), 60 s when it is down (a restart takes ~80 s).
+   attempt — 20 s when the server is busy (no answer in time), 60 s when it is down (a restart
+   takes ~80 s).
    Only once it has lasted `OCR_OUTAGE_MAX_S` (30 min, timed in Redis from the first deferral, reset
    by the first batch that lands) does each further one cost an attempt, so a server that is not
-   coming back still ends in `DEAD_LETTER`. There is no `/health` check before sending pages: on
-   2026-10-06 that preflight was what timed out, against a server too busy to answer.
+   coming back still ends in `DEAD_LETTER`. Nothing asks `/health` at all: on 2026-10-06 a preflight
+   check was what timed out, against a server too busy to answer, and on 2026-10-07 it said up of a
+   server that was not.
 7. Write `parsed.json` and the title. `documents.page_count` is written earlier, the moment the
    PDF opens — on a scan that is up to half an hour sooner, and the FE shows it meanwhile.
 
@@ -348,7 +353,7 @@ motto, the number or the date. Last of all, in the stage, the filename.
 **Checkpoint.** OCR results are saved to `staging/{id}/parsed.partial.json` (`{"ocr": {"<page>":
 markdown | null}}`) after every batch, as it lands — not on the way out: what interrupts a parse is
 a worker killed or cut off from its broker, and neither runs an except clause. A rerun sends only
-the pages missing from it; a `null` page (failed on a healthy server) is not sent again.
+the pages missing from it; a `null` page (refused by the server) is not sent again.
 
 **Time slices.** One delivery of S1 OCRs for at most `PARSE_SLICE_S` (300 s), checking between
 batches; then it checkpoints and requeues itself (`ParseContinues` → `retry(countdown=0)`, no
@@ -369,11 +374,16 @@ first link of the chain), and a retry goes back to the queue it came from. So a 
 `task_routes` takes effect only once `api` is restarted too — on 2026-10-07 a stale `api` kept
 sending S1 to `cpu`, where it deferred against an `OCR_URL` that worker never needs.
 
-**Chandra server:** vLLM's OpenAI-style API under `/v1`; `GET /health` only after a failed batch. Pages go
+**Chandra server:** vLLM's OpenAI-style API under `/v1`, called by S1 directly. Pages go
 as images rendered by `chandra-ocr`'s own renderer (≥192 DPI, form fields flattened) with Chandra's
 `ocr_layout` prompt, and come back as markdown — tables included — parsed by the same library.
 Weights load once at container start, never per request. Concurrency **8** (`--max-num-seqs`).
-Chandra gives no per-page confidence: a page it read is `1.0`, a page it failed is `0.0`.
+Chandra gives no per-page confidence: a page it read is `1.0`, a page it refused is `0.0`.
+
+**The GPU is not shared.** On 2026-10-07 a game running on the same card left vLLM at ~30
+tokens/s, then wedged it; VRAM was 15.9 of 16.3 GB. Stop `chandra` (and `worker-ocr`, so parses
+wait in the queue instead of timing out their outage allowance) while the GPU is needed for
+anything else, and start them again in that order reversed.
 
 Measured on an RTX 5060 Ti 16 GB: 8.6 GiB of weights plus 4.25 GiB of KV cache; **~12 s per scanned
 page with 8 in flight (~5 pages/min)**, a single page alone ~60 s. A digital PDF only pays this for

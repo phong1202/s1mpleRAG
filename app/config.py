@@ -78,9 +78,8 @@ class Settings(BaseSettings):
     # wrong place silently is what splitting the database was guarding against.
     redis_url: str = "redis://redis:6379/0"
 
-    # The vLLM server running Chandra OCR. Root URL, not .../v1: S1 asks
-    # /health on it whenever a batch comes back with errors, and the
-    # OpenAI-style API lives under /v1.
+    # The vLLM server running Chandra OCR. Root URL, not .../v1: S1 calls
+    # its OpenAI-style API under /v1 itself.
     ocr_url: str = "http://chandra:8000"
     # How long S1 waits out an OCR outage -- deferring, not counting attempts
     # -- before each further one costs an attempt like any failure. Long

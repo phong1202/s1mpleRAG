@@ -4474,6 +4474,39 @@ trí).
 - [ ] **Step 3:** S2 alignment, test với fixture có toạ độ biết trước.
 - [ ] **Step 4:** S5 ghi cột; test round-trip với một PDF xoay 90°.
 
+### Task 33: Tự gọi vLLM, timeout mỗi trang — thay probe `/health`
+
+**Vì sao.** Lần test trên UI ngày 07/10: một game chạy trên cùng GPU làm vLLM tụt còn ~30
+token/s rồi treo hẳn (VRAM 15,9/16,3 GB). `/health` vẫn trả 200 trong 0,4 s, nhưng một request
+5 token treo 120 s. Hai lỗ hổng lộ ra:
+- Client của Chandra chờ 600 s và tự retry 2 lần cho mỗi lần thử, nên một lô có thể kẹt hơn 1 giờ.
+  Như vậy vượt cả lát thời gian (Task 26) lẫn `consumer_timeout` 30 phút.
+- Probe `/health` của Task 23/25 sẽ kết luận "server sống", và trang bị lưu trắng. Đây là lỗi
+  166 trang trắng quay lại qua một đường khác.
+
+**Files:** `worker/steps/parsing.py`, `tests/test_parsing.py`, `docs/system-design.md`,
+`app/config.py` (comment).
+
+- S1 tự gọi `/v1/chat/completions` bằng httpx, timeout `_PAGE_TIMEOUT_S` = 300 s mỗi trang. Mức
+  này dư so với trang chậm nhất đo được: khoảng 60 s khi chạy một mình, khoảng 2,5 phút khi chạy
+  cả lô. Vẫn dùng của Chandra: renderer, prompt, `scale_to_fit`, `parse_markdown`, và retry tăng
+  temperature khi output bị lặp.
+- Phân loại lỗi ngay tại chỗ, không cần probe:
+  - timeout → `OcrUnavailable`, server bận (20 s);
+  - không kết nối được hoặc 5xx → `OcrUnavailable`, server chết (60 s);
+  - 4xx → lỗi của riêng trang đó, hạ cấp trang ở confidence 0.
+- Bỏ `_ocr_outage`, `_raise_if_down` và vòng gửi lại của Task 25. Một restart xảy ra giữa lô giờ
+  cho ra connection error, tức là outage.
+- Ghi vào docs: GPU không dùng chung. Khi cần GPU cho việc khác thì dừng `chandra` và `worker-ocr`.
+
+- [ ] **Step 1:** Fixture `chandra` thành fake vLLM qua `httpx.MockTransport`. Test đỏ: timeout,
+  503, connection refused → outage; 400 → hạ cấp; mọi request có timeout = `_PAGE_TIMEOUT_S`;
+  trang bị lặp được đọc lại ở temperature cao hơn.
+- [ ] **Step 2:** Sửa; chạy suite.
+- [ ] **Step 3:** Chạy với chandra thật: `test_ocr_service.py` và một file scan qua container.
+
+Commit message đề xuất: `fix(parse): call vLLM directly with a per-page timeout`
+
 ---
 
 ## Definition of Done — Phase 1

@@ -4461,6 +4461,41 @@ Parents get no locations: the FE highlights only the cited child. The migration 
 - [ ] **Step 3:** S2 alignment, tested on a fixture with known coordinates.
 - [ ] **Step 4:** S5 writes the column; round-trip test on a PDF rotated 90°.
 
+### Task 33: Call vLLM directly, with a per-page timeout — replacing the `/health` probe
+
+**Why.** The UI test of 2026-10-07: a game sharing the GPU slowed vLLM to ~30 tokens/s, then
+wedged it (VRAM 15.9 of 16.3 GB). `/health` still answered 200 in 0.4 s, while a 5-token request
+hung for 120 s. Two holes showed:
+- Chandra's client waits 600 s and retries twice, per attempt, so one batch can be stuck for over
+  an hour. That breaks both the time slice (Task 26) and the 30-minute `consumer_timeout`.
+- The `/health` probe of Tasks 23/25 would call the server up, and the pages would be saved blank.
+  That is the 166-blank-page bug again, by another road.
+
+**Files:** `worker/steps/parsing.py`, `tests/test_parsing.py`, `docs/system-design.md`,
+`app/config.py` (comment).
+
+- S1 calls `/v1/chat/completions` itself with httpx, `_PAGE_TIMEOUT_S` = 300 s per page. That is
+  past the slowest page measured: ~60 s alone, ~2.5 min in a full batch. Kept from Chandra: its
+  renderer, prompt, `scale_to_fit`, `parse_markdown`, and its warmer retry of a page the model loops
+  on.
+- Failures are classified where they happen, with no probe:
+  - a timeout → `OcrUnavailable`, busy (20 s);
+  - no connection or a 5xx → `OcrUnavailable`, down (60 s);
+  - a 4xx → that page's own failure, degraded to confidence 0.
+- Drop `_ocr_outage`, `_raise_if_down` and Task 25's resend round. A restart inside a batch now
+  surfaces as a connection error, which is an outage.
+- Record in the docs: the GPU is not shared. Stop `chandra` and `worker-ocr` while it is needed for
+  anything else.
+
+- [ ] **Step 1:** The `chandra` fixture becomes a fake vLLM over `httpx.MockTransport`. Failing
+  tests: a timeout, a 503, a refused connection → outage; a 400 → degraded; every request carries
+  timeout = `_PAGE_TIMEOUT_S`; a looping page is read again warmer.
+- [ ] **Step 2:** Fix; run the suite.
+- [ ] **Step 3:** Run against the real chandra: `test_ocr_service.py` and one scan through the
+  containers.
+
+Suggested commit message: `fix(parse): call vLLM directly with a per-page timeout`
+
 ---
 
 ## Definition of Done — Phase 1

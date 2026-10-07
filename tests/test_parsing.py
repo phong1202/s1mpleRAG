@@ -232,19 +232,14 @@ def test_a_page_ocr_fails_on_keeps_its_own_text_at_confidence_zero(store, upload
     assert "Doanh thu" in page["markdown"]
 
 
-def test_an_unreachable_ocr_server_fails_the_stage_rather_than_the_pages(
-    store, uploaded, monkeypatch
-):
+def test_an_unreachable_ocr_server_fails_the_stage_rather_than_the_pages(store, uploaded):
     """Degrading every page of a scan to its empty text layer would read as
     a blank document and dead-letter it -- permanently, for an outage. The
     stage has to fail, so it retries once the server is back.
 
-    Through Chandra's real library, not a fake: what is under test is that
-    a refused connection, which the library reports exactly like an
-    unreadable page, still comes out as an outage."""
+    Over a real socket, no fakes: nothing listens on port 1."""
     from worker.steps.parsing import OcrUnavailable
 
-    monkeypatch.setattr("worker.steps.parsing._PROBE_PAUSE_S", 0)
     key = uploaded("scanned.pdf")
 
     with pytest.raises(OcrUnavailable, match="unreachable"):
@@ -253,69 +248,66 @@ def test_an_unreachable_ocr_server_fails_the_stage_rather_than_the_pages(
 
 @pytest.fixture
 def chandra(monkeypatch):
-    """Fakes Chandra's library one level below `ocr_calls`, so _ocr itself
-    runs: pages listed in `fail` come back as Chandra's error=True, and
-    `health` lists what successive GET /health calls answer -- a status
-    code, or an exception to raise. Once the list is empty, /health is 200.
-    `fail_once` pages fail only the first call they are in -- a server
-    that went down and came back inside one batch. `sent` records every page
-    handed to the model.
+    """A fake vLLM behind httpx.MockTransport, so _ocr's own HTTP code runs.
+    Per page: `fail` is refused with a 400 -- the page's own fault; `down`
+    gets a refused connection, `silent` a read timeout, `broken` a 503 --
+    the server's fault; `repeat_once` first comes back looping. `sent`
+    records every page request, `requests` each one's JSON body and read
+    timeout.
 
-    The distinction under test lives in _ocr: Chandra's library turns a
-    dead server, a 500 and a timeout into the very same error=True it uses
-    for a page the model could not read."""
-    from types import SimpleNamespace
+    Chandra's renderer is faked to hand back the 0-based page index as the
+    "image", which travels as the data URL's payload."""
+    import json
 
     import httpx
 
-    state = {"fail": set(), "fail_once": set(), "health": [], "sent": []}
+    state = {
+        "fail": set(),
+        "down": set(),
+        "silent": set(),
+        "broken": set(),
+        "repeat_once": set(),
+        "sent": [],
+        "requests": [],
+    }
 
-    class FakeManager:
-        def __init__(self, method):
-            pass
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        page = int(body["messages"][0]["content"][0]["image_url"]["url"].rsplit(",", 1)[1]) + 1
+        state["sent"].append(page)
+        state["requests"].append((page, body, request.extensions["timeout"]["read"]))
+        if page in state["down"]:
+            raise httpx.ConnectError("connection refused", request=request)
+        if page in state["silent"]:
+            raise httpx.ReadTimeout("timed out", request=request)
+        if page in state["broken"]:
+            return httpx.Response(503)
+        if page in state["fail"]:
+            return httpx.Response(400, json={"error": "prompt too long"})
+        if page in state["repeat_once"]:
+            state["repeat_once"].discard(page)
+            text = "<p>" + "lặp lại " * 400 + "</p>"
+        else:
+            text = f'<div data-label="Section-Header"><h1>Page {page} by OCR</h1></div>'
+        return httpx.Response(200, json={"choices": [{"message": {"content": text}}]})
 
-        def generate(self, items, **kwargs):
-            state["sent"].extend(item.image + 1 for item in items)
-            failing = state["fail"] | state["fail_once"]
-            state["fail_once"] = set()
-            # load_pdf_images is faked to hand back the 0-based page index
-            # as the "image", so each item knows which page it is.
-            return [
-                SimpleNamespace(error=True, markdown="")
-                if item.image + 1 in failing
-                else SimpleNamespace(error=False, markdown=f"# Page {item.image + 1} by OCR")
-                for item in items
-            ]
-
-    def fake_get(url, timeout):
-        outcome = state["health"].pop(0) if state["health"] else 200
-        if isinstance(outcome, Exception):
-            raise outcome
-        return httpx.Response(outcome, request=httpx.Request("GET", url))
-
-    monkeypatch.setattr("chandra.model.InferenceManager", FakeManager)
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "worker.steps.parsing._http_client", lambda: httpx.Client(transport=transport)
+    )
     monkeypatch.setattr("chandra.input.load_pdf_images", lambda data, page_range: list(page_range))
-    monkeypatch.setattr(httpx, "get", fake_get)
-    monkeypatch.setattr("worker.steps.parsing._PROBE_PAUSE_S", 0)
+    monkeypatch.setattr("chandra.model.util.scale_to_fit", lambda image: image)
+    monkeypatch.setattr("chandra.model.vllm.image_to_base64", lambda image: str(image))
     return state
-
-
-def _down(exc_type):
-    import httpx
-
-    return [exc_type("down", request=httpx.Request("GET", "http://ocr/health"))] * 9
 
 
 def test_an_ocr_server_lost_mid_document_fails_the_stage_not_the_pages(store, uploaded, chandra):
     """2026-10-06: vLLM was OOM-killed mid-run, every page after that came
-    back error=True, and 166 pages were saved blank under a parse that
-    "succeeded". The preflight check had passed, long before."""
-    import httpx
-
+    back as Chandra's error=True, and 166 pages were saved blank under a
+    parse that "succeeded"."""
     from worker.steps.parsing import OcrUnavailable
 
-    chandra["fail"] = {1, 2, 3, 4}
-    chandra["health"] = _down(httpx.ConnectError)
+    chandra["down"] = {1, 2, 3, 4}
     key = uploaded("topics.pdf")
 
     with pytest.raises(OcrUnavailable, match="unreachable"):
@@ -323,31 +315,28 @@ def test_an_ocr_server_lost_mid_document_fails_the_stage_not_the_pages(store, up
 
 
 @pytest.mark.parametrize(
-    ("health", "reason"),
-    [
-        ([503, 503, 503], "engine"),  # vLLM's /health once EngineCore is dead
-        ("timeout", "not answering"),  # alive but too busy to answer
-    ],
+    ("trouble", "reason"),
+    [("broken", "HTTP 503"), ("silent", "no answer")],
 )
 def test_a_dead_engine_or_a_silent_server_is_an_outage_too(
-    store, uploaded, chandra, health, reason
+    store, uploaded, chandra, trouble, reason
 ):
-    import httpx
-
+    """503 is vLLM's answer once its engine process is gone. Silence is
+    what 2026-10-07 looked like: a GPU shared with a game, /health still
+    answering 200 in 0.4 s, and a 5-token request hanging for minutes."""
     from worker.steps.parsing import OcrUnavailable
 
-    chandra["fail"] = {2}
-    chandra["health"] = _down(httpx.ReadTimeout) if health == "timeout" else health
+    chandra[trouble] = {2}
     key = uploaded("topics.pdf")
 
     with pytest.raises(OcrUnavailable, match=reason):
         parse_document(key, store, ocr_url="http://ocr", ocr_all_pages=True)
 
 
-def test_a_page_failing_on_a_healthy_server_is_degraded_alone(store, uploaded, chandra):
-    """The other side of the probe: the server answers, so the failure
-    belongs to that page. It keeps its own text at confidence 0, and every
-    other page keeps what OCR read."""
+def test_a_page_the_server_refuses_is_degraded_alone(store, uploaded, chandra):
+    """The server answered, and said no to that page: the failure is the
+    page's. It keeps its own text at confidence 0, and every other page
+    keeps what OCR read."""
     chandra["fail"] = {2}
     key = uploaded("topics.pdf")
 
@@ -361,56 +350,77 @@ def test_a_page_failing_on_a_healthy_server_is_degraded_alone(store, uploaded, c
     ]
 
 
+def test_every_page_request_has_a_bounded_wait(store, uploaded, chandra):
+    """Chandra's own client waits 600 s and retries twice, per attempt: a
+    wedged server could hold one batch for over an hour, past the time
+    slice and RabbitMQ's 30-minute ack timeout alike."""
+    from worker.steps.parsing import _PAGE_TIMEOUT_S
+
+    key = uploaded("topics.pdf")
+
+    parse_document(key, store, ocr_url="http://ocr", ocr_all_pages=True)
+
+    assert {timeout for _, _, timeout in chandra["requests"]} == {_PAGE_TIMEOUT_S}
+
+
+def test_a_looping_page_is_read_again_warmer(store, uploaded, chandra):
+    """Chandra's own remedy for a model stuck repeating itself, kept as it
+    was: ask again with a higher temperature."""
+    chandra["repeat_once"] = {3}
+    key = uploaded("topics.pdf")
+
+    pages = parse_document(key, store, ocr_url="http://ocr", ocr_all_pages=True)["pages"]
+
+    assert pages[2]["markdown"] == "# Page 3 by OCR"
+    temperatures = [body["temperature"] for page, body, _ in chandra["requests"] if page == 3]
+    assert temperatures[0] == 0.0 and temperatures[1] > 0.0
+
+
 def test_an_interrupted_parse_resumes_from_its_checkpoint(store, uploaded, chandra, monkeypatch):
     """OCR results used to live in memory until the whole file was done, so
     any retry -- a crash, a redelivery, an outage -- read the scan again from
     page 1: ~25 GPU minutes for the 111-page decree. Each batch is handed to
     on_batch as it lands, and a rerun given those pages as `done` sends only
     the rest."""
-    import httpx
-
     from worker.steps.parsing import OcrUnavailable
 
     monkeypatch.setattr("worker.steps.parsing._OCR_BATCH_PAGES", 2)
     key = uploaded("topics.pdf")
     saved = {}
 
-    chandra["fail"] = {3}
-    chandra["health"] = _down(httpx.ConnectError)
+    chandra["down"] = {3, 4}
     with pytest.raises(OcrUnavailable):
         parse_document(key, store, "http://ocr", ocr_all_pages=True, on_batch=saved.update)
     assert saved == {1: "# Page 1 by OCR", 2: "# Page 2 by OCR"}
 
-    chandra.update(fail=set(), health=[], sent=[])
+    chandra.update(down=set(), sent=[])
     result = parse_document(key, store, "http://ocr", ocr_all_pages=True, done=dict(saved))
 
-    assert chandra["sent"] == [3, 4]
+    assert sorted(chandra["sent"]) == [3, 4]
     assert [p["markdown"] for p in result["pages"]] == [f"# Page {n} by OCR" for n in range(1, 5)]
 
 
 def test_a_page_already_failed_on_a_healthy_server_is_not_sent_again(store, uploaded, chandra):
-    """None in the checkpoint is a verdict, not a gap: a page the model kept
-    looping on costs minutes each time, and would fail the same way."""
+    """None in the checkpoint is a verdict, not a gap: a page the server
+    refused would be refused the same way twice."""
     key = uploaded("topics.pdf")
 
     pages = parse_document(key, store, "http://ocr", ocr_all_pages=True, done={1: None})["pages"]
 
-    assert chandra["sent"] == [2, 3, 4]
+    assert sorted(chandra["sent"]) == [2, 3, 4]
     assert (pages[0]["source"], pages[0]["confidence"]) == ("pymupdf", 0.0)
 
 
 def test_a_busy_server_is_retried_sooner_than_a_dead_one(store, uploaded, chandra):
-    """Busy is vLLM alive but its event loop stalled on a burst of images --
-    seconds. Down is a container restarting -- ~80 s to reload the model."""
-    import httpx
-
+    """Busy is a server that did not answer in time -- seconds to minutes.
+    Down is a container restarting -- ~80 s to reload the model."""
     from worker.steps.parsing import OcrUnavailable
 
     key = uploaded("topics.pdf")
-    chandra["fail"] = {1}
     countdowns = {}
-    for name, exc_type in (("busy", httpx.ReadTimeout), ("down", httpx.ConnectError)):
-        chandra["health"] = _down(exc_type)
+    for name, trouble in (("busy", "silent"), ("down", "down")):
+        chandra.update(silent=set(), down=set())
+        chandra[trouble] = {1}
         with pytest.raises(OcrUnavailable) as raised:
             parse_document(key, store, "http://ocr", ocr_all_pages=True)
         countdowns[name] = raised.value.countdown
@@ -418,33 +428,18 @@ def test_a_busy_server_is_retried_sooner_than_a_dead_one(store, uploaded, chandr
     assert 0 < countdowns["busy"] < countdowns["down"]
 
 
-def test_no_health_check_runs_before_a_batch_that_succeeds(store, uploaded, chandra):
-    """The preflight /health call was the one that timed out on 2026-10-06:
-    asked of a server too busy to answer, about pages it would have read."""
-    import httpx
-
-    chandra["health"] = _down(httpx.ReadTimeout)
-    key = uploaded("topics.pdf")
-
-    pages = parse_document(key, store, "http://ocr", ocr_all_pages=True)["pages"]
-
-    assert {p["source"] for p in pages} == {"chandra"}
-
-
-def test_pages_lost_to_a_restart_inside_one_batch_are_read_again(store, uploaded, chandra):
+def test_a_restart_inside_one_batch_defers_it_rather_than_degrading_it(store, uploaded, chandra):
     """2026-10-07, chandra killed mid-run: the retry's first batch went out
-    while vLLM was still reloading, every page got a connection error, and
-    by the time /health was asked, 5 s later, it answered 200 -- so 8 pages
-    were kept blank as if the model had failed them. A healthy answer after
-    the fact does not prove the errors were the pages': they are sent once
-    more before that verdict."""
-    chandra["fail_once"] = {1, 2, 3, 4}
+    while vLLM was still reloading and /health answered 200 five seconds
+    later -- under a probe-after-the-fact design, 8 pages were kept blank.
+    A refused connection is the server's, whatever /health says next."""
+    from worker.steps.parsing import OcrUnavailable
+
+    chandra["down"] = {1, 2, 3, 4}
     key = uploaded("topics.pdf")
 
-    pages = parse_document(key, store, "http://ocr", ocr_all_pages=True)["pages"]
-
-    assert {(p["source"], p["confidence"]) for p in pages} == {("chandra", 1.0)}
-    assert chandra["sent"] == [1, 2, 3, 4, 1, 2, 3, 4]
+    with pytest.raises(OcrUnavailable):
+        parse_document(key, store, "http://ocr", ocr_all_pages=True)
 
 
 def test_a_parse_past_its_deadline_stops_after_the_batch_in_hand(
@@ -467,7 +462,7 @@ def test_a_parse_past_its_deadline_stops_after_the_batch_in_hand(
             key, store, "http://ocr", ocr_all_pages=True, on_batch=saved.update, deadline=0
         )
 
-    assert chandra["sent"] == [1, 2]
+    assert sorted(chandra["sent"]) == [1, 2]
     assert saved == {1: "# Page 1 by OCR", 2: "# Page 2 by OCR"}
 
 
@@ -477,7 +472,7 @@ def test_a_deadline_reached_on_the_last_batch_still_finishes(store, uploaded, ch
 
     result = parse_document(key, store, "http://ocr", ocr_all_pages=True, deadline=0)
 
-    assert chandra["sent"] == [1, 2, 3, 4]
+    assert sorted(chandra["sent"]) == [1, 2, 3, 4]
     assert len(result["pages"]) == 4
 
 

@@ -12,6 +12,7 @@ import time
 import unicodedata
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pymupdf
@@ -32,14 +33,14 @@ _HEADING_MARKUP = re.compile(r"^#{1,6}\s+")
 # Pages per OCR request batch: the chandra server's --max-num-seqs, so one
 # batch keeps it full without queueing pages the GPU cannot start yet.
 _OCR_BATCH_PAGES = 8
-# How long and how often to ask /health before calling the server down.
-# vLLM's event loop has been seen to stall 17 s preprocessing a burst of
-# page images, answering nothing, /health included.
-_PROBE_TIMEOUT_S = 30
-_PROBE_ATTEMPTS = 3
-_PROBE_PAUSE_S = 5
-# When to try again: a busy server is a stalled event loop, seconds; a down
-# one is a container restarting, ~80 s to reload the model onto the GPU.
+# How long one page may take. A page measured ~60 s alone and ~2.5 min in
+# a full batch; this is past both, and bounds what a wedged server can hold
+# a worker for -- Chandra's own client waits 600 s, retried twice, per
+# attempt, which could keep one batch past the time slice and RabbitMQ's
+# 30-minute ack timeout alike.
+_PAGE_TIMEOUT_S = 300
+# When to try again: a busy server did not answer in time; a down one is a
+# container restarting, ~80 s to reload the model onto the GPU.
 _BUSY_RETRY_S = 20
 _DOWN_RETRY_S = 60
 # Chandra's own default is 6. Its repetition check reads a page whose text
@@ -118,42 +119,82 @@ class ParseContinues(Exception):
     itself to go on -- see `deadline` in parse_document."""
 
 
-def _ocr_outage(ocr_url: str) -> OcrUnavailable | None:
-    """The outage, or None when /health says the server is up.
+def _http_client() -> httpx.Client:
+    return httpx.Client()
 
-    Asked only after a batch has come back with errors -- never before
-    sending one: on 2026-10-06 a preflight check was what timed out, asked
-    of a server too busy to answer about pages it would have read. And
-    asked at all because Chandra's library returns the same error=True for a
-    page the model could not read as for a refused connection, a 500 or a
-    timeout: this is the only way to tell them apart."""
-    outage = None
-    for attempt in range(_PROBE_ATTEMPTS):
+
+class _ServerTrouble(Exception):
+    def __init__(self, reason: str, busy: bool) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.busy = busy
+
+
+def _read_page(client: httpx.Client, ocr_url: str, image) -> str | None:
+    """One page's markdown, or None when the server refused the page itself
+    (a 4xx -- e.g. more tokens than the model takes). Raises _ServerTrouble
+    when the server did not answer properly: no answer in time, no
+    connection, a 5xx.
+
+    Calls vLLM directly rather than through Chandra's client, which turns
+    every failure -- a refused connection, a 500, a timeout -- into the same
+    error=True it uses for a page, leaving S1 to guess which it was. The
+    guess went wrong twice: on 2026-10-06 a dead server's pages were saved
+    blank, and on 2026-10-07 a wedged one answered /health in 0.4 s while a
+    5-token request hung for minutes. What Chandra contributes is kept as it
+    is: its renderer, prompt, image sizing, markdown parser, and its retry
+    of a page the model loops on."""
+    from chandra.model import util as chandra_util
+    from chandra.model import vllm as chandra_vllm
+    from chandra.output import parse_markdown
+    from chandra.prompts import PROMPT_MAPPING
+    from chandra.settings import settings as chandra_settings
+
+    image_url = (
+        f"data:image/png;base64,{chandra_vllm.image_to_base64(chandra_util.scale_to_fit(image))}"
+    )
+    body = {
+        "model": chandra_settings.VLLM_MODEL_NAME,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": PROMPT_MAPPING["ocr_layout"]},
+                ],
+            }
+        ],
+        "max_tokens": chandra_settings.MAX_OUTPUT_TOKENS,
+        "temperature": 0.0,
+        "top_p": 0.1,
+    }
+    raw = ""
+    for attempt in range(_OCR_MAX_RETRIES + 1):
         if attempt:
-            time.sleep(_PROBE_PAUSE_S)
+            # Chandra's remedy for a model stuck repeating itself.
+            body |= {"temperature": min(0.2 * attempt, 0.8), "top_p": 0.95}
         try:
-            response = httpx.get(f"{ocr_url}/health", timeout=_PROBE_TIMEOUT_S)
-        except httpx.TimeoutException:
-            outage = (f"not answering /health within {_PROBE_TIMEOUT_S}s", _BUSY_RETRY_S)
-            continue
+            response = client.post(
+                f"{ocr_url}/v1/chat/completions", json=body, timeout=_PAGE_TIMEOUT_S
+            )
+        except httpx.TimeoutException as exc:
+            raise _ServerTrouble(
+                f"no answer for a page within {_PAGE_TIMEOUT_S}s", busy=True
+            ) from exc
         except httpx.TransportError as exc:
-            outage = (f"unreachable ({type(exc).__name__})", _DOWN_RETRY_S)
-            continue
-        if response.status_code == 200:
+            raise _ServerTrouble(f"unreachable ({type(exc).__name__})", busy=False) from exc
+        if response.status_code >= 500:
+            # vLLM answers 503 once its engine process is gone.
+            raise _ServerTrouble(f"HTTP {response.status_code}", busy=False)
+        if response.status_code >= 400:
             return None
-        # vLLM answers 503 once its engine process is gone; the API server
-        # itself outlives it, so the port alone proves nothing.
-        outage = (f"engine not serving (/health {response.status_code})", _DOWN_RETRY_S)
-    reason, countdown = outage
-    return OcrUnavailable(f"OCR server {reason} at {ocr_url}", countdown=countdown)
-
-
-def _raise_if_down(ocr_url: str) -> None:
-    """The whole batch goes when the server is down, not just its failed
-    pages: a page that did come back is cheap to read again on the retry."""
-    outage = _ocr_outage(ocr_url)
-    if outage:
-        raise outage
+        raw = response.json()["choices"][0]["message"]["content"] or ""
+        looping = chandra_util.detect_repeat_token(raw) or (
+            len(raw) > 50 and chandra_util.detect_repeat_token(raw, cut_from_end=50)
+        )
+        if not looping:
+            break
+    return parse_markdown(raw, include_images=False)
 
 
 def is_scanned(total_text_chars: int, page_count: int) -> bool:
@@ -346,20 +387,16 @@ def _ocr(
     every batch -- the caller's checkpoint. Past `deadline` (a
     time.monotonic() value), raises ParseContinues between batches.
 
-    Raises OcrUnavailable if the OCR server itself is down -- checked after
-    any batch with errors, since a server can die mid-document. An outage is
-    a stage failure to retry later, not a page to degrade:
-    degraded, every page of a scan falls back to its empty text layer, and
+    Raises OcrUnavailable if the OCR server, not a page, failed: an
+    outage is a stage failure to retry later, not a page to degrade.
+    Degraded, every page of a scan falls back to its empty text layer, and
     the document would be dead-lettered as blank -- permanently, for what
-    was a restart."""
+    was a restart. Only a page the server refused is degraded."""
     if not page_numbers:
         return {}
 
     from chandra.input import load_pdf_images
-    from chandra.model import InferenceManager
-    from chandra.model.schema import BatchInputItem
 
-    manager = InferenceManager(method="vllm")
     out: dict[int, str | None] = {}
     # A batch at a time: a page rendered for the model is ~12 MB, so a
     # 500-page scan rendered all at once would not fit in the worker.
@@ -368,32 +405,24 @@ def _ocr(
         # Chandra's own renderer, so pages reach the model exactly as it was
         # trained to see them: at least 192 DPI, form fields flattened.
         images = load_pdf_images(data, page_range=[n - 1 for n in batch])
-        items = [BatchInputItem(image=image, prompt_type="ocr_layout") for image in images]
-
-        def read(items: list) -> list:
-            return manager.generate(
-                items,
-                vllm_api_base=f"{ocr_url}/v1",
-                include_images=False,
-                max_retries=_OCR_MAX_RETRIES,
+        with _http_client() as client, ThreadPoolExecutor(len(images)) as pool:
+            futures = [pool.submit(_read_page, client, ocr_url, image) for image in images]
+        results, trouble = [], None
+        for future in futures:
+            try:
+                results.append(future.result())
+            except _ServerTrouble as exc:
+                trouble = trouble or exc
+                results.append(None)
+        if trouble:
+            # The whole batch goes, not just its failed pages: a page that
+            # did come back is cheap to read again on the retry.
+            raise OcrUnavailable(
+                f"OCR server {trouble.reason} at {ocr_url}",
+                countdown=_BUSY_RETRY_S if trouble.busy else _DOWN_RETRY_S,
             )
-
-        results = read(items)
-        if any(result.error for result in results):
-            _raise_if_down(ocr_url)
-            # Up now -- but a healthy /health after the fact does not prove
-            # the errors were the pages' own. On 2026-10-07 a batch went out
-            # while vLLM was still reloading, and /health answered 200 five
-            # seconds later: a restart can begin and end inside one batch.
-            # So failed pages go once more, and only a second failure on a
-            # server still up is the page's.
-            failed = [i for i, result in enumerate(results) if result.error]
-            for i, result in zip(failed, read([items[i] for i in failed]), strict=True):
-                results[i] = result
-            if any(result.error for result in results):
-                _raise_if_down(ocr_url)
-        for number, result in zip(batch, results, strict=True):
-            out[number] = None if result.error else result.markdown
+        for number, markdown in zip(batch, results, strict=True):
+            out[number] = markdown
         if on_batch:
             on_batch(dict(out))
         # Checked only after a batch, so every slice reads at least one.
@@ -414,9 +443,8 @@ def parse_document(
     on_start: Callable[[int, int, int], None] | None = None,
 ) -> dict:
     """`done` is OCR an earlier, interrupted run already paid for -- those
-    pages are not sent again, a None among them included: a page the model
-    failed on a healthy server fails the same way twice, and a looping one
-    costs minutes. `on_batch` gets `done` plus everything read since, after
+    pages are not sent again, a None among them included: a page the server
+    refused is refused the same way twice. `on_batch` gets `done` plus everything read since, after
     each batch.
 
     `deadline` (a time.monotonic() value) ends the call with ParseContinues
