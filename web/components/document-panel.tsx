@@ -14,6 +14,7 @@ import {
 import type { DocumentSummary } from '@/lib/types'
 import type { Dictionary } from '@/lib/i18n'
 import { useLocale } from './locale-provider'
+import { useViewer } from './viewer/viewer-provider'
 
 type PendingUpload = { id: string; name: string } & UploadPhase
 
@@ -25,6 +26,20 @@ function describePhase(upload: PendingUpload, t: Dictionary) {
 function errorMessage(error: unknown, t: Dictionary) {
   if (error instanceof BackendError) return (error.key && t.errors[error.key]) || error.message
   return t.errorGeneric
+}
+
+function DocumentLabel({ doc, t }: { doc: DocumentSummary; t: Dictionary }) {
+  return (
+    <>
+      <FileText className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm" title={doc.filename}>
+          {doc.filename}
+        </p>
+        <StatusLine doc={doc} t={t} />
+      </div>
+    </>
+  )
 }
 
 function StatusLine({ doc, t }: { doc: DocumentSummary; t: Dictionary }) {
@@ -60,6 +75,7 @@ function StatusLine({ doc, t }: { doc: DocumentSummary; t: Dictionary }) {
 export function DocumentPanel() {
   const { t } = useLocale()
   const { documents, error: listError, isLoading, mutate } = useDocuments()
+  const viewer = useViewer()
   const inputRef = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState<PendingUpload[]>([])
   const [errors, setErrors] = useState<string[]>([])
@@ -187,14 +203,28 @@ export function DocumentPanel() {
         )}
 
         {documents.map((doc) => (
-          <li key={doc.id} className="group flex items-center gap-3 rounded-lg border bg-background/40 p-3">
-            <FileText className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm" title={doc.filename}>
-                {doc.filename}
-              </p>
-              <StatusLine doc={doc} t={t} />
-            </div>
+          <li
+            key={doc.id}
+            className={cn(
+              'group flex items-center gap-1 rounded-lg border p-1.5 transition-colors',
+              viewer.docId === doc.id ? 'border-primary/60 bg-primary/5' : 'bg-background/40',
+            )}
+          >
+            {doc.status === 'COMPLETED' ? (
+              <button
+                type="button"
+                onClick={() => viewer.open(doc.id)}
+                aria-pressed={viewer.docId === doc.id}
+                aria-label={`${t.viewer.open} ${doc.filename}`}
+                className="flex min-w-0 flex-1 items-center gap-3 rounded-md p-1.5 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              >
+                <DocumentLabel doc={doc} t={t} />
+              </button>
+            ) : (
+              <div className="flex min-w-0 flex-1 items-center gap-3 p-1.5">
+                <DocumentLabel doc={doc} t={t} />
+              </div>
+            )}
             <button
               type="button"
               onClick={() => deleteDocument(doc.id)}

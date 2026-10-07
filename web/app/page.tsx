@@ -1,21 +1,18 @@
+import { connection } from 'next/server'
 import { AppHeader } from '@/components/app-header'
-import { ChatPanel } from '@/components/chat-panel'
-import { DocumentPanel } from '@/components/document-panel'
 import { LocaleProvider } from '@/components/locale-provider'
+import { Workspace } from '@/components/workspace'
 
-export default function Page() {
+export default async function Page() {
+  // Rendered per request: the CSP nonce set in proxy.ts only reaches
+  // Next's scripts during a dynamic render, never a prerendered page.
+  await connection()
+
   return (
     <LocaleProvider>
       <div className="flex h-dvh flex-col">
         <AppHeader />
-        <main className="flex min-h-0 flex-1 flex-col md:flex-row">
-          <div className="max-h-[45dvh] shrink-0 md:max-h-none md:w-80 lg:w-96">
-            <DocumentPanel />
-          </div>
-          <div className="min-h-0 flex-1">
-            <ChatPanel />
-          </div>
-        </main>
+        <Workspace />
       </div>
     </LocaleProvider>
   )
