@@ -265,6 +265,35 @@ neighbors with no error.
 
 ---
 
+### 5.3 Chunk source locations — contract now, built in Phase 2
+
+For citations, the FE scrolls the PDF viewer to a cited chunk and highlights its region. The format
+is fixed now so the FE can build against it; nothing produces it yet.
+
+```json
+"locations": [
+  {"page": 12, "rect": [0.0812, 0.1544, 0.9120, 0.2381]},
+  {"page": 13, "rect": [0.0812, 0.0700, 0.9120, 0.1205]}
+]
+```
+
+- `page` is 1-based. `rect` is `[x0, y0, x1, y1]` as fractions (0..1) of the page **as displayed** —
+  after `/Rotate`, the way pdf.js draws it — origin top-left, rounded to 4 decimals.
+- A chunk may have several rects (several blocks, several pages), in reading order. Adjacent rects
+  in one column may be merged. A chunk that cannot be located gets `[]`; the FE falls back to
+  `page_number`.
+- Stored as `child_chunks.locations JSONB NOT NULL DEFAULT '[]'` — not a table of its own: locations
+  are always read with their chunk, a chunk has a handful, and nothing queries by coordinate
+  (filtering by page already has `page_number`). Parents carry none; the FE highlights the cited
+  child. The migration is one `add_column` with `server_default '[]'::jsonb`; existing rows get `[]`
+  and need re-ingesting to be located.
+- Source of the rects: Chandra's `ocr_layout` already returns blocks with a bbox in rendered-image
+  pixels plus the image size (`page_box`), which S1 currently drops; PyMuPDF has block bboxes in
+  unrotated page space (map through `page.rotation_matrix`, then divide by the rotated `page.rect`).
+  S1 will keep `blocks: [{text, rect}]` per page, and S2 will match blocks to children along the
+  word stream — children follow document order, so one forward cursor, with a small fuzzy window for
+  heading markup and whitespace normalisation.
+
 ## 6. Ingestion pipeline
 
 Seven original nodes, five stages, grouped by contended resource.
