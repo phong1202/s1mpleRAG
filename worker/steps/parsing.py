@@ -7,6 +7,7 @@ weights. That is why S1 is safe at concurrency 8.
 
 import logging
 import re
+import time
 import unicodedata
 from collections import Counter
 
@@ -29,6 +30,12 @@ _HEADING_MARKUP = re.compile(r"^#{1,6}\s+")
 # Pages per OCR request batch: the chandra server's --max-num-seqs, so one
 # batch keeps it full without queueing pages the GPU cannot start yet.
 _OCR_BATCH_PAGES = 8
+# How long and how often to ask /health before calling the server down.
+# vLLM's event loop has been seen to stall 17 s preprocessing a burst of
+# page images, answering nothing, /health included.
+_PROBE_TIMEOUT_S = 30
+_PROBE_ATTEMPTS = 3
+_PROBE_PAUSE_S = 5
 # Chandra's own default is 6. Its repetition check reads a page whose text
 # genuinely repeats -- identical table rows, dot leaders, a form -- as the
 # model looping, and retries; on a 16 GB card each attempt is about a
@@ -56,6 +63,39 @@ _STRUCTURE = [
 # exact string, and trusting it as an author's real title would put a fake
 # one on every such document.
 _REPORTLAB_PLACEHOLDER_TITLE = "(anonymous)"
+
+
+class OcrUnavailable(Exception):
+    """The OCR server, not a page, is what failed. Raised instead of saving
+    the batch's pages degraded: degraded, a scan's pages fall back to an
+    empty text layer, and the document reads as blank."""
+
+
+def _ocr_server_down(ocr_url: str) -> str | None:
+    """Why the server is down, or None when /health says it is up.
+
+    Asked only after a batch has come back with errors, because Chandra's
+    library returns the same error=True for a page the model could not read
+    as for a refused connection, a 500 or a timeout -- the answer here is
+    the only way to tell them apart."""
+    reason = None
+    for attempt in range(_PROBE_ATTEMPTS):
+        if attempt:
+            time.sleep(_PROBE_PAUSE_S)
+        try:
+            response = httpx.get(f"{ocr_url}/health", timeout=_PROBE_TIMEOUT_S)
+        except httpx.TimeoutException:
+            reason = f"not answering /health within {_PROBE_TIMEOUT_S}s"
+            continue
+        except httpx.TransportError as exc:
+            reason = f"unreachable ({type(exc).__name__})"
+            continue
+        if response.status_code == 200:
+            return None
+        # vLLM answers 503 once its engine process is gone; the API server
+        # itself outlives it, so the port alone proves nothing.
+        reason = f"engine not serving (/health {response.status_code})"
+    return reason
 
 
 def is_scanned(total_text_chars: int, page_count: int) -> bool:
@@ -172,10 +212,12 @@ def _ocr(data: bytes, page_numbers: list[int], ocr_url: str) -> dict[int, str | 
     """Chandra's markdown for each page, or None for a page it still failed
     on after its own retries.
 
-    Raises if the OCR server itself is down. An outage is a stage failure to
-    retry later, not a page to degrade: degraded, every page of a scan falls
-    back to its empty text layer, and the document would be dead-lettered
-    as blank -- permanently, for what was a restart."""
+    Raises if the OCR server itself is down -- checked up front, and again
+    after any batch with errors, since a server can die mid-document. An
+    outage is a stage failure to retry later, not a page to degrade:
+    degraded, every page of a scan falls back to its empty text layer, and
+    the document would be dead-lettered as blank -- permanently, for what
+    was a restart."""
     if not page_numbers:
         return {}
 
@@ -200,6 +242,12 @@ def _ocr(data: bytes, page_numbers: list[int], ocr_url: str) -> dict[int, str | 
             include_images=False,
             max_retries=_OCR_MAX_RETRIES,
         )
+        if any(result.error for result in results):
+            reason = _ocr_server_down(ocr_url)
+            if reason:
+                # The whole batch goes, not just its failed pages: a page
+                # that did come back is cheap to read again on the retry.
+                raise OcrUnavailable(f"OCR server {reason} at {ocr_url}")
         for number, result in zip(batch, results, strict=True):
             out[number] = None if result.error else result.markdown
     return out

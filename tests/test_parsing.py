@@ -242,3 +242,107 @@ def test_an_unreachable_ocr_server_fails_the_stage_rather_than_the_pages(store, 
 
     with pytest.raises(httpx.ConnectError):
         parse_document(key, store, ocr_url="http://127.0.0.1:1")
+
+
+@pytest.fixture
+def chandra(monkeypatch):
+    """Fakes Chandra's library one level below `ocr_calls`, so _ocr itself
+    runs: pages listed in `fail` come back as Chandra's error=True, and
+    `health` lists what successive GET /health calls answer -- a status
+    code, or an exception to raise. Once the list is empty, /health is 200.
+
+    The distinction under test lives in _ocr: Chandra's library turns a
+    dead server, a 500 and a timeout into the very same error=True it uses
+    for a page the model could not read."""
+    from types import SimpleNamespace
+
+    import httpx
+
+    state = {"fail": set(), "health": []}
+
+    class FakeManager:
+        def __init__(self, method):
+            pass
+
+        def generate(self, items, **kwargs):
+            # load_pdf_images is faked to hand back the 0-based page index
+            # as the "image", so each item knows which page it is.
+            return [
+                SimpleNamespace(error=True, markdown="")
+                if item.image + 1 in state["fail"]
+                else SimpleNamespace(error=False, markdown=f"# Page {item.image + 1} by OCR")
+                for item in items
+            ]
+
+    def fake_get(url, timeout):
+        outcome = state["health"].pop(0) if state["health"] else 200
+        if isinstance(outcome, Exception):
+            raise outcome
+        return httpx.Response(outcome, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("chandra.model.InferenceManager", FakeManager)
+    monkeypatch.setattr("chandra.input.load_pdf_images", lambda data, page_range: list(page_range))
+    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr("worker.steps.parsing._PROBE_PAUSE_S", 0)
+    return state
+
+
+def _down(exc_type):
+    import httpx
+
+    return [200] + [exc_type("down", request=httpx.Request("GET", "http://ocr/health"))] * 9
+
+
+def test_an_ocr_server_lost_mid_document_fails_the_stage_not_the_pages(store, uploaded, chandra):
+    """2026-10-06: vLLM was OOM-killed mid-run, every page after that came
+    back error=True, and 166 pages were saved blank under a parse that
+    "succeeded". The preflight check had passed, long before."""
+    import httpx
+
+    from worker.steps.parsing import OcrUnavailable
+
+    chandra["fail"] = {1, 2, 3, 4}
+    chandra["health"] = _down(httpx.ConnectError)
+    key = uploaded("topics.pdf")
+
+    with pytest.raises(OcrUnavailable, match="unreachable"):
+        parse_document(key, store, ocr_url="http://ocr", ocr_all_pages=True)
+
+
+@pytest.mark.parametrize(
+    ("health", "reason"),
+    [
+        ([200, 503, 503, 503], "engine"),  # vLLM's /health once EngineCore is dead
+        ("timeout", "not answering"),  # alive but too busy to answer
+    ],
+)
+def test_a_dead_engine_or_a_silent_server_is_an_outage_too(
+    store, uploaded, chandra, health, reason
+):
+    import httpx
+
+    from worker.steps.parsing import OcrUnavailable
+
+    chandra["fail"] = {2}
+    chandra["health"] = _down(httpx.ReadTimeout) if health == "timeout" else health
+    key = uploaded("topics.pdf")
+
+    with pytest.raises(OcrUnavailable, match=reason):
+        parse_document(key, store, ocr_url="http://ocr", ocr_all_pages=True)
+
+
+def test_a_page_failing_on_a_healthy_server_is_degraded_alone(store, uploaded, chandra):
+    """The other side of the probe: the server answers, so the failure
+    belongs to that page. It keeps its own text at confidence 0, and every
+    other page keeps what OCR read."""
+    chandra["fail"] = {2}
+    key = uploaded("topics.pdf")
+
+    pages = parse_document(key, store, ocr_url="http://ocr", ocr_all_pages=True)["pages"]
+
+    assert [(p["source"], p["confidence"]) for p in pages] == [
+        ("chandra", 1.0),
+        ("pymupdf", 0.0),
+        ("chandra", 1.0),
+        ("chandra", 1.0),
+    ]

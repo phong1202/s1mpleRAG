@@ -292,8 +292,11 @@ Seven original nodes, five stages, grouped by contended resource.
    `OCR_ALL_PAGES=true` sends every page — the only way a borderless table, which PyMuPDF does not
    detect, gets read as a table.
 6. **A page Chandra still fails after its own retries** → fall back to PyMuPDF text for that page,
-   `confidence: 0.0`, log it. **Server unreachable** → the stage fails and retries: degrading every
-   page of a scan to its empty text layer would read as a blank document.
+   `confidence: 0.0`, log it. **Server down** → the stage fails and retries: degrading every
+   page of a scan to its empty text layer would read as a blank document. Chandra's library reports
+   a dead server exactly as it reports an unreadable page (`error=True`), so any batch with errors
+   is followed by `GET /health`: unreachable, silent for 30 s, or 503 (vLLM's answer once its
+   engine is dead) — three tries — and the batch is dropped as an outage, not degraded.
 7. Write `parsed.json`, update `documents.page_count`.
 
 The task runs on `worker-cpu` but the *work* happens in the `chandra` container — the worker renders
