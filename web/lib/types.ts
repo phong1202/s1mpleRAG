@@ -12,10 +12,14 @@ export type DocumentStatus =
   | 'RETRYING'
   | 'DEAD_LETTER'
 
+export type ProgressUnit = 'pages' | 'chunks'
+
 // Progress of the running stage, overlaid by the API from Redis (backend
 // plan, phase 1d task 31). `stalled` means no report for a while.
 export type DocumentProgress = {
   stage: string
+  // What done/total count. Not sent by the API yet; see lib/documents.ts.
+  unit?: ProgressUnit
   done: number | null
   total: number | null
   updated_at: string | null

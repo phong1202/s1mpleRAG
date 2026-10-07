@@ -98,7 +98,9 @@ function StatusLine({ doc, t }: { doc: DocumentSummary; t: Dictionary }) {
     <p className="flex items-center gap-1 text-xs text-muted-foreground">
       <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />
       <span className="truncate">
-        {progress ? `${trimEllipsis(label)} · ${progress.done}/${progress.total} ${t.pages}` : label}
+        {progress
+          ? `${trimEllipsis(label)} · ${progress.done}/${progress.total}${progress.unit ? ` ${t[progress.unit]}` : ''}`
+          : label}
         {doc.attempts > 1 && ` · ${t.attempt} ${doc.attempts}`}
       </span>
     </p>
