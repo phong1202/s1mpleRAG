@@ -7,6 +7,7 @@ from app.schemas.ingestion import (
     DocumentAccepted,
     DocumentRegister,
     DocumentStatus,
+    FileUrl,
     UploadTarget,
     UploadUrlRequest,
 )
@@ -57,6 +58,14 @@ async def get_status(
 ) -> ApiResponse[DocumentStatus]:
     document = await service.get(document_id)
     return ApiResponse.ok(DocumentStatus.model_validate(document))
+
+
+@router.get("/{document_id}/file-url", response_model=ApiResponse[FileUrl], responses=_NOT_FOUND)
+async def get_file_url(
+    document_id: DocumentId,
+    service: IngestionService = Depends(get_ingestion_service),
+) -> ApiResponse[FileUrl]:
+    return ApiResponse.ok(await service.file_url(document_id))
 
 
 @router.get("", response_model=ApiResponse[PaginatedData[DocumentStatus]])

@@ -26,6 +26,11 @@ class DocumentRegister(BaseModel):
     size_bytes: int = Field(gt=0)
 
 
+class FileUrl(BaseModel):
+    url: str
+    expires_in: int
+
+
 class DocumentAccepted(BaseModel):
     document_id: str
     status: str

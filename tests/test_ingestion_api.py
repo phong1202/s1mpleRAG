@@ -188,3 +188,68 @@ async def test_a_duplicate_registration_launches_nothing_more(client, uploaded_p
     await client.post("/documents", json=uploaded_pdf)
 
     assert len(launched) == 1
+
+
+_VIETNAMESE_NAME = "Nghị định 168 – xử phạt giao thông.pdf"
+
+
+async def test_file_url_is_a_short_lived_link_to_the_raw_pdf(client, uploaded_pdf):
+    """For the FE's PDF viewer, which fetches the bytes at once and hands
+    them to pdf.js -- so the link need not outlive a few minutes. Inline,
+    with the original name, Vietnamese diacritics and all."""
+    from urllib.parse import parse_qs, quote, urlsplit
+
+    created = await client.post("/documents", json={**uploaded_pdf, "filename": _VIETNAMESE_NAME})
+    document_id = created.json()["data"]["document_id"]
+
+    response = await client.get(f"/documents/{document_id}/file-url")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["expires_in"] == 300
+    assert parse_qs(urlsplit(data["url"]).query)["X-Amz-Expires"] == ["300"]
+
+    fetched = httpx.get(data["url"])
+    assert fetched.status_code == 200
+    assert hashlib.sha256(fetched.content).hexdigest() == uploaded_pdf["sha256"]
+    assert fetched.headers["content-type"] == "application/pdf"
+    assert fetched.headers["content-disposition"] == (
+        "inline; filename*=UTF-8''" + quote(_VIETNAMESE_NAME, safe="")
+    )
+
+
+async def test_file_url_serves_a_pdf_whatever_type_the_upload_claimed(client):
+    """The presigned PUT does not sign Content-Type, so MinIO keeps whatever
+    the uploader sent. Served as that, an HTML file named .pdf would run as
+    a page on the MinIO origin; the GET overrides it."""
+    html = b"<html><script>alert(document.domain)</script></html>"
+    digest = hashlib.sha256(html).hexdigest()
+    store = get_public_store()
+    key = f"raw/{digest}.pdf"
+    store._client.put_object(Bucket="raw", Key=f"{digest}.pdf", Body=html, ContentType="text/html")
+    try:
+        created = await client.post(
+            "/documents",
+            json={
+                "object_key": key,
+                "filename": "x.pdf",
+                "sha256": digest,
+                "size_bytes": len(html),
+            },
+        )
+        document_id = created.json()["data"]["document_id"]
+
+        url = (await client.get(f"/documents/{document_id}/file-url")).json()["data"]["url"]
+        fetched = httpx.get(url)
+
+        assert fetched.headers["content-type"] == "application/pdf"
+        assert fetched.headers["content-disposition"].startswith("inline;")
+    finally:
+        store.delete(key)
+
+
+async def test_file_url_of_an_unknown_document_is_404(client):
+    response = await client.get(f"/documents/{uuid.uuid4()}/file-url")
+
+    assert response.status_code == 404
+    assert response.json()["data"] is None

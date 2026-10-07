@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 from functools import lru_cache
+from urllib.parse import quote
 
 import boto3
 from botocore.config import Config
@@ -121,6 +122,27 @@ class ObjectStore:
         return self._client.generate_presigned_url(
             "put_object",
             Params=params,
+            ExpiresIn=expires_in,
+        )
+
+    def presigned_get(self, key: str, expires_in: int, filename: str) -> str:
+        """Sign a GET that always serves a PDF, inline, under `filename`.
+
+        The type is forced, not whatever the object carries: the presigned
+        PUT does not bind Content-Type, so MinIO keeps what the uploader
+        sent -- and an HTML file served as such would run as a page on the
+        storage origin. filename* (RFC 6266/5987), percent-encoded UTF-8,
+        because Vietnamese names do not fit the plain `filename=` form."""
+        bucket, name = self._split(key)
+        disposition = f"inline; filename*=UTF-8''{quote(filename, safe='')}"
+        return self._client.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": bucket,
+                "Key": name,
+                "ResponseContentType": "application/pdf",
+                "ResponseContentDisposition": disposition,
+            },
             ExpiresIn=expires_in,
         )
 

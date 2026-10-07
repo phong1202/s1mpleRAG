@@ -500,6 +500,14 @@ GET  /documents/{id}/status
 
 GET  /documents            list + filter by status
 DELETE /documents/{id}     cascades to chunks; leaves raw/ intact
+
+GET  /documents/{id}/file-url
+  → { data: { url, expires_in: 300 } }
+  → 404 if there is no such document. Not gated on status.
+  Presigned MinIO GET of raw/{sha256}.pdf for the FE's PDF viewer, which fetches the bytes at
+  once. Always served as application/pdf, inline, filename*=UTF-8''<percent-encoded name>: the
+  presigned PUT does not bind Content-Type, so the object keeps whatever the uploader sent, and
+  served as text/html it would run as a page on the storage origin.
 ```
 
 **Why the client sends the hash:** the API re-verifies it against the stored object before

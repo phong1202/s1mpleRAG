@@ -7,8 +7,10 @@ from app.config import get_settings
 from app.exceptions import AppException, ErrorCode
 from app.models.document import Document
 from app.repositories.document_repository import DocumentRepository, get_document_repository
-from app.schemas.ingestion import DocumentRegister, UploadTarget
+from app.schemas.ingestion import DocumentRegister, FileUrl, UploadTarget
 from shared.storage import ObjectStore, get_public_store, get_store
+
+_FILE_URL_EXPIRES_S = 300
 
 
 class IngestionService:
@@ -92,6 +94,17 @@ class IngestionService:
 
     async def list(self, limit: int, offset: int, status: str | None) -> tuple[list[Document], int]:
         return await self.repository.list(limit=limit, offset=offset, status=status)
+
+    async def file_url(self, document_id: uuid.UUID) -> FileUrl:
+        """Short-lived on purpose: the viewer fetches the bytes at once and
+        never keeps the link, so a leaked one is worth five minutes. No
+        check on status -- the file is there from upload on, and the FE
+        decides what to show."""
+        document = await self.get(document_id)
+        url = get_public_store().presigned_get(
+            document.object_key, expires_in=_FILE_URL_EXPIRES_S, filename=document.filename
+        )
+        return FileUrl(url=url, expires_in=_FILE_URL_EXPIRES_S)
 
     async def delete(self, document_id: uuid.UUID) -> None:
         """Cascades down to the chunks via ON DELETE CASCADE; raw/ is left
