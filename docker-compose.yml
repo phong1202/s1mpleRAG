@@ -118,6 +118,21 @@ services:
       - --no-enforce-eager
       - --mm-processor-kwargs
       - '{"min_pixels": 3136, "max_pixels": 6291456}'
+      # Host RAM, not VRAM. The default 4 GiB cache of preprocessed images
+      # lives in BOTH the API server and the engine process, and every OCR
+      # page is a new image: it hit only on Chandra's own retries (~12%),
+      # while holding up to 4 GiB in each -- EngineCore alone reached 6.7 GB
+      # in the run that tipped WSL into a global OOM on 2026-10-06.
+      - --mm-processor-cache-gb
+      - "0"
+    # Without it, one crash is an outage until someone notices: on
+    # 2026-10-06 nothing came back after the OOM.
+    restart: unless-stopped
+    # Measured on host RAM: ~4.8 GB idle, ~7.3 GB with 32 pages queued (the
+    # peak follows the queue, not the cache). Past this, the kernel kills
+    # this container alone and it restarts -- instead of a global OOM that
+    # stalls every process in WSL, as on 2026-10-06.
+    mem_limit: 10g
     ports:
       - "8100:8000"
     volumes:
@@ -192,6 +207,10 @@ services:
   worker-cpu:
     build: .
     command: celery -A worker.celery_app worker -Q cpu -c 8 -l info
+    # Celery exits on a broker error it calls unrecoverable -- a consumer
+    # timeout, for one -- and on 2026-10-06 that left the queue with no
+    # consumer at all until someone noticed.
+    restart: unless-stopped
     env_file:
       - .env
     environment:
@@ -243,7 +262,11 @@ services:
 
   worker-llm:
     build: .
-    command: celery -A worker.celery_app worker -Q llm -c 20 -l info
+    # 8, not 20: the rate limiter, not the process count, sets how fast
+    # enrich and embed go, and each prefork child costs ~100-200 MB of host
+    # RAM whether it is busy or not.
+    command: celery -A worker.celery_app worker -Q llm -c 8 -l info
+    restart: unless-stopped
     env_file:
       - .env
     environment:

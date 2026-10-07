@@ -68,7 +68,7 @@ with a row here, the implementation is wrong.
 │ minio :9000 │              ▼                    ▼
 │  UI :9001   │      ┌──────────────┐     ┌──────────────┐
 └──────┬──────┘      │ worker-cpu   │     │ worker-llm   │
-       │             │ -Q cpu -c 8  │     │ -Q llm -c 20 │
+       │             │ -Q cpu -c 8  │     │ -Q llm -c 8  │
        │             │ S2, S5       │     │ S3, S4       │
        │             └──────┬───────┘     └──────┬───────┘
        │                    │                    │
@@ -88,11 +88,21 @@ with a row here, the implementation is wrong.
 cannot share on a 16 GB card. RabbitMQ (~200MB) comes next. The first start downloads the weights
 and looks exactly like a hang.
 
+**Host RAM is the budget that actually ran out, not VRAM.** On 2026-10-06 six documents at once
+pushed WSL (then 16 GB + 4 GB swap) into a global OOM: the whole VM stalled for ~19 minutes, the
+kernel killed vLLM's engine, and nothing restarted. What `chandra` costs in host RAM, measured:
+~4.8 GB idle, ~7.3 GB with 32 pages queued — the peak follows how many requests are queued, not
+the page count. vLLM's default preprocessed-image cache (4 GiB in each of its two processes) is
+off: every OCR page is a new image, so it only ever hit on retries, while it never gave memory
+back. `chandra` runs under `mem_limit: 10g`, so running out kills that container alone; it and
+both workers have `restart: unless-stopped`. WSL itself is given 24 GB + 8 GB swap in
+`%USERPROFILE%\.wslconfig` — outside this repo.
+
 | Service | Image / build | Ports | Notes |
 |---------|---------------|-------|-------|
 | `api` | build `.` | 8000 | FastAPI, async, existing |
 | `worker-cpu` | build `.` | — | `celery -A worker.celery_app worker -Q cpu -c 8` |
-| `worker-llm` | build `.` | — | `celery -A worker.celery_app worker -Q llm -c 20` |
+| `worker-llm` | build `.` | — | `celery -A worker.celery_app worker -Q llm -c 8` |
 | `chandra` | `vllm/vllm-openai:v0.17.0` | 8100→8000 | Chandra OCR 2, OpenAI-style API; healthy once weights are loaded |
 | `rabbitmq` | `rabbitmq:3-management` | 5672, 15672 | Management UI for queue inspection |
 | `redis` | `redis:7-alpine` | 6379 | Token buckets only |
