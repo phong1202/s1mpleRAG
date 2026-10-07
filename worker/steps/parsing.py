@@ -37,6 +37,10 @@ _OCR_BATCH_PAGES = 8
 _PROBE_TIMEOUT_S = 30
 _PROBE_ATTEMPTS = 3
 _PROBE_PAUSE_S = 5
+# When to try again: a busy server is a stalled event loop, seconds; a down
+# one is a container restarting, ~80 s to reload the model onto the GPU.
+_BUSY_RETRY_S = 20
+_DOWN_RETRY_S = 60
 # Chandra's own default is 6. Its repetition check reads a page whose text
 # genuinely repeats -- identical table rows, dot leaders, a form -- as the
 # model looping, and retries; on a 16 GB card each attempt is about a
@@ -69,34 +73,52 @@ _REPORTLAB_PLACEHOLDER_TITLE = "(anonymous)"
 class OcrUnavailable(Exception):
     """The OCR server, not a page, is what failed. Raised instead of saving
     the batch's pages degraded: degraded, a scan's pages fall back to an
-    empty text layer, and the document reads as blank."""
+    empty text layer, and the document reads as blank.
+
+    Not the document's failure either: the stage defers on it, like a rate
+    limit, after `countdown` seconds -- see worker/pipeline/errors.py."""
+
+    def __init__(self, message: str, countdown: float) -> None:
+        super().__init__(message)
+        self.countdown = countdown
 
 
-def _ocr_server_down(ocr_url: str) -> str | None:
-    """Why the server is down, or None when /health says it is up.
+def _ocr_outage(ocr_url: str) -> OcrUnavailable | None:
+    """The outage, or None when /health says the server is up.
 
-    Asked only after a batch has come back with errors, because Chandra's
-    library returns the same error=True for a page the model could not read
-    as for a refused connection, a 500 or a timeout -- the answer here is
-    the only way to tell them apart."""
-    reason = None
+    Asked only after a batch has come back with errors -- never before
+    sending one: on 2026-10-06 a preflight check was what timed out, asked
+    of a server too busy to answer about pages it would have read. And
+    asked at all because Chandra's library returns the same error=True for a
+    page the model could not read as for a refused connection, a 500 or a
+    timeout: this is the only way to tell them apart."""
+    outage = None
     for attempt in range(_PROBE_ATTEMPTS):
         if attempt:
             time.sleep(_PROBE_PAUSE_S)
         try:
             response = httpx.get(f"{ocr_url}/health", timeout=_PROBE_TIMEOUT_S)
         except httpx.TimeoutException:
-            reason = f"not answering /health within {_PROBE_TIMEOUT_S}s"
+            outage = (f"not answering /health within {_PROBE_TIMEOUT_S}s", _BUSY_RETRY_S)
             continue
         except httpx.TransportError as exc:
-            reason = f"unreachable ({type(exc).__name__})"
+            outage = (f"unreachable ({type(exc).__name__})", _DOWN_RETRY_S)
             continue
         if response.status_code == 200:
             return None
         # vLLM answers 503 once its engine process is gone; the API server
         # itself outlives it, so the port alone proves nothing.
-        reason = f"engine not serving (/health {response.status_code})"
-    return reason
+        outage = (f"engine not serving (/health {response.status_code})", _DOWN_RETRY_S)
+    reason, countdown = outage
+    return OcrUnavailable(f"OCR server {reason} at {ocr_url}", countdown=countdown)
+
+
+def _raise_if_down(ocr_url: str) -> None:
+    """The whole batch goes when the server is down, not just its failed
+    pages: a page that did come back is cheap to read again on the retry."""
+    outage = _ocr_outage(ocr_url)
+    if outage:
+        raise outage
 
 
 def is_scanned(total_text_chars: int, page_count: int) -> bool:
@@ -219,9 +241,9 @@ def _ocr(
     on after its own retries. `on_batch` gets everything read so far after
     every batch -- the caller's checkpoint.
 
-    Raises if the OCR server itself is down -- checked up front, and again
-    after any batch with errors, since a server can die mid-document. An
-    outage is a stage failure to retry later, not a page to degrade:
+    Raises OcrUnavailable if the OCR server itself is down -- checked after
+    any batch with errors, since a server can die mid-document. An outage is
+    a stage failure to retry later, not a page to degrade:
     degraded, every page of a scan falls back to its empty text layer, and
     the document would be dead-lettered as blank -- permanently, for what
     was a restart."""
@@ -232,8 +254,6 @@ def _ocr(
     from chandra.model import InferenceManager
     from chandra.model.schema import BatchInputItem
 
-    httpx.get(f"{ocr_url}/health", timeout=10).raise_for_status()
-
     manager = InferenceManager(method="vllm")
     out: dict[int, str | None] = {}
     # A batch at a time: a page rendered for the model is ~12 MB, so a
@@ -243,18 +263,30 @@ def _ocr(
         # Chandra's own renderer, so pages reach the model exactly as it was
         # trained to see them: at least 192 DPI, form fields flattened.
         images = load_pdf_images(data, page_range=[n - 1 for n in batch])
-        results = manager.generate(
-            [BatchInputItem(image=image, prompt_type="ocr_layout") for image in images],
-            vllm_api_base=f"{ocr_url}/v1",
-            include_images=False,
-            max_retries=_OCR_MAX_RETRIES,
-        )
+        items = [BatchInputItem(image=image, prompt_type="ocr_layout") for image in images]
+
+        def read(items: list) -> list:
+            return manager.generate(
+                items,
+                vllm_api_base=f"{ocr_url}/v1",
+                include_images=False,
+                max_retries=_OCR_MAX_RETRIES,
+            )
+
+        results = read(items)
         if any(result.error for result in results):
-            reason = _ocr_server_down(ocr_url)
-            if reason:
-                # The whole batch goes, not just its failed pages: a page
-                # that did come back is cheap to read again on the retry.
-                raise OcrUnavailable(f"OCR server {reason} at {ocr_url}")
+            _raise_if_down(ocr_url)
+            # Up now -- but a healthy /health after the fact does not prove
+            # the errors were the pages' own. On 2026-10-07 a batch went out
+            # while vLLM was still reloading, and /health answered 200 five
+            # seconds later: a restart can begin and end inside one batch.
+            # So failed pages go once more, and only a second failure on a
+            # server still up is the page's.
+            failed = [i for i, result in enumerate(results) if result.error]
+            for i, result in zip(failed, read([items[i] for i in failed]), strict=True):
+                results[i] = result
+            if any(result.error for result in results):
+                _raise_if_down(ocr_url)
         for number, result in zip(batch, results, strict=True):
             out[number] = None if result.error else result.markdown
         if on_batch:

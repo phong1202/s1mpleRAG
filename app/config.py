@@ -78,10 +78,15 @@ class Settings(BaseSettings):
     # wrong place silently is what splitting the database was guarding against.
     redis_url: str = "redis://redis:6379/0"
 
-    # The vLLM server running Chandra OCR. Root URL, not .../v1: S1 checks
-    # /health on it before sending pages, and the OpenAI-style API lives
-    # under /v1.
+    # The vLLM server running Chandra OCR. Root URL, not .../v1: S1 asks
+    # /health on it whenever a batch comes back with errors, and the
+    # OpenAI-style API lives under /v1.
     ocr_url: str = "http://chandra:8000"
+    # How long S1 waits out an OCR outage -- deferring, not counting attempts
+    # -- before each further one costs an attempt like any failure. Long
+    # enough for a restart (~80 s) many times over; short enough that a
+    # server that is not coming back dead-letters within the hour.
+    ocr_outage_max_s: int = 1800
     # False: only the pages PyMuPDF cannot do well go to OCR -- scans, and
     # pages with a detected table or an image. True: every page, for the
     # best output, at the cost of a GPU pass per page. Borderless tables are

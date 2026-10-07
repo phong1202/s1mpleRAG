@@ -532,3 +532,94 @@ def test_parse_saves_each_ocr_batch_before_anything_can_fail(
 
     partial = get_store().get_json(f"staging/{seeded_document.id}/parsed.partial.json")
     assert partial == {"ocr": {"1": "# Paid for"}}
+
+
+@pytest.fixture
+def outage_clock(seeded_document):
+    """The Redis key the outage ceiling is timed by -- deleted afterwards,
+    since a test that ends mid-outage never reaches the batch that clears
+    it."""
+    import redis
+
+    from app.config import get_settings
+
+    key = f"ocr:outage:{seeded_document.id}"
+    client = redis.from_url(get_settings().redis_url)
+    yield key, client
+    client.delete(key)
+
+
+def test_an_ocr_outage_is_deferred_without_counting_an_attempt(
+    seeded_document, ocr_every_page, outage_clock, monkeypatch
+):
+    """2026-10-06: vLLM stalled 17 s on a burst of images, three parses
+    timed out on /health, and each burned one of the three attempts every
+    stage shares -- for a server that never went down. An outage is the
+    server's, not the document's: it waits, like a rate limit."""
+    from worker import stages
+    from worker.steps.parsing import OcrUnavailable
+
+    calls = {"n": 0}
+
+    def down_once(data, page_numbers, ocr_url, on_batch=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OcrUnavailable("OCR server not answering", countdown=20)
+        on_batch({1: "# Read once it was back"})
+        return {1: "# Read once it was back"}
+
+    monkeypatch.setattr("worker.steps.parsing._ocr", down_once)
+
+    stages.parse.apply(args=(str(seeded_document.id),)).get()
+
+    document = reload(seeded_document.id)
+    assert calls["n"] == 2
+    assert (document.stage, document.attempts, document.last_error) == ("PARSING", 0, None)
+    key, client = outage_clock
+    assert not client.exists(key), "a batch that landed must end the outage"
+
+
+def test_an_outage_past_the_ceiling_counts_like_any_failure(
+    seeded_document, ocr_every_page, outage_clock, monkeypatch
+):
+    """Deferring forever would hide a server that is never coming back:
+    past OCR_OUTAGE_MAX_S, each further outage costs an attempt, and the
+    document dead-letters with the reason on it."""
+    from app.config import get_settings
+    from worker import stages
+    from worker.pipeline.state import MAX_ATTEMPTS
+    from worker.steps.parsing import OcrUnavailable
+
+    def always_down(data, page_numbers, ocr_url, on_batch=None):
+        raise OcrUnavailable("OCR server unreachable (ConnectError)", countdown=60)
+
+    monkeypatch.setattr("worker.steps.parsing._ocr", always_down)
+    monkeypatch.setattr(get_settings(), "ocr_outage_max_s", 0)
+
+    stages.parse.apply(args=(str(seeded_document.id),))
+
+    document = reload(seeded_document.id)
+    assert (document.status, document.attempts) == ("DEAD_LETTER", MAX_ATTEMPTS)
+    assert "unreachable" in document.last_error
+
+
+def test_an_outage_with_redis_down_is_counted_not_deferred_forever(
+    seeded_document, ocr_every_page, monkeypatch
+):
+    import redis
+
+    from worker import stages
+    from worker.steps.parsing import OcrUnavailable
+
+    def down(data, page_numbers, ocr_url, on_batch=None):
+        raise OcrUnavailable("OCR server unreachable (ConnectError)", countdown=60)
+
+    def no_redis(document_id):
+        raise redis.ConnectionError("redis is down too")
+
+    monkeypatch.setattr("worker.steps.parsing._ocr", down)
+    monkeypatch.setattr("worker.pipeline.errors.outage_seconds", no_redis)
+
+    stages.parse.apply(args=(str(seeded_document.id),))
+
+    assert reload(seeded_document.id).status == "DEAD_LETTER"

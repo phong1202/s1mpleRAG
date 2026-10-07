@@ -292,11 +292,20 @@ Seven original nodes, five stages, grouped by contended resource.
    `OCR_ALL_PAGES=true` sends every page — the only way a borderless table, which PyMuPDF does not
    detect, gets read as a table.
 6. **A page Chandra still fails after its own retries** → fall back to PyMuPDF text for that page,
-   `confidence: 0.0`, log it. **Server down** → the stage fails and retries: degrading every
-   page of a scan to its empty text layer would read as a blank document. Chandra's library reports
-   a dead server exactly as it reports an unreadable page (`error=True`), so any batch with errors
-   is followed by `GET /health`: unreachable, silent for 30 s, or 503 (vLLM's answer once its
-   engine is dead) — three tries — and the batch is dropped as an outage, not degraded.
+   `confidence: 0.0`, log it. **Server down** → the batch is dropped and the stage defers:
+   degrading every page of a scan to its empty text layer would read as a blank document.
+   Chandra's library reports a dead server exactly as it reports an unreadable page
+   (`error=True`), so any batch with errors is followed by `GET /health` — three tries; unreachable,
+   silent for 30 s, or 503 (vLLM's answer once its engine is dead) is an outage. A healthy answer is
+   not yet a verdict: a restart can begin and end inside one batch (seen 2026-10-07), so the failed
+   pages are sent once more, and only a second failure on a server still up degrades them.
+
+   An outage is the server's, not the document's: like a rate limit, it defers without counting an
+   attempt — 20 s when the server is busy (silent), 60 s when it is down (a restart takes ~80 s).
+   Only once it has lasted `OCR_OUTAGE_MAX_S` (30 min, timed in Redis from the first deferral, reset
+   by the first batch that lands) does each further one cost an attempt, so a server that is not
+   coming back still ends in `DEAD_LETTER`. There is no `/health` check before sending pages: on
+   2026-10-06 that preflight was what timed out, against a server too busy to answer.
 7. Write `parsed.json`, update `documents.page_count`.
 
 **Checkpoint.** OCR results are saved to `staging/{id}/parsed.partial.json` (`{"ocr": {"<page>":
@@ -307,7 +316,7 @@ the pages missing from it; a `null` page (failed on a healthy server) is not sen
 The task runs on `worker-cpu` but the *work* happens in the `chandra` container — the worker renders
 pages and holds HTTP connections, not model weights. That's what makes S1 safe to run at concurrency 8.
 
-**Chandra server:** vLLM's OpenAI-style API under `/v1`; S1 checks `GET /health` first. Pages go
+**Chandra server:** vLLM's OpenAI-style API under `/v1`; `GET /health` only after a failed batch. Pages go
 as images rendered by `chandra-ocr`'s own renderer (≥192 DPI, form fields flattened) with Chandra's
 `ocr_layout` prompt, and come back as markdown — tables included — parsed by the same library.
 Weights load once at container start, never per request. Concurrency **8** (`--max-num-seqs`).
@@ -647,6 +656,7 @@ EMBED_DIMENSIONS=1536
 
 OCR_URL=http://chandra:8000
 OCR_ALL_PAGES=false
+OCR_OUTAGE_MAX_S=1800      # S1 defers through an OCR outage this long before it costs attempts
 
 # limits
 MAX_FILE_SIZE_MB=50

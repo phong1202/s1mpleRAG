@@ -24,11 +24,14 @@ from worker.pipeline.state import advance, invalidate_downstream
 from worker.repositories.documents import DocumentStateRepository
 
 
-@app.task(name="worker.stages.parse", bind=True, max_retries=3)
+# max_retries=None: an OCR outage defers, like a rate limit, and must not
+# spend Celery's retry budget; MAX_ATTEMPTS stays the ceiling for failures.
+@app.task(name="worker.stages.parse", bind=True, max_retries=None)
 @stage_task("PARSING")
 def parse(self, document_id: str) -> str:
     from app.config import get_settings
     from shared.storage import get_store
+    from worker.pipeline.outage import outage_over
     from worker.steps.parsing import parse_document
 
     store = get_store()
@@ -55,6 +58,9 @@ def parse(self, document_id: str) -> str:
 
     def checkpoint(ocr: dict[int, str | None]) -> None:
         store.put_json(partial_key, {"ocr": {str(n): markdown for n, markdown in ocr.items()}})
+        # A batch landed, so the server is back: a later outage is timed
+        # from its own start, not from this one's.
+        outage_over(document_id)
 
     settings = get_settings()
     result = parse_document(

@@ -10,12 +10,16 @@ and no last_error, as once happened.
 import functools
 import logging
 
+import redis
 from celery.exceptions import Ignore
 
+from app.config import get_settings
 from app.exceptions import AppException
 from shared.rate_limiter import RateLimited
+from worker.pipeline.outage import outage_seconds
 from worker.pipeline.state import MAX_BACKOFF_S, stage_failed
 from worker.repositories.documents import DocumentGone
+from worker.steps.parsing import OcrUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +56,35 @@ def _with_failure_policy(self, body, document_id: str, stage: str) -> str:
         # rate limited is not a failure. Nothing is recorded, and this is the
         # one and only retry published for it.
         raise self.retry(exc=exc, countdown=exc.countdown) from exc
+    except OcrUnavailable as exc:
+        # Also before `except Exception`, for the same reason: the server is
+        # busy or restarting, which is not this document's failure -- on
+        # 2026-10-06, three parses each burned an attempt on a server that
+        # never went down. Only an outage that outlasts the ceiling starts
+        # costing attempts, so a server that is not coming back still ends
+        # in DEAD_LETTER rather than in deferrals forever.
+        if _outage_seconds(document_id) < get_settings().ocr_outage_max_s:
+            raise self.retry(exc=exc, countdown=exc.countdown) from exc
+        _count_and_retry(self, document_id, stage, exc)
     except Exception as exc:
-        if stage_failed(document_id, stage, exc):
-            raise  # already DEAD_LETTER; do not ask Celery to retry too
-        countdown = min(2**self.request.retries, MAX_BACKOFF_S)
-        raise self.retry(exc=exc, countdown=countdown) from exc
+        _count_and_retry(self, document_id, stage, exc)
+
+
+def _outage_seconds(document_id: str) -> float:
+    """Without its clock, an outage cannot be told from a long one, so it is
+    counted like any failure -- erring toward a document that eventually
+    dead-letters, never toward one deferred forever."""
+    try:
+        return outage_seconds(document_id)
+    except redis.RedisError:
+        logger.warning("no outage clock for %s; counting the outage as a failure", document_id)
+        return float("inf")
+
+
+def _count_and_retry(self, document_id: str, stage: str, exc: Exception):
+    """Called from inside an except block, so the bare `raise` re-raises the
+    exception being handled."""
+    if stage_failed(document_id, stage, exc):
+        raise  # already DEAD_LETTER; do not ask Celery to retry too
+    countdown = min(2**self.request.retries, MAX_BACKOFF_S)
+    raise self.retry(exc=exc, countdown=countdown) from exc
