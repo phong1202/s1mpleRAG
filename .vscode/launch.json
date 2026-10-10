@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Web: dev (Next.js)",
+      "type": "node-terminal",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/web",
+      "command": "corepack pnpm dev --inspect",
+      "serverReadyAction": {
+        "action": "openExternally",
+        "pattern": "- Local:.+(https?://\\S+)",
+        "uriFormat": "%s"
+      }
+    }
+  ]
+}

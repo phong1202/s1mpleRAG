@@ -29,7 +29,7 @@ def build_app() -> FastAPI:
 
     @app.get("/conflict")
     async def conflict():
-        raise AppException(ErrorCode.DOCUMENT_TITLE_EXISTS)
+        raise AppException(ErrorCode.DOCUMENT_ALREADY_INGESTED)
 
     @app.get("/http-error")
     async def http_error():
@@ -71,7 +71,7 @@ async def test_app_exception_falls_back_to_the_default_message(client):
     response = await client.get("/conflict")
 
     assert response.status_code == 409
-    assert response.json()["message"] == "A document with this title already exists"
+    assert response.json()["message"] == "Document already ingested"
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,8 @@
+import uuid
+
 from fastapi import Depends
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Document
@@ -7,47 +10,64 @@ from app.utils.database import get_session
 
 
 class DocumentRepository:
-    """Data access for documents. No business rules; never commits — the
-    request-scoped session owns the transaction."""
+    """No business rules here; never commits -- the session owns the transaction."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create(self, title: str, content: str) -> Document:
-        document = Document(title=title, content=content)
-        self.session.add(document)
-        await self.session.flush()
-        await self.session.refresh(document)
-        return document
+    async def insert_if_new(
+        self, sha256_hash: str, filename: str, object_key: str, size_bytes: int
+    ) -> Document | None:
+        """INSERT ... ON CONFLICT DO NOTHING RETURNING id.
 
-    async def get_by_id(self, document_id: int) -> Document | None:
-        return await self.session.get(Document, document_id)
+        One atomic statement. None means the file already exists. The
+        caller publishes to the broker ONLY when a row comes back -- that
+        rule makes enqueue exactly-once per file without a distributed lock.
+        """
+        statement = (
+            insert(Document)
+            .values(
+                sha256_hash=sha256_hash,
+                filename=filename,
+                object_key=object_key,
+                size_bytes=size_bytes,
+            )
+            .on_conflict_do_nothing(index_elements=["sha256_hash"])
+            .returning(Document.id)
+        )
+        new_id = (await self.session.execute(statement)).scalar_one_or_none()
+        if new_id is None:
+            return None
+        return await self.session.get(Document, new_id)
 
-    async def get_by_title(self, title: str) -> Document | None:
-        result = await self.session.execute(select(Document).where(Document.title == title))
+    async def get_by_hash(self, sha256_hash: str) -> Document | None:
+        """Cheap pre-upload dedup check: tell the client "already ingested"
+        before it spends bandwidth uploading, rather than only after."""
+        result = await self.session.execute(
+            select(Document).where(Document.sha256_hash == sha256_hash)
+        )
         return result.scalar_one_or_none()
 
-    async def list(self, limit: int, offset: int) -> tuple[list[Document], int]:
-        total = await self.session.scalar(select(func.count()).select_from(Document))
-        result = await self.session.execute(
-            select(Document).order_by(Document.id).limit(limit).offset(offset)
-        )
-        return list(result.scalars().all()), total or 0
-
-    async def update(self, document: Document, **fields) -> Document:
-        valid_columns = Document.__table__.columns.keys()
-        for name in fields:
-            if name not in valid_columns:
-                raise ValueError(f"{name!r} is not a column of Document")
-        for name, value in fields.items():
-            setattr(document, name, value)
-        await self.session.flush()
-        await self.session.refresh(document)
-        return document
+    async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
+        return await self.session.get(Document, document_id)
 
     async def delete(self, document: Document) -> None:
+        """Flushes explicitly: Session.get() checks the identity map without
+        autoflushing first, unlike a select()/execute() query would, so a
+        get_by_id() for this same id later in the same request would
+        otherwise still see the pre-delete object."""
         await self.session.delete(document)
         await self.session.flush()
+
+    async def list(self, limit: int, offset: int, status: str | None = None):
+        query = select(Document)
+        if status:
+            query = query.where(Document.status == status)
+        total = await self.session.scalar(select(func.count()).select_from(query.subquery()))
+        rows = await self.session.execute(
+            query.order_by(Document.created_at.desc()).limit(limit).offset(offset)
+        )
+        return list(rows.scalars().all()), total or 0
 
 
 async def get_document_repository(

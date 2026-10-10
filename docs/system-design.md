@@ -35,17 +35,17 @@ with a row here, the implementation is wrong.
 |---|----------|--------|-----------|
 | 1 | Base | Extend `rag-beginner` | FastAPI + async SQLAlchemy + pgvector already built and tested |
 | 2 | `app/core/` | RAG **read path only** | API-side retrieval/generation; ingestion is worker code |
-| 3 | Embedding model | `text-embedding-3-small` @ 1536 | 6.5× cheaper than `3-large` for ~2 MTEB points |
+| 3 | Embedding model | `text-embedding-3-large` @ 1536 | Multilingual retrieval: MIRACL 54.9 vs 44.0 for `3-small` — the corpus is Vietnamese; the API shortens it to 1536 |
 | 4 | HNSW | Plain `CREATE INDEX` | Bulk-load path is for backfills; irrelevant at this scale |
 | 5 | Deployment | Local Docker Compose | Study/test scale |
-| 6 | LLM provider | OpenAI (`gpt-4o-mini`) | Single provider; caching caveat accepted (§12) |
-| 7 | Docling | Independent container | Isolates VRAM/RAM from worker concurrency |
+| 6 | LLM provider | OpenAI (`gpt-6-luna`, reasoning effort `low`) | Single provider; caching caveat accepted (§12) |
+| 7 | OCR | Chandra OCR 2 on vLLM, own container | Out-read Docling in our own benchmark; isolates the GPU from worker concurrency |
 | 8 | Object storage | MinIO container | S3-API compatible — swap to S3 by URL later |
 | 9 | Broker | **RabbitMQ** | Real AMQP acks; no `visibility_timeout` guessing |
 | 10 | Rate limiter | **Redis** (only job) | RabbitMQ can't do atomic token buckets |
 | 11 | Result backend | **None** — Postgres is authoritative | `documents.status` is durable and queryable |
 | 12 | Backpressure | Requeue with delay + jitter | Sleeping workers look healthy while idle |
-| 13 | Worker pools | 3 containers | 5-pool split is a `task_routes` change later |
+| 13 | Worker pools | 3 containers: `ocr`, `cpu`, `llm` | `ocr` sized to the GPU, `llm` to the rate limit |
 | 14 | Worker DB | **Sync** SQLAlchemy (`psycopg`) | No event-loop binding; plain `def` tasks |
 | 15 | API DB | **Async** (`asyncpg`) — unchanged | Existing scaffold |
 | 16 | Upload | Presigned PUT to MinIO | Keeps large transfers off the API request path |
@@ -64,19 +64,18 @@ with a row here, the implementation is wrong.
        │              │ rabbitmq     │  broker :5672 / UI :15672
        │              └──────┬───────┘
        ▼                     │ consume
-┌─────────────┐              ├────────────────────┐
-│ minio :9000 │              ▼                    ▼
-│  UI :9001   │      ┌──────────────┐     ┌──────────────┐
-└──────┬──────┘      │ worker-cpu   │     │ worker-llm   │
-       │             │ -Q cpu -c 8  │     │ -Q llm -c 20 │
-       │             │ S2, S5       │     │ S3, S4       │
-       │             └──────┬───────┘     └──────┬───────┘
-       │                    │                    │
-       │                    │  S1 over HTTP      │ token bucket
-       │             ┌──────▼───────┐     ┌──────▼───────┐
-       └────────────▶│ docling      │     │ redis :6379  │
-                     │ :8100        │     │ rate limiter │
-                     └──────────────┘     └──────────────┘
+┌─────────────┐              ├──────────────────┬──────────────────┐
+│ minio :9000 │              ▼                  ▼                  ▼
+│  UI :9001   │      ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+└──────┬──────┘      │ worker-ocr   │   │ worker-cpu   │   │ worker-llm   │
+       │             │ -Q ocr -c 2  │   │ -Q cpu -c 8  │   │ -Q llm -c 8  │
+       │             │ S1           │   │ S2, S5       │   │ S3, S4       │
+       │             └──────┬───────┘   └──────────────┘   └──────┬───────┘
+       │                    │ pages over HTTP                     │ token bucket
+       │             ┌──────▼───────┐                     ┌──────▼───────┐
+       └────────────▶│ chandra      │                     │ redis :6379  │
+                     │ :8100        │                     │ rate limiter │
+                     └──────────────┘                     └──────────────┘
                                 │
                          ┌──────▼──────────────────┐
                          │ db :5433                │
@@ -84,20 +83,31 @@ with a row here, the implementation is wrong.
                          └─────────────────────────┘
 ```
 
-**Eight containers.** RabbitMQ (~200MB) and Docling (~1–2GB with models) are the heavy ones. If your
-machine strains, fold `docling` into `worker-cpu` for local runs via a compose override — keep it
-separate in the file you'd deploy.
+**Nine containers.** `chandra` is the heavy one: ~10 GB of BF16 weights on the GPU, which it
+cannot share on a 16 GB card. RabbitMQ (~200MB) comes next. The first start downloads the weights
+and looks exactly like a hang.
+
+**Host RAM is the budget that actually ran out, not VRAM.** On 2026-10-06 six documents at once
+pushed WSL (then 16 GB + 4 GB swap) into a global OOM: the whole VM stalled for ~19 minutes, the
+kernel killed vLLM's engine, and nothing restarted. What `chandra` costs in host RAM, measured:
+~4.8 GB idle, ~7.3 GB with 32 pages queued — the peak follows how many requests are queued, not
+the page count. vLLM's default preprocessed-image cache (4 GiB in each of its two processes) is
+off: every OCR page is a new image, so it only ever hit on retries, while it never gave memory
+back. `chandra` runs under `mem_limit: 10g`, so running out kills that container alone; it and
+both workers have `restart: unless-stopped`. WSL itself is given 24 GB + 8 GB swap in
+`%USERPROFILE%\.wslconfig` — outside this repo.
 
 | Service | Image / build | Ports | Notes |
 |---------|---------------|-------|-------|
 | `api` | build `.` | 8000 | FastAPI, async, existing |
+| `worker-ocr` | build `.` | — | `celery -A worker.celery_app worker -Q ocr -c 2` — S1 only |
 | `worker-cpu` | build `.` | — | `celery -A worker.celery_app worker -Q cpu -c 8` |
-| `worker-llm` | build `.` | — | `celery -A worker.celery_app worker -Q llm -c 20` |
-| `docling` | build `./docling_service` | 8100 | FastAPI wrapper, models loaded at startup |
+| `worker-llm` | build `.` | — | `celery -A worker.celery_app worker -Q llm -c 8` |
+| `chandra` | `vllm/vllm-openai:v0.17.0` | 8100→8000 | Chandra OCR 2, OpenAI-style API; healthy once weights are loaded |
 | `rabbitmq` | `rabbitmq:3-management` | 5672, 15672 | Management UI for queue inspection |
 | `redis` | `redis:7-alpine` | 6379 | Token buckets only |
 | `db` | `pgvector/pgvector:pg16` | 5433→5432 | Existing; 5432 taken by another container |
-| `minio` | `minio/minio` | 9000, 9001 | Buckets: `raw`, `staging` |
+| `minio` | `pgsty/minio` | 9000, 9001 | Buckets: `raw`, `staging`. Community build: the official `minio/minio` image can no longer be pulled |
 
 ---
 
@@ -141,18 +151,20 @@ rag-beginner/
 │
 ├── worker/                          # ── Celery (sync) ────────────────
 │   ├── celery_app.py                #   app, task_routes, retry defaults
-│   ├── stages.py                    #   @task wrappers; the S1→S5 chain
-│   ├── parsing.py                   #   PyMuPDF + docling client + detection
-│   ├── chunking.py                  #   sanitize + hierarchical chunking
-│   ├── enrichment.py                #   metadata + contextualizer
-│   ├── embedding.py                 #   chunk embedding (calls shared/)
-│   ├── persistence.py               #   idempotent bulk upsert
-│   └── db.py                        #   SYNC engine + sync repositories
-│
-├── docling_service/                 # ★ NEW — its own container
-│   ├── main.py                      #   FastAPI: POST /parse
-│   ├── Dockerfile
-│   └── requirements.txt
+│   ├── stages.py                    #   5 thin @task wrappers; the S1→S5 chain
+│   ├── db.py                        #   SYNC engine + session_scope
+│   ├── pipeline/
+│   │   ├── state.py                 #   STAGES, PERMANENT, artifacts, advance, stage_failed
+│   │   └── errors.py                #   @stage_task: the one failure/retry policy
+│   ├── repositories/                #   sync, the worker's own (the API's are async)
+│   │   ├── documents.py             #   document state transitions
+│   │   └── chunks.py                #   parent/child upserts, leftover deletes
+│   └── steps/                       #   the work itself, one module per stage
+│       ├── parsing.py               #   PyMuPDF + Chandra client + detection
+│       ├── chunking.py              #   sanitize + hierarchical chunking
+│       ├── enrichment.py            #   metadata + contextualizer
+│       ├── embedding.py             #   chunk embedding (calls shared/)
+│       └── persistence.py           #   S5: builds rows, writes via repositories
 │
 ├── alembic/versions/                # CLI-generated only
 ├── tests/
@@ -253,11 +265,40 @@ neighbors with no error.
 
 ---
 
+### 5.3 Chunk source locations — contract now, built in Phase 2
+
+For citations, the FE scrolls the PDF viewer to a cited chunk and highlights its region. The format
+is fixed now so the FE can build against it; nothing produces it yet.
+
+```json
+"locations": [
+  {"page": 12, "rect": [0.0812, 0.1544, 0.9120, 0.2381]},
+  {"page": 13, "rect": [0.0812, 0.0700, 0.9120, 0.1205]}
+]
+```
+
+- `page` is 1-based. `rect` is `[x0, y0, x1, y1]` as fractions (0..1) of the page **as displayed** —
+  after `/Rotate`, the way pdf.js draws it — origin top-left, rounded to 4 decimals.
+- A chunk may have several rects (several blocks, several pages), in reading order. Adjacent rects
+  in one column may be merged. A chunk that cannot be located gets `[]`; the FE falls back to
+  `page_number`.
+- Stored as `child_chunks.locations JSONB NOT NULL DEFAULT '[]'` — not a table of its own: locations
+  are always read with their chunk, a chunk has a handful, and nothing queries by coordinate
+  (filtering by page already has `page_number`). Parents carry none; the FE highlights the cited
+  child. The migration is one `add_column` with `server_default '[]'::jsonb`; existing rows get `[]`
+  and need re-ingesting to be located.
+- Source of the rects: Chandra's `ocr_layout` already returns blocks with a bbox in rendered-image
+  pixels plus the image size (`page_box`), which S1 currently drops; PyMuPDF has block bboxes in
+  unrotated page space (map through `page.rotation_matrix`, then divide by the rotated `page.rect`).
+  S1 will keep `blocks: [{text, rect}]` per page, and S2 will match blocks to children along the
+  word stream — children follow document order, so one forward cursor, with a small fuzzy window for
+  heading markup and whitespace normalisation.
+
 ## 6. Ingestion pipeline
 
 Seven original nodes, five stages, grouped by contended resource.
 
-### S1 — Parse · queue `cpu` → HTTP to `docling`
+### S1 — Parse · queue `ocr` → HTTP to `chandra`
 
 **In:** `document_id`  **Out:** `staging/{doc_id}/parsed.json`
 
@@ -266,7 +307,7 @@ Seven original nodes, five stages, grouped by contended resource.
   "page_count": 42,
   "pages": [
     {"page": 1, "markdown": "...", "source": "pymupdf", "confidence": 1.0},
-    {"page": 2, "markdown": "...", "source": "docling", "confidence": 0.91}
+    {"page": 2, "markdown": "...", "source": "chandra", "confidence": 1.0}
   ]
 }
 ```
@@ -275,24 +316,82 @@ Seven original nodes, five stages, grouped by contended resource.
 2. **Guard:** encrypted → `AppException(PDF_ENCRYPTED)`, straight to `DEAD_LETTER`. Page count over
    limit → `PDF_TOO_LARGE`.
 3. PyMuPDF fast pass, all pages.
-4. **Scanned detection:** `total_text_chars / page_count < 100` → route *every* page to Docling.
-5. **Per-page routing:** pages with detected tables/images → Docling, one HTTP call per page.
-6. **Per-page timeout 90s** → fall back to PyMuPDF text for that page, `confidence: 0.0`, log it.
-7. Write `parsed.json`, update `documents.page_count`.
+4. **Scanned detection:** `total_text_chars / page_count < 100` → route *every* page to Chandra.
+5. **Per-page routing:** pages with detected tables/images → Chandra, 4 in flight per document,
+   the next sent as soon as one is read — no batches.
+   `OCR_ALL_PAGES=true` sends every page — the only way a borderless table, which PyMuPDF does not
+   detect, gets read as a table.
+6. **A page the server refuses** (a 4xx — e.g. more tokens than the model takes) → fall back to
+   PyMuPDF text for that page, `confidence: 0.0`, log it. **Anything else failing is the server's**
+   — no answer within `_PAGE_TIMEOUT_S` (300 s), no connection, a 5xx (vLLM answers 503 once its
+   engine is dead) — and the batch is dropped and the stage defers: degrading every page of a scan
+   to its empty text layer would read as a blank document. S1 calls vLLM itself, with that timeout,
+   rather than through Chandra's client, which reports all of these exactly as it reports an
+   unreadable page (`error=True`) and waits 600 s per try. Telling them apart after the fact went
+   wrong twice: a probe of `/health` called a server up that had just restarted mid-batch, and on
+   2026-10-07 one wedged by a game sharing the GPU answered `/health` in 0.4 s while a 5-token
+   request hung for minutes. Chandra's renderer, prompt, image sizing, markdown parser and its retry
+   of a looping page are used as they are.
 
-The task runs on `worker-cpu` but the *work* happens in the `docling` container — the worker holds an
-HTTP connection, not model weights. That's what makes S1 safe to run at concurrency 8.
+   An outage is the server's, not the document's: like a rate limit, it defers without counting an
+   attempt — 20 s when the server is busy (no answer in time), 60 s when it is down (a restart
+   takes ~80 s).
+   Only once it has lasted `OCR_OUTAGE_MAX_S` (30 min, timed in Redis from the first deferral, reset
+   by the first batch that lands) does each further one cost an attempt, so a server that is not
+   coming back still ends in `DEAD_LETTER`. Nothing asks `/health` at all: on 2026-10-06 a preflight
+   check was what timed out, against a server too busy to answer, and on 2026-10-07 it said up of a
+   server that was not.
+7. Write `parsed.json` and the title. `documents.page_count` is written earlier, the moment the
+   PDF opens — on a scan that is up to half an hour sooner, and the FE shows it meanwhile.
 
-**Docling service contract:**
+**Title.** A Vietnamese legal document names itself on page one, so that comes first: the
+document-type line (`LUẬT`, `NGHỊ ĐỊNH`, `THÔNG TƯ`, …) with the summary below it and the number
+above — "Nghị định 168/2024/NĐ-CP quy định xử phạt …", or a law's capitalised name — "Luật Đường
+bộ". Then PDF metadata, unless it is a date stamp or a file name (every decree of 2026-10-06 carried
+its scanner's "2025-01-02 (1)"), then the first h1, then the first line that is not the national
+motto, the number or the date. Last of all, in the stage, the filename.
 
-```
-POST /parse
-  { "object_key": "raw/abc123.pdf", "pages": [2, 7, 11] }
-→ { "pages": [ {"page": 2, "markdown": "...", "confidence": 0.91} ] }
-```
+**Checkpoint.** OCR results are saved to `staging/{id}/parsed.partial.json` (`{"ocr": {"<page>":
+markdown | null}}`) after every page, as it lands — not on the way out: what interrupts a parse is
+a worker killed or cut off from its broker, and neither runs an except clause. A rerun sends only
+the pages missing from it; a `null` page (refused by the server) is not sent again.
 
-It pulls from MinIO itself — no multi-MB payloads over the wire. Models load once at process start,
-never per request. Concurrency **1**.
+**Time slices.** One delivery of S1 OCRs for at most `PARSE_SLICE_S` (300 s), checking between
+batches; then it checkpoints and requeues itself (`ParseContinues` → `retry(countdown=0)`, no
+attempt counted). RabbitMQ takes back a message held unacked past its `consumer_timeout` (30 min) —
+on 2026-10-06 that ended a 111-page scan and Celery exited with it — and a scan of `MAX_PAGE_COUNT`
+pages runs well past that. A slice plus the pages in flight when it ends stays far under it, at any
+page count. Requeued to the back of the queue, documents also take turns: a short one is not stuck
+behind a long one.
+
+The task runs on `worker-ocr` but the *work* happens in the `chandra` container — the worker renders
+pages and holds HTTP connections, not model weights. Its concurrency is set by the GPU, not the CPU:
+chandra runs 8 sequences and each parse keeps **4** pages in flight, so **2** parses keep it full
+and both move. On 2026-10-06, 8 parses at once queued 46 page requests: every document crawled,
+none finished early, and vLLM's host RAM grew with the queue. On 2026-10-07, with 8 pages in
+flight each, the first document's pages took all 8 slots and the other sat at 0 for a whole batch,
+reading as stuck — hence 4, and no batch barrier: a page goes out as soon as another is read.
+
+Routing happens where a task is **published**, not where it is consumed: `api` publishes S1 (the
+first link of the chain), and a retry goes back to the queue it came from. So a change to
+`task_routes` takes effect only once `api` is restarted too — on 2026-10-07 a stale `api` kept
+sending S1 to `cpu`, where it deferred against an `OCR_URL` that worker never needs.
+
+**Chandra server:** vLLM's OpenAI-style API under `/v1`, called by S1 directly. Pages go
+as images rendered by `chandra-ocr`'s own renderer (≥192 DPI, form fields flattened) with Chandra's
+`ocr_layout` prompt, and come back as markdown — tables included — parsed by the same library.
+Weights load once at container start, never per request. Concurrency **8** (`--max-num-seqs`).
+Chandra gives no per-page confidence: a page it read is `1.0`, a page it refused is `0.0`.
+
+**The GPU is not shared.** On 2026-10-07 a game running on the same card left vLLM at ~30
+tokens/s, then wedged it; VRAM was 15.9 of 16.3 GB. Stop `chandra` (and `worker-ocr`, so parses
+wait in the queue instead of timing out their outage allowance) while the GPU is needed for
+anything else, and start them again in that order reversed.
+
+Measured on an RTX 5060 Ti 16 GB: 8.6 GiB of weights plus 4.25 GiB of KV cache; **~12 s per scanned
+page with 8 in flight (~5 pages/min)**, a single page alone ~60 s. A digital PDF only pays this for
+its table/image pages. Chandra's repetition check reads genuinely repeated text (identical rows, dot
+leaders) as a loop and retries — capped at 2 retries here, against its default of 6.
 
 ### S2 — Structure · queue `cpu`
 
@@ -319,7 +418,7 @@ Two LLM concerns, one stage, because they share a quota and a failure mode.
 
 **Hard metadata** — filename, page number, created_at. Free, no LLM.
 
-**Soft metadata + context** — batched `gpt-4o-mini` calls, **20 child chunks per request**, using
+**Soft metadata + context** — batched `gpt-6-luna` calls, **20 child chunks per request**, using
 structured output keyed by chunk id:
 
 ```python
@@ -345,7 +444,7 @@ retrieval slightly; a dead-lettered document helps nobody.
 
 **In:** `enriched.json`  **Out:** `staging/{doc_id}/embeddings.npy` + manifest
 
-1. Batch **100 texts per request** to `text-embedding-3-small`, `dimensions=1536`.
+1. Batch **100 texts per request** to `text-embedding-3-large`, `dimensions=1536`.
 2. **L2-normalize every vector.** Non-negotiable — `vector_ip_ops` assumes it.
 3. Assert returned count == input count; assert every vector is 1536-dim and finite.
 4. Write `.npy` (float32) plus a JSON manifest mapping row index → `chunk_index`.
@@ -376,9 +475,12 @@ raw/
 staging/
   {document_id}/
     parsed.json                      # S1 → S2
+    parsed.partial.json              # S1's OCR so far, written after every page
     chunks.json                      # S2 → S3
     enriched.json                    # S3 → S4
+    enriched.partial.json            # S3's batches so far, saved on a rate-limit deferral
     embeddings.npy                   # S4 → S5
+    embeddings.partial.npy           # S4's batches so far, saved on a rate-limit deferral
     manifest.json                    # row index → chunk_index
 ```
 
@@ -406,7 +508,7 @@ harmless re-run of exactly one stage.
 
 | Stage | Skip if | Wasted re-run costs | Retry |
 |-------|---------|---------------------|-------|
-| S1 | `parsed.json` exists | **High** — Docling inference | 3× backoff |
+| S1 | `parsed.json` exists | **High** — Chandra inference on the GPU | 3× backoff |
 | S2 | `chunks.json` exists | Trivial — pure CPU | 5× fast |
 | S3 | `enriched.json` exists | **High** — dominant invoice line | 3× backoff |
 | S4 | `embeddings.npy` exists | Moderate — embedding tokens | 3× backoff |
@@ -437,10 +539,29 @@ POST /documents
   Verifies the object exists and its hash matches, then registers + publishes.
 
 GET  /documents/{id}/status
-  → { data: { status, stage, attempts, failed_stage, last_error, progress } }
+  → { data: { id, filename, status, stage, attempts, failed_stage, last_error,
+              title, page_count, size_bytes, language, created_at, updated_at, completed_at,
+              progress } }
+  The same object is each item of GET /documents. progress is null unless a stage is reporting.
+
+  progress = { stage, done, total, updated_at, stalled }, overlaid from Redis (`progress:{id}`,
+  one JSON string, one MGET per page of results). S1 reports pages read by OCR after every page, S3 and S4 chunks done after every batch
+  (`unit` is implied by `stage`: pages for PARSING, chunks for ENRICHING/EMBEDDING);
+  it writes page_count to the row the moment the PDF opens. Postgres stays the source of truth for
+  status — the overlay is a courtesy, and any Redis failure leaves it null rather than failing the
+  request or the stage. A key outlives its writer by an hour, so a stage that stopped reporting
+  shows `stalled: true` (no report for 10 min) instead of vanishing — the signal 2026-10-06 lacked.
 
 GET  /documents            list + filter by status
 DELETE /documents/{id}     cascades to chunks; leaves raw/ intact
+
+GET  /documents/{id}/file-url
+  → { data: { url, expires_in: 300 } }
+  → 404 if there is no such document. Not gated on status.
+  Presigned MinIO GET of raw/{sha256}.pdf for the FE's PDF viewer, which fetches the bytes at
+  once. Always served as application/pdf, inline, filename*=UTF-8''<percent-encoded name>: the
+  presigned PUT does not bind Content-Type, so the object keeps whatever the uploader sent, and
+  served as text/html it would run as a page on the storage origin.
 ```
 
 **Why the client sends the hash:** the API re-verifies it against the stored object before
@@ -499,7 +620,7 @@ collapsing after `LIMIT` would yield fewer than `top_k` parents; over-fetching t
 guarantees the count.
 
 **`context_builder.py`** assembles parents newest-first under a token budget (default 8000), dropping
-the tail rather than truncating mid-parent. **`generator.py`** calls `gpt-4o-mini` with the assembled
+the tail rather than truncating mid-parent. **`generator.py`** calls `OPENAI_CHAT_MODEL` with the assembled
 context and maps each cited passage back to `(document_id, page_number)` — which works precisely
 because `page_number` lives on the *child*, as the original design had it.
 
@@ -516,7 +637,7 @@ app.conf.update(
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,           # don't hoard tasks on slow stages
     task_routes={
-        "worker.stages.parse":     {"queue": "cpu"},
+        "worker.stages.parse":     {"queue": "ocr"},   # worker-ocr, sized to the GPU
         "worker.stages.structure": {"queue": "cpu"},
         "worker.stages.enrich":    {"queue": "llm"},
         "worker.stages.embed":     {"queue": "llm"},
@@ -613,16 +734,19 @@ MINIO_BUCKET_RAW=raw
 MINIO_BUCKET_STAGING=staging
 
 OPENAI_API_KEY=sk-...
-OPENAI_CHAT_MODEL=gpt-4o-mini
-OPENAI_EMBED_MODEL=text-embedding-3-small
+OPENAI_CHAT_MODEL=gpt-6-luna
+OPENAI_REASONING_EFFORT=low
+OPENAI_EMBED_MODEL=text-embedding-3-large
 EMBED_DIMENSIONS=1536
 
-DOCLING_URL=http://docling:8100
+OCR_URL=http://chandra:8000
+OCR_ALL_PAGES=false
+OCR_OUTAGE_MAX_S=1800      # S1 defers through an OCR outage this long before it costs attempts
+PARSE_SLICE_S=300          # one S1 delivery OCRs this long, then checkpoints and requeues
 
 # limits
 MAX_FILE_SIZE_MB=50
 MAX_PAGE_COUNT=500
-DOCLING_PAGE_TIMEOUT_S=90
 ENRICH_BATCH_SIZE=20
 EMBED_BATCH_SIZE=100
 RL_CHAT_RPM=500
@@ -668,10 +792,10 @@ Carried over from the scaffold: **real Postgres, rolled-back transactions per te
 
 | Layer | Approach | Real dependency |
 |-------|----------|-----------------|
-| `worker/chunking.py`, `parsing.py` | Pure unit — fixture PDFs | none |
-| `worker/enrichment.py` | Batch validation with a stub LLM | none |
+| `worker/steps/chunking.py`, `parsing.py` | Pure unit — fixture PDFs | none |
+| `worker/steps/enrichment.py` | Batch validation with a stub LLM | none |
 | `shared/rate_limiter.py` | Integration — real Redis | redis |
-| `worker/persistence.py` | Integration — real Postgres, rolled back | db |
+| `worker/steps/persistence.py`, `worker/repositories/` | Integration — real Postgres | db |
 | `app/core/retriever.py` | Integration — seeded vectors, real pgvector | db |
 | Stage chain | Integration — `task_always_eager`, real db + MinIO | db, minio |
 | API | Existing async client fixture | db |

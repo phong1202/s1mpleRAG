@@ -8,11 +8,28 @@ class ErrorCode(Enum):
     the message that describes it, and adding an error is one line.
     """
 
-    DOCUMENT_NOT_FOUND = (404, "Document not found")
-    DOCUMENT_TITLE_EXISTS = (409, "A document with this title already exists")
+    # --- General ---
     VALIDATION_FAILED = (422, "Validation failed")
     INTERNAL_ERROR = (500, "Internal server error")
     DATABASE_ERROR = (500, "Database operation failed")
+
+    # --- Document ---
+    DOCUMENT_NOT_FOUND = (404, "Document not found")
+    DOCUMENT_ALREADY_INGESTED = (409, "Document already ingested")
+    PDF_ENCRYPTED = (422, "PDF is encrypted and cannot be parsed")
+    PDF_MALFORMED = (422, "PDF is corrupted and cannot be parsed")
+    PDF_TOO_LARGE = (413, "PDF exceeds the size or page limit")
+    HASH_MISMATCH = (400, "Uploaded object does not match the supplied hash")
+    NO_EXTRACTABLE_TEXT = (422, "Document has no extractable text")
+
+    # --- Rate limiting ---
+    RATE_LIMIT_UNSATISFIABLE = (500, "Batch cost exceeds the rate limit bucket's capacity")
+
+    # --- LLM provider ---
+    LLM_PROVIDER_REJECTED = (
+        502,
+        "The LLM provider rejected the request: check the API key, quota and model name",
+    )
 
     def __init__(self, status: int, message: str) -> None:
         self.status = status

@@ -15,23 +15,331 @@ services:
       timeout: 5s
       retries: 10
 
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment:
+      # The whole reason RABBITMQ_* is stored in parts: the broker needs the
+      # credentials as its own variables, and app/config.py assembles the same
+      # values into a URL. One source, two consumers.
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?set RABBITMQ_USER in .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
+    ports:
+      - "${RABBITMQ_PORT:?set RABBITMQ_PORT in .env}:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # 6379 is literal because REDIS_URL is kept whole -- there is no
+    # REDIS_PORT to reference, by the same decision.
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Not minio/minio: MinIO stopped publishing its community images, and that
+  # repository can no longer be pulled from Docker Hub or Quay. pgsty/minio is
+  # a community-maintained build of the same server -- same entrypoint, `mc`
+  # inside for the healthcheck, and it opens data written by the old image.
+  # Pinned by digest because it is a third-party publisher.
+  minio:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?set MINIO_ACCESS_KEY in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY in .env}
+    ports:
+      - "${MINIO_PORT:?set MINIO_PORT in .env}:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Creates the buckets and exits. Not a long-running entrypoint: buckets are
+  # a one-time job, and attaching it to minio's lifecycle would only make
+  # minio slower to start.
+  minio-init:
+    image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z@sha256:cfc83108c3abb371f8fb84d99c1fdc88f8c237e022409b0081fb7c0a3be634dd
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW}
+      MINIO_BUCKET_STAGING: ${MINIO_BUCKET_STAGING}
+    # `mc ilm rule add` is NOT idempotent -- it mints a new rule ID on every
+    # run, so repeated `compose up` would stack duplicate expiry rules on the
+    # bucket forever. `import` replaces the whole lifecycle configuration from
+    # the JSON below, which makes a re-run a no-op. Nothing is tolerated with
+    # `|| true` any more: with the operations idempotent, a failure here is
+    # real and should stop the container.
+    entrypoint:
+      - /bin/sh
+      - -euc
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ACCESS_KEY" "$$MINIO_SECRET_KEY"
+        mc mb --ignore-existing "local/$$MINIO_BUCKET_RAW"
+        mc mb --ignore-existing "local/$$MINIO_BUCKET_STAGING"
+        mc ilm rule import "local/$$MINIO_BUCKET_STAGING" <<'JSON'
+        {"Rules":[{"ID":"expire-staging-7d","Status":"Enabled","Expiration":{"Days":7},"Filter":{}}]}
+        JSON
+
+  # Chandra OCR 2 behind vLLM's OpenAI-style API. Settings are Datalab's own
+  # launcher's (chandra_vllm) scaled to a 16 GB card: 8 sequences, 1024
+  # batched tokens. BF16 weights take ~10 GB of the 16, so nothing else can
+  # share this GPU.
+  chandra:
+    image: vllm/vllm-openai:v0.17.0
+    command:
+      # Positional: the image's entrypoint is `vllm serve`, which is
+      # retiring the --model flag.
+      - datalab-to/chandra-ocr-2
+      - --served-model-name
+      - chandra
+      - --dtype
+      - bfloat16
+      - --max-model-len
+      - "18000"
+      - --max-num-seqs
+      - "8"
+      - --max-num-batched-tokens
+      - "1024"
+      - --gpu-memory-utilization
+      - "0.85"
+      - --enable-prefix-caching
+      - --no-enforce-eager
+      - --mm-processor-kwargs
+      - '{"min_pixels": 3136, "max_pixels": 6291456}'
+      # Host RAM, not VRAM. The default 4 GiB cache of preprocessed images
+      # lives in BOTH the API server and the engine process, and every OCR
+      # page is a new image: it hit only on Chandra's own retries (~12%),
+      # while holding up to 4 GiB in each -- EngineCore alone reached 6.7 GB
+      # in the run that tipped WSL into a global OOM on 2026-10-06.
+      - --mm-processor-cache-gb
+      - "0"
+    # Without it, one crash is an outage until someone notices: on
+    # 2026-10-06 nothing came back after the OOM.
+    restart: unless-stopped
+    # Measured on host RAM: ~4.8 GB idle, ~7.3 GB with 32 pages queued (the
+    # peak follows the queue, not the cache). Past this, the kernel kills
+    # this container alone and it restarts -- instead of a global OOM that
+    # stalls every process in WSL, as on 2026-10-06.
+    mem_limit: 10g
+    ports:
+      - "8100:8000"
+    volumes:
+      # ~10 GB of weights download once and are reused forever. The first
+      # start takes real time and LOOKS EXACTLY LIKE A HANG -- that is normal.
+      - chandramodels:/root/.cache/huggingface
+      # torch.compile output (~27 s of every start). Without a volume it lives
+      # in the container layer and is lost whenever the container is
+      # recreated -- a `down`, or any edit to this service.
+      - chandracompile:/root/.cache/vllm
+    ipc: host
+    healthcheck:
+      # vLLM answers /health only once the model is loaded, not when the
+      # port opens -- a worker sending pages any earlier would only fail.
+      test:
+        - CMD
+        - python3
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/health')
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 900s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   api:
     build: .
     env_file:
       - .env
     environment:
-      # Container-to-container: the service name and the internal port 5432,
-      # not the host's DB_HOST/DB_PORT. Environment entries beat env_file, and
-      # env vars beat the bind-mounted .env inside the container.
+      # Container-to-container: service names and internal ports, not the
+      # host-view values .env holds for running things directly on the
+      # host. Environment entries beat env_file, and env vars beat the
+      # bind-mounted .env inside the container.
       DB_HOST: db
       DB_PORT: 5432
+      MINIO_HOST: minio
+      MINIO_PORT: 9000
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "${PORT:-8000}:8000"
     volumes:
       - .:/code
+    healthcheck:
+      # /health is answered by the app itself, so this proves the process
+      # is serving requests, not merely that the port is open.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/health')
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     depends_on:
       db:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  worker-cpu:
+    build: .
+    command: celery -A worker.celery_app worker -Q cpu -c 8 -l info
+    # Celery exits on a broker error it calls unrecoverable -- a consumer
+    # timeout, for one -- and on 2026-10-06 that left the queue with no
+    # consumer at all until someone noticed.
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      MINIO_HOST: minio
+      MINIO_PORT: 9000
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      REDIS_URL: redis://redis:6379/0
+      # celery's own process gets /code on sys.path to resolve `-A
+      # worker.celery_app`, but its prefork pool forks task-executing child
+      # processes that do NOT inherit that -- found because every stage
+      # task lazily imports shared.storage/worker.* *inside* the function
+      # body, and that import only runs later, inside a forked child,
+      # where it fails with "No module named 'shared'". Top-level imports
+      # in worker/stages.py never hit this, which is why task routing and
+      # the state machine (task 11) tested fine with nothing wired in yet.
+      PYTHONPATH: /code
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/code
+    healthcheck:
+      # A ping through the broker addressed to this very node: it answers
+      # only if the worker is up, connected, and its main loop not wedged --
+      # a process that merely exists would pass a `pgrep`. $$ stops compose
+      # from expanding HOSTNAME itself.
+      test:
+        - CMD-SHELL
+        - celery -A worker.celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+
+  # S1 alone, on a queue of its own, so its concurrency is set by the GPU
+  # rather than the CPU. chandra runs 8 sequences and each parse keeps 4
+  # pages in flight (worker/steps/parsing.py), so 2 parses keep it full,
+  # both moving, without queueing more requests than it can start. On
+  # 2026-10-06, 8 parses at once queued 46, every document crawled, none
+  # finished early, and vLLM's host RAM grew with the queue.
+  worker-ocr:
+    build: .
+    command: celery -A worker.celery_app worker -Q ocr -c 2 -l info
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      MINIO_HOST: minio
+      MINIO_PORT: 9000
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      REDIS_URL: redis://redis:6379/0
+      # The only worker that calls Chandra.
+      OCR_URL: http://chandra:8000
+      # Same reason as worker-cpu: prefork children do not inherit /code.
+      PYTHONPATH: /code
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      # Not service_healthy: a parse that lands while Chandra is still
+      # loading finds it down and defers, as for any outage.
+      chandra:
+        condition: service_started
+    volumes:
+      - .:/code
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - celery -A worker.celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+
+  worker-llm:
+    build: .
+    # 8, not 20: the rate limiter, not the process count, sets how fast
+    # enrich and embed go, and each prefork child costs ~100-200 MB of host
+    # RAM whether it is busy or not.
+    command: celery -A worker.celery_app worker -Q llm -c 8 -l info
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      MINIO_HOST: minio
+      MINIO_PORT: 9000
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      REDIS_URL: redis://redis:6379/0
+      # Same reason as worker-cpu: celery's prefork children do not
+      # inherit the main process's /code on sys.path.
+      PYTHONPATH: /code
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/code
+    healthcheck:
+      # Same probe as worker-cpu.
+      test:
+        - CMD-SHELL
+        - celery -A worker.celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
 
 volumes:
   pgdata:
+  miniodata:
+  chandramodels:
+  chandracompile:

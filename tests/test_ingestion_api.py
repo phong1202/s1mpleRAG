@@ -1,0 +1,344 @@
+"""Hash-first upload: the client supplies sha256 before an upload URL is
+issued, not after. That lets the object key be derived from the hash
+(raw/{sha256}.pdf) and the checksum bound into the presigned URL's
+signature, so MinIO itself rejects mismatched bytes on upload -- register()
+below never has to read an object back to verify it.
+"""
+
+import base64
+import hashlib
+import uuid
+
+import httpx
+import pytest
+
+from shared.storage import get_public_store
+
+pytestmark = pytest.mark.asyncio
+
+
+def _b64(sha256_hex: str) -> str:
+    return base64.b64encode(bytes.fromhex(sha256_hex)).decode()
+
+
+async def test_upload_url_returns_a_presigned_put(client):
+    digest = hashlib.sha256(b"whatever the client is about to upload").hexdigest()
+
+    response = await client.post(
+        "/documents/upload-url", json={"filename": "a.pdf", "sha256": digest}
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["object_key"] == f"raw/{digest}.pdf"
+    assert "X-Amz-Signature" in data["upload_url"]
+
+
+async def test_upload_url_rejects_an_already_ingested_hash(client, uploaded_pdf):
+    """Dedup runs before the upload, not only at register: a client that
+    already has this file ingested should not have to spend bandwidth
+    uploading it again just to be told so."""
+    await client.post("/documents", json=uploaded_pdf)
+
+    response = await client.post(
+        "/documents/upload-url",
+        json={"filename": uploaded_pdf["filename"], "sha256": uploaded_pdf["sha256"]},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["message"] == "Document already ingested"
+
+
+async def test_the_full_upload_and_register_flow_against_real_minio(client):
+    """The two endpoints have to compose: a URL from upload-url has to
+    actually accept the exact bytes it was signed for, through a real PUT,
+    before register can see the object at all."""
+    payload = b"a whole fake pdf worth of bytes"
+    digest = hashlib.sha256(payload).hexdigest()
+
+    url_response = await client.post(
+        "/documents/upload-url", json={"filename": "report.pdf", "sha256": digest}
+    )
+    target = url_response.json()["data"]
+
+    try:
+        put_response = httpx.put(
+            target["upload_url"],
+            content=payload,
+            headers={"x-amz-checksum-sha256": _b64(digest)},
+        )
+        assert put_response.status_code == 200
+
+        register_response = await client.post(
+            "/documents",
+            json={
+                "object_key": target["object_key"],
+                "filename": "report.pdf",
+                "sha256": digest,
+                "size_bytes": len(payload),
+            },
+        )
+
+        assert register_response.status_code == 202
+        assert register_response.json()["data"]["status"] == "QUEUED"
+    finally:
+        # This test puts a real object in MinIO via a real PUT -- unlike
+        # the rest of the suite's DB writes, nothing rolls that back.
+        get_public_store().delete(target["object_key"])
+
+
+async def test_register_returns_202_and_a_queued_document(client, uploaded_pdf):
+    response = await client.post("/documents", json=uploaded_pdf)
+
+    assert response.status_code == 202
+    assert response.json()["data"]["status"] == "QUEUED"
+    assert uuid.UUID(response.json()["data"]["document_id"])
+
+
+async def test_registering_the_same_hash_twice_returns_409(client, uploaded_pdf):
+    await client.post("/documents", json=uploaded_pdf)
+
+    second = await client.post("/documents", json=uploaded_pdf)
+
+    assert second.status_code == 409
+    assert second.json()["message"] == "Document already ingested"
+
+
+async def test_a_wrong_client_supplied_hash_is_rejected(client, uploaded_pdf):
+    """object_key is raw/{sha256}.pdf by construction, so a mismatch here
+    means the two fields did not come from the same upload-url call --
+    caught by comparing strings, no object read required."""
+    payload = {**uploaded_pdf, "sha256": "f" * 64}
+
+    response = await client.post("/documents", json=payload)
+
+    assert response.status_code == 400
+    assert "does not match" in response.json()["message"]
+
+
+async def test_an_object_that_was_never_uploaded_is_rejected(client):
+    payload = {
+        "object_key": "raw/" + "9" * 64 + ".pdf",
+        "filename": "ghost.pdf",
+        "sha256": "9" * 64,
+        "size_bytes": 10,
+    }
+
+    response = await client.post("/documents", json=payload)
+
+    assert response.status_code == 404
+
+
+async def test_status_reports_the_pipeline_pointer(client, uploaded_pdf):
+    created = await client.post("/documents", json=uploaded_pdf)
+    document_id = created.json()["data"]["document_id"]
+
+    response = await client.get(f"/documents/{document_id}/status")
+
+    data = response.json()["data"]
+    assert data["status"] == "QUEUED"
+    assert data["stage"] is None
+    assert data["attempts"] == 0
+
+
+async def test_status_of_an_unknown_uuid_is_404(client):
+    response = await client.get(f"/documents/{uuid.uuid4()}/status")
+
+    assert response.status_code == 404
+
+
+async def test_a_malformed_uuid_is_422_not_500(client):
+    """id used to be an int4 range guard; now it's a uuid, but this still
+    has to come back as 422, not blow up in the driver."""
+    response = await client.get("/documents/not-a-uuid/status")
+
+    assert response.status_code == 422
+
+
+async def test_list_filters_by_status(client, uploaded_pdf):
+    await client.post("/documents", json=uploaded_pdf)
+
+    response = await client.get("/documents", params={"status": "QUEUED"})
+
+    data = response.json()["data"]
+    assert data["total"] >= 1
+    assert all(item["status"] == "QUEUED" for item in data["items"])
+
+
+async def test_delete_removes_the_document(client, uploaded_pdf):
+    created = await client.post("/documents", json=uploaded_pdf)
+    document_id = created.json()["data"]["document_id"]
+
+    await client.delete(f"/documents/{document_id}")
+
+    assert (await client.get(f"/documents/{document_id}/status")).status_code == 404
+
+
+async def test_register_launches_the_chain_for_the_new_document(client, uploaded_pdf, launched):
+    response = await client.post("/documents", json=uploaded_pdf)
+
+    assert launched == [response.json()["data"]["document_id"]]
+
+
+async def test_a_duplicate_registration_launches_nothing_more(client, uploaded_pdf, launched):
+    """Definition of Done #4: re-uploading the same file is a 409 and NO
+    second message -- a second chain would race the first over the same
+    staging objects."""
+    await client.post("/documents", json=uploaded_pdf)
+    await client.post("/documents", json=uploaded_pdf)
+
+    assert len(launched) == 1
+
+
+_VIETNAMESE_NAME = "Nghị định 168 – xử phạt giao thông.pdf"
+
+
+async def test_file_url_is_a_short_lived_link_to_the_raw_pdf(client, uploaded_pdf):
+    """For the FE's PDF viewer, which fetches the bytes at once and hands
+    them to pdf.js -- so the link need not outlive a few minutes. Inline,
+    with the original name, Vietnamese diacritics and all."""
+    from urllib.parse import parse_qs, quote, urlsplit
+
+    created = await client.post("/documents", json={**uploaded_pdf, "filename": _VIETNAMESE_NAME})
+    document_id = created.json()["data"]["document_id"]
+
+    response = await client.get(f"/documents/{document_id}/file-url")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["expires_in"] == 300
+    assert parse_qs(urlsplit(data["url"]).query)["X-Amz-Expires"] == ["300"]
+
+    fetched = httpx.get(data["url"])
+    assert fetched.status_code == 200
+    assert hashlib.sha256(fetched.content).hexdigest() == uploaded_pdf["sha256"]
+    assert fetched.headers["content-type"] == "application/pdf"
+    assert fetched.headers["content-disposition"] == (
+        "inline; filename*=UTF-8''" + quote(_VIETNAMESE_NAME, safe="")
+    )
+
+
+async def test_file_url_serves_a_pdf_whatever_type_the_upload_claimed(client):
+    """The presigned PUT does not sign Content-Type, so MinIO keeps whatever
+    the uploader sent. Served as that, an HTML file named .pdf would run as
+    a page on the MinIO origin; the GET overrides it."""
+    html = b"<html><script>alert(document.domain)</script></html>"
+    digest = hashlib.sha256(html).hexdigest()
+    store = get_public_store()
+    key = f"raw/{digest}.pdf"
+    store._client.put_object(Bucket="raw", Key=f"{digest}.pdf", Body=html, ContentType="text/html")
+    try:
+        created = await client.post(
+            "/documents",
+            json={
+                "object_key": key,
+                "filename": "x.pdf",
+                "sha256": digest,
+                "size_bytes": len(html),
+            },
+        )
+        document_id = created.json()["data"]["document_id"]
+
+        url = (await client.get(f"/documents/{document_id}/file-url")).json()["data"]["url"]
+        fetched = httpx.get(url)
+
+        assert fetched.headers["content-type"] == "application/pdf"
+        assert fetched.headers["content-disposition"].startswith("inline;")
+    finally:
+        store.delete(key)
+
+
+async def test_file_url_of_an_unknown_document_is_404(client):
+    response = await client.get(f"/documents/{uuid.uuid4()}/file-url")
+
+    assert response.status_code == 404
+    assert response.json()["data"] is None
+
+
+async def test_status_and_list_carry_what_the_fe_shows(client, uploaded_pdf):
+    """Additive: every field an older client read is still there. title,
+    page_count and language stay null until S1/S5 fill them; progress is
+    null while nothing is reporting."""
+    from datetime import datetime
+
+    created = await client.post("/documents", json=uploaded_pdf)
+    document_id = created.json()["data"]["document_id"]
+
+    one = (await client.get(f"/documents/{document_id}/status")).json()["data"]
+    listed = (await client.get("/documents")).json()["data"]["items"]
+
+    assert [d for d in listed if d["id"] == document_id] == [one]
+    assert one["filename"] == "clean_text.pdf"
+    assert one["size_bytes"] == uploaded_pdf["size_bytes"]
+    assert (one["title"], one["page_count"], one["language"]) == (None, None, None)
+    assert (one["completed_at"], one["progress"]) == (None, None)
+    assert datetime.fromisoformat(one["created_at"]) <= datetime.fromisoformat(one["updated_at"])
+
+
+@pytest.fixture
+def progress_key():
+    """Deletes the progress keys a test writes -- they would otherwise
+    linger an hour in the Redis the dev stack shares."""
+    from shared import progress
+
+    written = []
+    yield written.append
+    for document_id in written:
+        progress.clear(document_id)
+
+
+async def test_status_overlays_the_running_stages_progress(client, uploaded_pdf, progress_key):
+    from shared import progress
+
+    created = await client.post("/documents", json=uploaded_pdf)
+    document_id = created.json()["data"]["document_id"]
+    progress_key(document_id)
+    progress.report(document_id, "PARSING", done=16, total=111)
+
+    data = (await client.get(f"/documents/{document_id}/status")).json()["data"]
+
+    assert {k: data["progress"][k] for k in ("stage", "done", "total", "stalled")} == {
+        "stage": "PARSING",
+        "done": 16,
+        "total": 111,
+        "stalled": False,
+    }
+
+
+async def test_progress_that_stopped_coming_reads_as_stalled(
+    client, uploaded_pdf, progress_key, monkeypatch
+):
+    """A worker killed mid-stage leaves its last report behind; that it
+    stopped is the signal 2026-10-06 lacked."""
+    import time
+
+    from shared import progress
+
+    created = await client.post("/documents", json=uploaded_pdf)
+    document_id = created.json()["data"]["document_id"]
+    progress_key(document_id)
+    monkeypatch.setattr(time, "time", lambda: 1_000_000.0)
+    progress.report(document_id, "PARSING", done=16, total=111)
+    monkeypatch.undo()
+
+    listed = (await client.get("/documents")).json()["data"]["items"]
+
+    assert next(d for d in listed if d["id"] == document_id)["progress"]["stalled"] is True
+
+
+async def test_redis_down_leaves_progress_null_not_the_endpoint_broken(
+    client, uploaded_pdf, monkeypatch
+):
+    import redis
+
+    async def down(document_ids):
+        raise redis.ConnectionError("redis is down")
+
+    monkeypatch.setattr("shared.progress._read_raw", down)
+    created = await client.post("/documents", json=uploaded_pdf)
+    document_id = created.json()["data"]["document_id"]
+
+    response = await client.get(f"/documents/{document_id}/status")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["progress"] is None

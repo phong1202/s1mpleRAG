@@ -22,6 +22,15 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
 COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --frozen --no-dev
 
+# Baked in at build time, not fetched at request time: cl100k_base is a
+# ~1.6MB file tiktoken downloads over the network on first use and caches
+# under the OS temp dir by default -- which does not survive a container
+# restart, so every restart would pay a ~5s download again, or fail outright
+# with no network egress. TIKTOKEN_CACHE_DIR pins the cache to a path this
+# RUN step already populated, so worker-cpu never touches the network for it.
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache
+RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+
 COPY . .
 
 RUN useradd --create-home appuser && chown -R appuser:appuser /code /opt/venv
