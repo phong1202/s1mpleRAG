@@ -107,7 +107,7 @@ both workers have `restart: unless-stopped`. WSL itself is given 24 GB + 8 GB sw
 | `rabbitmq` | `rabbitmq:3-management` | 5672, 15672 | Management UI for queue inspection |
 | `redis` | `redis:7-alpine` | 6379 | Token buckets only |
 | `db` | `pgvector/pgvector:pg16` | 5433→5432 | Existing; 5432 taken by another container |
-| `minio` | `minio/minio` | 9000, 9001 | Buckets: `raw`, `staging` |
+| `minio` | `pgsty/minio` | 9000, 9001 | Buckets: `raw`, `staging`. Community build: the official `minio/minio` image can no longer be pulled |
 
 ---
 
