@@ -286,18 +286,29 @@ class AsyncOpenAIProvider:
         from openai import AsyncOpenAI
 
         settings = get_settings()
+        if not settings.openai_api_key:
+            raise RuntimeError("LLM_PROVIDER=openai but OPENAI_API_KEY is not set")
         self._client = AsyncOpenAI(api_key=settings.openai_api_key)
         self._chat_model = settings.openai_chat_model
+        self._reasoning_effort = settings.openai_reasoning_effort
         self._embed_model = settings.openai_embed_model
         self._dimensions = settings.embed_dimensions
 
     async def complete(self, messages: list[dict], schema: type[T]) -> T:
-        response = await self._client.chat.completions.create(
+        # Structured outputs, strict -- the choice enrich() made above. JSON
+        # mode never showed the model the schema, and the API refuses it
+        # unless a message happens to say "json".
+        response = await self._client.chat.completions.parse(
             model=self._chat_model,
+            reasoning_effort=self._reasoning_effort,
+            response_format=schema,
             messages=messages,
-            response_format={"type": "json_object"},
         )
-        return schema.model_validate(json.loads(response.choices[0].message.content))
+        parsed = response.choices[0].message.parsed
+        if parsed is None:
+            # A refusal, or a reply cut off before the object closed.
+            raise RuntimeError(f"the model returned no {schema.__name__}")
+        return parsed
 
     async def embed_query(self, text: str) -> list[float]:
         response = await self._client.embeddings.create(

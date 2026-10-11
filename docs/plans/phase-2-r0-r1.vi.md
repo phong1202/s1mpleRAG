@@ -222,7 +222,7 @@ Commit message đề xuất: `style: format the read path to the project line le
 - Consumes: `Settings.openai_api_key`, `Settings.openai_chat_model`, `Settings.openai_reasoning_effort`
 - Produces: `AsyncOpenAIProvider.complete(messages, schema) -> T`, chữ ký không đổi; `RuntimeError` khi thiếu key, và khi model không trả về object nào
 
-- [ ] **Step 1: Viết test đỏ**
+- [x] **Step 1: Viết test đỏ**
 
 ```python
 # tests/test_async_llm_provider.py — append
@@ -288,7 +288,7 @@ async def test_openai_without_a_key_fails_at_construction(monkeypatch):
         AsyncOpenAIProvider()
 ```
 
-- [ ] **Step 2: Chạy để xác nhận đỏ**
+- [x] **Step 2: Chạy để xác nhận đỏ**
 
 ```bash
 uv run pytest -q tests/test_async_llm_provider.py
@@ -296,7 +296,7 @@ uv run pytest -q tests/test_async_llm_provider.py
 
 Expected: 3 FAIL, 5 PASS. Hai test đầu với `AttributeError: ... has no attribute 'create'`; test thứ ba với `openai.OpenAIError: Missing credentials`, tức lỗi của SDK chứ chưa phải lỗi của ta.
 
-- [ ] **Step 3: Sửa provider**
+- [x] **Step 3: Sửa provider**
 
 ```python
 # shared/llm.py — class AsyncOpenAIProvider; embed_query is unchanged
@@ -334,9 +334,9 @@ class AsyncOpenAIProvider:
 
 `json` vẫn được nửa đồng bộ của file dùng; đừng xoá import đó.
 
-- [ ] **Step 4: Chạy test** — PASS, 8 test trong file này.
+- [x] **Step 4: Chạy test** — PASS, 8 test trong file này.
 
-- [ ] **Step 5: Suite đầy đủ, rồi dừng**
+- [x] **Step 5: Suite đầy đủ, rồi dừng**
 
 Task này không gọi OpenAI. Lần gọi thật đầu tiên là mục 1 của Definition of Done.
 

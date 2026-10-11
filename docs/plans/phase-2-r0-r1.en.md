@@ -222,7 +222,7 @@ Proposed commit message: `style: format the read path to the project line length
 - Consumes: `Settings.openai_api_key`, `Settings.openai_chat_model`, `Settings.openai_reasoning_effort`
 - Produces: `AsyncOpenAIProvider.complete(messages, schema) -> T`, signature unchanged; `RuntimeError` when the key is missing, and when the model returns no object
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/test_async_llm_provider.py — append
@@ -288,7 +288,7 @@ async def test_openai_without_a_key_fails_at_construction(monkeypatch):
         AsyncOpenAIProvider()
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 ```bash
 uv run pytest -q tests/test_async_llm_provider.py
@@ -296,7 +296,7 @@ uv run pytest -q tests/test_async_llm_provider.py
 
 Expected: 3 FAIL, 5 PASS. The first two with `AttributeError: ... has no attribute 'create'`; the third with `openai.OpenAIError: Missing credentials`, which is the SDK's error and not yet ours.
 
-- [ ] **Step 3: Fix the provider**
+- [x] **Step 3: Fix the provider**
 
 ```python
 # shared/llm.py — class AsyncOpenAIProvider; embed_query is unchanged
@@ -334,9 +334,9 @@ class AsyncOpenAIProvider:
 
 `json` is still used by the synchronous half of the file; do not remove that import.
 
-- [ ] **Step 4: Run the tests** — PASS, 8 tests in this file.
+- [x] **Step 4: Run the tests** — PASS, 8 tests in this file.
 
-- [ ] **Step 5: Full suite, then stop**
+- [x] **Step 5: Full suite, then stop**
 
 This task does not call OpenAI. The first real call is Definition of Done item 1.
 

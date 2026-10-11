@@ -67,3 +67,63 @@ async def test_script_replaces_the_queue_rather_than_appending_to_it():
     provider.script(Verdict, Verdict(sufficient=True))
 
     assert (await provider.complete([], Verdict)).sufficient is True
+
+
+def _async_openai_returning(monkeypatch, parsed=None, requests=None):
+    """An AsyncOpenAIProvider whose client is a stand-in that records each
+    request and answers with `parsed`, the way the SDK's parse() would. The
+    async twin of `_openai_returning` in test_llm_provider.py."""
+    from types import SimpleNamespace
+
+    from app.config import get_settings
+    from shared.llm import AsyncOpenAIProvider
+
+    async def parse(**kwargs):
+        if requests is not None:
+            requests.append(kwargs)
+        message = SimpleNamespace(parsed=parsed)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))
+    monkeypatch.setattr(get_settings(), "openai_api_key", "sk-test")
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda **_: client)
+    return AsyncOpenAIProvider()
+
+
+async def test_complete_asks_for_schema_bound_output_on_the_configured_model(monkeypatch):
+    """JSON mode never showed the model the schema, and the API refuses it
+    unless a message happens to say "json". Structured outputs bind the reply
+    to the schema -- the choice enrich() already made on the write path."""
+    from app.config import get_settings
+
+    requests: list[dict] = []
+    provider = _async_openai_returning(monkeypatch, Verdict(sufficient=True), requests)
+
+    verdict = await provider.complete([{"role": "user", "content": "?"}], Verdict)
+
+    (request,) = requests
+    settings = get_settings()
+    assert verdict.sufficient is True
+    assert request["response_format"] is Verdict
+    assert request["model"] == settings.openai_chat_model
+    assert request["reasoning_effort"] == settings.openai_reasoning_effort
+
+
+async def test_a_reply_with_no_object_raises_instead_of_returning_none(monkeypatch):
+    """A refusal, or a reply cut off before the object closed, parses to None.
+    Returned as it is, it would surface two calls later as an AttributeError
+    with no hint of the cause."""
+    provider = _async_openai_returning(monkeypatch, parsed=None)
+
+    with pytest.raises(RuntimeError, match="Verdict"):
+        await provider.complete([{"role": "user", "content": "?"}], Verdict)
+
+
+async def test_openai_without_a_key_fails_at_construction(monkeypatch):
+    from app.config import get_settings
+    from shared.llm import AsyncOpenAIProvider
+
+    monkeypatch.setattr(get_settings(), "openai_api_key", None)
+
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        AsyncOpenAIProvider()
