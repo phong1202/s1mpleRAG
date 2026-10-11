@@ -48,8 +48,8 @@ set_a:
     kind: baseline
     question: "Tàu thuyền chạy trên sông phải đáp ứng điều kiện gì mới được hoạt động?"
     gold_sha256: "270534d1af44f4c1da3ea8c8c49410f7b12b8bbc97b4c5eccd65ec32cb7efa98"
-    gold_page: 16
-    quote: "Điều kiện hoạt động của phương tiện"
+    gold_page: 17
+    quote: "Đạt tiêu chuẩn chất lượng, an toàn kỹ thuật và bảo vệ môi trường"
 
   - id: a06
     kind: baseline

@@ -86,6 +86,8 @@ class Candidate:
     score: float
     text: str
     ref: Ref
+    # Set by parent expansion: where the parent sits in its document.
+    heading: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,7 @@ class Passage:
     ordinal: int
     text: str
     ref: DocRef
+    heading: str | None = None
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,7 @@ from eval.run import (
     load_dataset,
     recall_at_k,
     reciprocal_rank,
+    retrieved,
     unreachable_labels,
 )
 from tests.helpers import seed_chunks
@@ -91,3 +92,50 @@ async def test_a_label_is_reachable_only_if_its_quote_sits_on_its_page(db_sessio
     ]
 
     assert await unreachable_labels(db_session, questions) == ["wrong-page", "no-such-text"]
+
+
+@pytest.mark.asyncio
+async def test_the_ruler_scores_what_leaves_fuse_with_the_earlier_turns_as_history():
+    """R2 and R3 change what fuse returns and R4 rewrites a follow-up from its
+    history. A ruler wired to one retriever and the bare last turn would have
+    to be rewritten between the baseline and the stages it is meant to judge."""
+    from types import SimpleNamespace
+
+    from app.core.contracts import Turn
+
+    calls: list = []
+
+    async def rewrite(query, trace):
+        calls.append(("rewrite", query.history))
+        return query
+
+    async def plan(query, trace):
+        calls.append(("plan", query.text))
+        return "the plan"
+
+    async def retrieve(plan, trace):
+        calls.append(("retrieve", plan))
+        return ["raw"]
+
+    async def fuse(query, candidates, trace):
+        calls.append(("fuse", candidates))
+        return ["fused"]
+
+    stages = SimpleNamespace(rewrite=rewrite, plan=plan, retrieve=retrieve, fuse=fuse)
+    question = LabelledQuestion(
+        id="f",
+        kind="followup",
+        question="con xe may?",
+        gold_sha256="a" * 64,
+        gold_page=1,
+        quote="q",
+        turns=("o to?", "con xe may?"),
+    )
+
+    assert await retrieved(stages, question) == ["fused"]
+    assert calls == [
+        ("rewrite", (Turn(role="user", text="o to?"),)),
+        ("plan", "con xe may?"),
+        ("retrieve", "the plan"),
+        ("fuse", ["raw"]),
+    ]

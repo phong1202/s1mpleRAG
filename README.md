@@ -5,8 +5,8 @@ Question answering over your own PDFs, with citations down to the page.
 Upload a PDF and a pipeline of workers parses it (OCR for scans), splits it
 into parent and child chunks, enriches and embeds them, and stores them in
 Postgres with pgvector. Ask a question and the API retrieves the closest
-chunks, builds a context from their parents, and returns an answer whose every
-claim points at a document and a page.
+chunks, builds a context from their parents, and returns an answer that cites
+the document and page each claim was taken from.
 
 The parts: a FastAPI service, three Celery workers, an OCR server on the GPU,
 and a Next.js frontend in `web/`.
@@ -305,8 +305,9 @@ uv run python -m eval.run --full           # adds citation accuracy and mean ite
 
 The last two need `LLM_PROVIDER=openai` and an ingested corpus: the corpus is
 embedded by the real model, and a stub query vector measured against it is
-noise. The baseline every retrieval change has to beat is recorded in §8 of
-[`docs/retrieval-design.md`](docs/retrieval-design.md).
+noise. The baseline every retrieval change has to beat belongs in §8 of
+[`docs/retrieval-design.md`](docs/retrieval-design.md); it has not been
+measured yet.
 
 ## Configuration
 

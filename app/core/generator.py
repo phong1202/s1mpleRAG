@@ -10,12 +10,15 @@ decision nodes R4 through R7 add later: the pipeline reasons in English and
 only the last step speaks the user's language.
 """
 
+import logging
 import re
 
 from pydantic import BaseModel
 
 from app.core.contracts import Citation, Context, DocCitation, DocRef, Query, WebCitation
 from shared.llm import AsyncLLMProvider
+
+logger = logging.getLogger(__name__)
 
 _CITATION = re.compile(r"\[(\d+)\]")
 
@@ -24,6 +27,10 @@ _SYSTEM = (
     "Tag every claim with [n], the number of the source it came from. "
     "If the sources do not answer the question, say so plainly instead of "
     "filling the gap. "
+    "Each source opens with its document, its heading and its page. Provisions "
+    "that read alike can apply to different subjects: use a source only if its "
+    "heading or text shows it covers what the question asks about, and say so "
+    "when none does. "
     "Write the answer in the same language as the question."
 )
 
@@ -40,8 +47,11 @@ class Draft(BaseModel):
 def build_prompt(query: Query, context: Context) -> list[dict]:
     lines = ["[TRUSTED SOURCES]"]
     for passage in context.passages:
-        # Page and filename are shown; the uuid is not. The map is in code.
-        lines.append(f"[{passage.ordinal}] (page {passage.ref.page_number}) {passage.text}")
+        # Document, heading and page are shown; the uuid is not. The map is in
+        # code. The heading is what tells two look-alike provisions apart.
+        label = [passage.ref.filename, passage.heading, f"page {passage.ref.page_number}"]
+        shown = " | ".join(part for part in label if part)
+        lines.append(f"[{passage.ordinal}] ({shown}) {passage.text}")
 
     if context.untrusted:
         lines.append("")
@@ -68,6 +78,7 @@ def map_citations(text: str, context: Context) -> tuple[Citation, ...]:
         if passage is None:
             # A phantom citation. Dropping it keeps a usable answer; accepting
             # it would hand back a reference to nothing.
+            logger.warning("dropped a citation to a source that was not given: [%s]", raw)
             continue
         reference = passage.ref
         if isinstance(reference, DocRef):

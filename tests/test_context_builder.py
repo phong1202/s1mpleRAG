@@ -114,3 +114,13 @@ def test_web_candidates_land_in_the_untrusted_list():
 
     assert [p.text for p in context.passages] == ["alpha"]
     assert [p.text for p in context.untrusted] == ["from the internet"]
+
+
+def test_a_passage_keeps_the_heading_of_its_candidate():
+    from dataclasses import replace
+
+    candidate = replace(_candidate(1, "noi dung"), heading="Chuong II > Dieu 8")
+
+    context = build_context(Context.empty(), [candidate], budget=6000)
+
+    assert context.passages[0].heading == "Chuong II > Dieu 8"

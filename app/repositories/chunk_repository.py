@@ -23,15 +23,20 @@ from app.core.contracts import Filters
 #
 # The ordering and the LIMIT stay inside a CTE over child_chunks alone: adding
 # the documents join above them can cost the HNSW index scan.
+#
+# The cast sits in a scalar subquery so it runs once. Written inline, it is
+# folded to a constant only while Postgres builds a custom plan; from the
+# sixth execution on a connection it switches to a generic plan and re-parses
+# the 1536-number string for every row it compares.
 _SEARCH = text("""
 WITH candidates AS (
   SELECT c.id, c.parent_id, c.document_id, c.page_number, c.content,
-         c.embedding <#> CAST(CAST(:qvec AS text) AS vector) AS distance
+         c.embedding <#> (SELECT CAST(CAST(:qvec AS text) AS vector)) AS distance
   FROM   child_chunks c
   WHERE  (CAST(:category AS text) IS NULL OR c.category = CAST(:category AS text))
     AND  (CAST(:document_id AS uuid) IS NULL OR c.document_id = CAST(:document_id AS uuid))
   -- ASC: <#> is NEGATIVE inner product, so nearest sorts first
-  ORDER  BY c.embedding <#> CAST(CAST(:qvec AS text) AS vector)
+  ORDER  BY c.embedding <#> (SELECT CAST(CAST(:qvec AS text) AS vector))
   LIMIT  :over_fetch
 )
 SELECT c.id AS child_id, c.parent_id, c.document_id, c.page_number,
@@ -42,7 +47,7 @@ ORDER  BY c.distance
 """)
 
 _PARENTS = text("""
-SELECT id, content FROM parent_chunks WHERE id = ANY(CAST(:ids AS uuid[]))
+SELECT id, content, heading_path FROM parent_chunks WHERE id = ANY(CAST(:ids AS uuid[]))
 """)
 
 
@@ -55,6 +60,14 @@ class ChildHit:
     child_content: str
     distance: float
     filename: str
+
+
+@dataclass(frozen=True)
+class ParentText:
+    content: str
+    # Where the parent sits in its document. A parent is a slice of an article
+    # and often does not name it; this is the only place that does.
+    heading_path: str | None
 
 
 class ChunkRepository:
@@ -73,6 +86,13 @@ class ChunkRepository:
             text("SELECT set_config('hnsw.ef_search', :ef, true)"),
             {"ef": str(get_settings().retrieval_ef_search)},
         )
+        # A filtered search through the index is otherwise filtered AFTER the
+        # index has returned its nearest ef_search rows: a category or document
+        # matching few of them comes back short, or empty, with no error.
+        # strict_order keeps scanning until the LIMIT is met, in exact order.
+        await self._session.execute(
+            text("SELECT set_config('hnsw.iterative_scan', 'strict_order', true)")
+        )
         rows = await self._session.execute(
             _SEARCH,
             {
@@ -84,11 +104,11 @@ class ChunkRepository:
         )
         return [ChildHit(**row) for row in rows.mappings()]
 
-    async def fetch_parents(self, parent_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+    async def fetch_parents(self, parent_ids: list[uuid.UUID]) -> dict[uuid.UUID, ParentText]:
         """One statement for the whole set. Fetching per parent inside the
         expansion loop is the classic N+1, and it hides well because every
         individual query is fast."""
         if not parent_ids:
             return {}
         rows = await self._session.execute(_PARENTS, {"ids": parent_ids})
-        return {row.id: row.content for row in rows}
+        return {row.id: ParentText(row.content, row.heading_path) for row in rows}

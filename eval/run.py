@@ -96,6 +96,28 @@ async def unreachable_labels(session, questions: list[LabelledQuestion]) -> list
     return missing
 
 
+def _as_query(question: LabelledQuestion):
+    """The question as a user would have sent it: the last turn, with the
+    turns before it as history. Until R4 reads the history, a follow-up is
+    searched as its bare last turn -- and scores zero, which is the point."""
+    from app.core.contracts import Query, Turn
+
+    earlier = tuple(Turn(role="user", text=turn) for turn in question.turns[:-1])
+    return Query(text=question.question, history=earlier)
+
+
+async def retrieved(stages, question: LabelledQuestion) -> list:
+    """What retrieval hands to the context for this question: the candidates
+    leaving `fuse`. Measured there, not at one retriever, so the same ruler
+    judges hybrid search (R2), reranking (R3) and rewriting (R4) unchanged."""
+    from app.core.contracts import Trace
+
+    trace = Trace()
+    query = await stages.rewrite(_as_query(question), trace)
+    plan = await stages.plan(query, trace)
+    return await stages.fuse(query, await stages.retrieve(plan, trace), trace)
+
+
 async def _check_labels() -> None:
     from app.utils.database import AsyncSessionLocal
 
@@ -112,10 +134,8 @@ async def _main(full: bool) -> None:
     from sqlalchemy import select
 
     from app.config import get_settings
-    from app.core.contracts import Filters, Plan, Query
     from app.core.deps import build_stages
     from app.core.pipeline import answer as run_pipeline
-    from app.core.retrievers.vector import VectorRetriever
     from app.models import Document
     from app.utils.database import AsyncSessionLocal
     from shared.llm import get_async_provider
@@ -140,13 +160,11 @@ async def _main(full: bool) -> None:
         rows = await session.execute(select(Document.id, Document.sha256_hash))
         sha_by_id = {row.id: row.sha256_hash for row in rows}
 
-        retriever = VectorRetriever(session, provider)
+        stages = build_stages(session, provider, settings)
 
         for question in dataset.set_a:
             gold = (question.gold_sha256, question.gold_page)
-            candidates = await retriever.search(
-                Plan(strategy="VECTOR_ONLY", queries=(question.question,), filters=Filters())
-            )
+            candidates = await retrieved(stages, question)
             hits = [Hit(sha_by_id[c.ref.document_id], c.ref.page_number) for c in candidates]
             recalls.append(recall_at_k(hits, gold, top_k))
             ranks.append(reciprocal_rank(hits, gold))
@@ -155,8 +173,8 @@ async def _main(full: bool) -> None:
                 continue
 
             result = await run_pipeline(
-                Query(text=question.question),
-                build_stages(session, provider, settings),
+                _as_query(question),
+                stages,
                 max_iterations=settings.retrieval_max_iterations,
             )
             iterations.append(result.trace.iterations)

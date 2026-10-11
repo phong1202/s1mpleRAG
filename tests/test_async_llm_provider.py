@@ -127,3 +127,20 @@ async def test_openai_without_a_key_fails_at_construction(monkeypatch):
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         AsyncOpenAIProvider()
+
+
+async def test_the_client_gives_up_long_before_the_sdk_would(monkeypatch):
+    """The SDK waits 600 seconds and retries twice. A request holds a database
+    connection while it waits, so a slow provider would drain the pool and
+    stall every other endpoint with it."""
+    from app.config import get_settings
+    from shared.llm import AsyncOpenAIProvider
+
+    built: list[dict] = []
+    monkeypatch.setattr(get_settings(), "openai_api_key", "sk-test")
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda **kwargs: built.append(kwargs))
+
+    AsyncOpenAIProvider()
+
+    assert built[0]["timeout"] <= 30
+    assert built[0]["max_retries"] <= 1

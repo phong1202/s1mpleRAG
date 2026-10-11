@@ -73,8 +73,42 @@ async def test_fetch_parents_returns_the_content_of_every_id(db_session):
     contents = await repository.fetch_parents(parent_ids)
 
     assert set(contents) == set(parent_ids)
-    assert sorted(contents.values()) == ["parent 0", "parent 1", "parent 2", "parent 3"]
+    assert sorted(p.content for p in contents.values()) == [
+        "parent 0",
+        "parent 1",
+        "parent 2",
+        "parent 3",
+    ]
 
 
 async def test_fetch_parents_of_nothing_asks_the_database_nothing(db_session):
     assert await ChunkRepository(db_session).fetch_parents([]) == {}
+
+
+async def test_fetch_parents_returns_each_parents_heading(db_session):
+    """A parent is a page-bounded slice of an article. Its text often does not
+    say which article -- the heading is the only place that does."""
+    await seed_chunks(db_session)
+    repository = ChunkRepository(db_session)
+    hits = await repository.search(vector=unit_vector(0), over_fetch=50, filters=Filters())
+
+    parents = await repository.fetch_parents([hits[0].parent_id])
+
+    assert parents[hits[0].parent_id].heading_path == "Chuong I > Dieu 0"
+
+
+async def test_search_sets_the_index_parameters_for_its_transaction(db_session):
+    """ef_search widens the candidate queue to cover the over-fetch. Iterative
+    scan keeps a filtered search complete: without it the index returns its
+    nearest ef_search rows first and the filter is applied to those, so a
+    filter matching few rows comes back short, or empty, with no error."""
+    from sqlalchemy import text
+
+    await seed_chunks(db_session)
+
+    await ChunkRepository(db_session).search(unit_vector(0), over_fetch=50, filters=Filters())
+
+    ef = await db_session.execute(text("SELECT current_setting('hnsw.ef_search')"))
+    scan = await db_session.execute(text("SELECT current_setting('hnsw.iterative_scan')"))
+    assert ef.scalar_one() == "100"
+    assert scan.scalar_one() == "strict_order"

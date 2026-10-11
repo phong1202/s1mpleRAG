@@ -128,3 +128,32 @@ async def test_generate_asks_for_the_schema_the_provider_was_scripted_with():
     await generate(Query(text="q"), _context(), provider)
 
     assert [schema for schema, _ in provider.calls] == [Draft]
+
+
+def test_each_source_names_its_document_and_heading():
+    """With only a page number, look-alike provisions cannot be told apart: a
+    fine for special-purpose machinery was reported as the fine for cars."""
+    from dataclasses import replace
+
+    context = _context()
+    labelled = replace(context.passages[0], heading="Chuong II > Dieu 8. Xe may chuyen dung")
+    context = replace(context, passages=(labelled,))
+
+    sources = build_prompt(Query(text="q"), context)[1]["content"]
+
+    assert "[1] (nd123.pdf | Chuong II > Dieu 8. Xe may chuyen dung | page 12)" in sources
+
+
+def test_a_source_without_a_heading_still_names_its_document():
+    sources = build_prompt(Query(text="q"), _context())[1]["content"]
+
+    assert "[1] (nd123.pdf | page 12)" in sources
+
+
+def test_a_phantom_citation_is_logged(caplog):
+    """Dropped silently, a model that starts inventing sources looks exactly
+    like one that does not."""
+    with caplog.at_level("WARNING"):
+        map_citations("Something [7].", _context())
+
+    assert "[7]" in caplog.text

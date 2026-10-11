@@ -281,6 +281,10 @@ class AsyncStubProvider:
         self._responses[schema] = list(responses)
 
 
+# Generous for one answer: a real question took under 7 s end to end.
+_READ_TIMEOUT_S = 30
+
+
 class AsyncOpenAIProvider:
     def __init__(self) -> None:
         from openai import AsyncOpenAI
@@ -288,7 +292,12 @@ class AsyncOpenAIProvider:
         settings = get_settings()
         if not settings.openai_api_key:
             raise RuntimeError("LLM_PROVIDER=openai but OPENAI_API_KEY is not set")
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        # The SDK's own limits are a 600 s wait and two retries. A request
+        # holds a database connection while it waits on the provider, so those
+        # limits would let one slow provider drain the pool.
+        self._client = AsyncOpenAI(
+            api_key=settings.openai_api_key, timeout=_READ_TIMEOUT_S, max_retries=1
+        )
         self._chat_model = settings.openai_chat_model
         self._reasoning_effort = settings.openai_reasoning_effort
         self._embed_model = settings.openai_embed_model
@@ -306,7 +315,8 @@ class AsyncOpenAIProvider:
         )
         parsed = response.choices[0].message.parsed
         if parsed is None:
-            # A refusal, or a reply cut off before the object closed.
+            # A refusal. A reply cut off mid-object never gets here: parse()
+            # raises on that itself.
             raise RuntimeError(f"the model returned no {schema.__name__}")
         return parsed
 

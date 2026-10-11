@@ -1208,7 +1208,7 @@ grep -n -i 'rag-beginner\|no RAG logic\|never populated\|PATCH' README.md
 
 Expected: the two endpoint lists agree; no `missing:` line; the last grep prints nothing.
 
-- [ ] **Step 4: Run what the README tells the reader to run** — every command block under "Running", "Linting", "Testing" and "Migrations" is run once, on a fresh clone or on the dev machine with the stack down. Where a command does not work, fix the README, not the code.
+- [x] **Step 4: Run what the README tells the reader to run** — every command block under "Running", "Linting", "Testing" and "Migrations" is run once, on a fresh clone or on the dev machine with the stack down. Where a command does not work, fix the README, not the code.
 
 - [x] **Step 5: Correct the spec's stale facts**
 

@@ -35,6 +35,7 @@ async def seed_chunks(session, children_per_parent: int = 3, parents: int = 4):
             document_id=document.id,
             chunk_index=p,
             content=f"parent {p}",
+            heading_path=f"Chuong I > Dieu {p}",
             token_count=600,
             page_start=p + 1,
             page_end=p + 1,

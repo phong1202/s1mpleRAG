@@ -88,3 +88,14 @@ async def test_expanded_ranks_are_contiguous_from_one(db_session):
     expanded = await expand_parents(ChunkRepository(db_session), reordered)
 
     assert [c.rank for c in expanded] == [1, 2, 3, 4]
+
+
+async def test_expansion_carries_the_parents_heading(db_session):
+    """The heading travels with the parent's text: three articles of one decree
+    can share a sentence word for word and differ only in whom they apply to."""
+    await seed_chunks(db_session)
+    candidates = await _candidates(db_session)
+
+    expanded = await expand_parents(ChunkRepository(db_session), candidates)
+
+    assert all(c.heading and c.heading.startswith("Chuong I > Dieu ") for c in expanded)

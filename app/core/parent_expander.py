@@ -18,7 +18,8 @@ from app.repositories.chunk_repository import ChunkRepository
 async def expand_parents(
     repository: ChunkRepository, candidates: list[Candidate]
 ) -> list[Candidate]:
-    """One candidate per parent: the parent's text, the winning child's ref.
+    """One candidate per parent: the parent's text and heading, the winning
+    child's ref.
 
     `candidates` arrives rank-ordered, so the first child of a parent to appear
     is its best one, and that child's page_number is what the citation points
@@ -30,11 +31,16 @@ async def expand_parents(
         if isinstance(candidate.ref, DocRef):
             winners.setdefault(candidate.ref.parent_id, candidate)
 
-    contents = await repository.fetch_parents(list(winners))
+    parents = await repository.fetch_parents(list(winners))
     # Ranks are reassigned because the collapse removes entries: a list that
     # went 1, 2, 5, 9 would tell every later stage there are better candidates
     # it cannot see.
     return [
-        replace(candidate, rank=position, text=contents[parent_id].strip())
+        replace(
+            candidate,
+            rank=position,
+            text=parents[parent_id].content.strip(),
+            heading=parents[parent_id].heading_path,
+        )
         for position, (parent_id, candidate) in enumerate(winners.items(), start=1)
     ]

@@ -99,3 +99,24 @@ async def test_a_trace_the_database_rejects_leaves_the_session_usable(
     # PendingRollbackError, which is what the request's own commit would hit.
     count = await db_session.execute(select(func.count()).select_from(QueryTrace))
     assert count.scalar_one() == 0
+
+
+async def test_the_trace_says_what_reached_the_context_and_what_was_cited(
+    query_client, db_session, seeded_corpus
+):
+    """Timings alone cannot locate a wrong answer. When a question about cars
+    was answered from an article on special-purpose machinery, the trace could
+    not say whether the right page had been in the context at all."""
+    client, provider = query_client
+    provider.script(Draft, Draft(answer="Lap hoa don dieu chinh [1]."))
+
+    await client.post("/query", json={"question": "hoa don dien tu"})
+
+    row = (await db_session.execute(select(QueryTrace))).scalar_one()
+    detail = {n["node"]: n["detail"] for n in row.nodes}
+    ranked = detail["expand_detail"]["parents"]
+    shown = detail["context_detail"]["passages"]
+    assert ranked[0]["file"] == "decree.pdf" and ranked[0]["page"] >= 1 and "score" in ranked[0]
+    assert [p["n"] for p in shown] == list(range(1, len(shown) + 1))
+    assert shown[0]["file"] == "decree.pdf" and shown[0]["page"] >= 1
+    assert detail["generate_detail"]["cited"] == [1]

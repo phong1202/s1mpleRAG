@@ -49,7 +49,9 @@ def build_context(previous: Context, candidates: list[Candidate], budget: int) -
         ordinal += 1
         if isinstance(ref, DocRef):
             seen_parents.add(ref.parent_id)
-            passages.append(Passage(ordinal=ordinal, text=candidate.text, ref=ref))
+            passages.append(
+                Passage(ordinal=ordinal, text=candidate.text, ref=ref, heading=candidate.heading)
+            )
         else:
             seen_urls.add(ref.url)
             untrusted.append(WebPassage(ordinal=ordinal, text=candidate.text, ref=ref))

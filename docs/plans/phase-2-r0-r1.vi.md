@@ -1208,7 +1208,7 @@ grep -n -i 'rag-beginner\|no RAG logic\|never populated\|PATCH' README.md
 
 Expected: hai danh sách endpoint khớp nhau; không dòng `missing:` nào; lệnh grep cuối không ra gì.
 
-- [ ] **Step 4: Chạy thử các lệnh README đưa ra** — mọi khối lệnh trong "Running", "Linting", "Testing" và "Migrations" được chạy một lần trên một clone sạch, hoặc trên máy dev với stack đã tắt. Lệnh nào không chạy được thì sửa README, không sửa code.
+- [x] **Step 4: Chạy thử các lệnh README đưa ra** — mọi khối lệnh trong "Running", "Linting", "Testing" và "Migrations" được chạy một lần trên một clone sạch, hoặc trên máy dev với stack đã tắt. Lệnh nào không chạy được thì sửa README, không sửa code.
 
 - [x] **Step 5: Sửa các dữ kiện lỗi thời trong spec**
 
