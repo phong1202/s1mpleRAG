@@ -1520,6 +1520,7 @@ dev = [
     { name = "pypdf" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pyyaml" },
     { name = "reportlab" },
     { name = "ruff" },
 ]
@@ -1552,6 +1553,7 @@ dev = [
     { name = "pypdf", specifier = ">=6.16.2" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "reportlab", specifier = ">=5.0.1" },
     { name = "ruff", specifier = ">=0.16.5" },
 ]

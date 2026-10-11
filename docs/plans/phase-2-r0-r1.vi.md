@@ -684,13 +684,13 @@ Con số nền. Mọi bậc từ R2 trở đi phải vượt qua thứ mà cái 
   - `unreachable_labels(session, questions) -> list[str]`: id của các nhãn không lần truy hồi nào trúng được
   - `python -m eval.run --check-labels` → chỉ kiểm nhãn rồi dừng; không gọi provider nào
 
-- [ ] **Step 1: Thêm dependency**
+- [x] **Step 1: Thêm dependency**
 
 ```bash
 uv add --dev pyyaml
 ```
 
-- [ ] **Step 2: Viết test đỏ**
+- [x] **Step 2: Viết test đỏ**
 
 ```python
 # tests/test_eval_harness.py
@@ -749,9 +749,9 @@ def test_set_a_covers_every_stage_that_will_be_measured_against_it():
 
     assert len(dataset.set_a) == 20
     assert kinds.count("baseline") == 8
-    assert kinds.count("code") == 4          # R2 -- vector trượt chuỗi chính xác
-    assert kinds.count("followup") == 4      # R4 -- điểm 0 cho tới khi có viết lại
-    assert kinds.count("summarize") == 4     # R5 -- vector search không làm được
+    assert kinds.count("code") == 4  # R2 -- vector trượt chuỗi chính xác
+    assert kinds.count("followup") == 4  # R4 -- điểm 0 cho tới khi có viết lại
+    assert kinds.count("summarize") == 4  # R5 -- vector search không làm được
     assert len(dataset.set_b) == 8
 ```
 
@@ -797,9 +797,9 @@ async def test_a_label_is_reachable_only_if_its_quote_sits_on_its_page(db_sessio
     assert await unreachable_labels(db_session, questions) == ["wrong-page", "no-such-text"]
 ```
 
-- [ ] **Step 3: Chạy để xác nhận đỏ** — module chưa tồn tại.
+- [x] **Step 3: Chạy để xác nhận đỏ** — module chưa tồn tại.
 
-- [ ] **Step 4: Viết khung dataset**
+- [x] **Step 4: Viết khung dataset**
 
 Hai mươi mục ở Set A và tám ở Set B. Bốn mục dưới đây là hình dạng mẫu; hai
 mươi tư mục còn lại được soạn ở Step 6. Một cái nhãn là hai khẳng định: đoạn
@@ -873,7 +873,7 @@ docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
 > child bắt đầu từ trang trước thì mang số của trang trước: nhãn như thế không
 > bao giờ trúng được. `--check-labels` ở Step 5 tồn tại để bắt đúng chuyện này.
 
-- [ ] **Step 5: Viết runner**
+- [x] **Step 5: Viết runner**
 
 ```python
 # eval/run.py
@@ -917,7 +917,8 @@ class Dataset:
 
 
 def load_dataset(path: str) -> Dataset:
-    raw = yaml.safe_load(open(path, encoding="utf-8"))
+    with open(path, encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle)
     return Dataset(
         set_a=[LabelledQuestion(**{**q, "turns": tuple(q.get("turns", ()))}) for q in raw["set_a"]],
         set_b=[BehaviourQuestion(**q) for q in raw["set_b"]],
@@ -1025,9 +1026,7 @@ async def _main(full: bool) -> None:
             candidates = await retriever.search(
                 Plan(strategy="VECTOR_ONLY", queries=(question.question,), filters=Filters())
             )
-            hits = [
-                Hit(sha_by_id[c.ref.document_id], c.ref.page_number) for c in candidates
-            ]
+            hits = [Hit(sha_by_id[c.ref.document_id], c.ref.page_number) for c in candidates]
             recalls.append(recall_at_k(hits, gold, top_k))
             ranks.append(reciprocal_rank(hits, gold))
 
@@ -1079,7 +1078,7 @@ if __name__ == "__main__":
     asyncio.run(_run(args.full, args.check_labels))
 ```
 
-- [ ] **Step 6: Soạn nháp 28 mục từ corpus**
+- [x] **Step 6: Soạn nháp 28 mục từ corpus**
 
 Agent soạn, bằng cách đọc `child_chunks.content` qua SQL. Không gọi OpenAI và **không chạy retrieval**: chọn câu hỏi từ kết quả tìm kiếm là lấy đầu ra của hệ thống làm đáp án cho chính nó.
 
@@ -1093,7 +1092,7 @@ Agent soạn, bằng cách đọc `child_chunks.content` qua SQL. Không gọi O
 | `followup`: có `turns`; `question` là lượt cuối và không tự đứng được | Điểm bằng 0 cho tới R4 là đúng thiết kế |
 | `summarize`: `gold_page` là trang mang phạm vi điều chỉnh của văn bản | Vector search không làm được việc này cho tới R5 |
 
-- [ ] **Step 7: Cho máy kiểm nhãn**
+- [x] **Step 7: Cho máy kiểm nhãn**
 
 ```bash
 uv run python -m eval.run --check-labels

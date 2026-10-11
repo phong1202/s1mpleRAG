@@ -684,13 +684,13 @@ The baseline number. Every stage from R2 onward has to beat what this prints tod
   - `unreachable_labels(session, questions) -> list[str]`: ids of the labels no retrieval could ever hit
   - `python -m eval.run --check-labels` → checks the labels and stops; calls no provider
 
-- [ ] **Step 1: Add the dependency**
+- [x] **Step 1: Add the dependency**
 
 ```bash
 uv add --dev pyyaml
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 ```python
 # tests/test_eval_harness.py
@@ -748,9 +748,9 @@ def test_set_a_covers_every_stage_that_will_be_measured_against_it():
 
     assert len(dataset.set_a) == 20
     assert kinds.count("baseline") == 8
-    assert kinds.count("code") == 4          # R2 -- vectors miss exact strings
-    assert kinds.count("followup") == 4      # R4 -- scores zero until rewriting
-    assert kinds.count("summarize") == 4     # R5 -- vector search cannot do this
+    assert kinds.count("code") == 4  # R2 -- vectors miss exact strings
+    assert kinds.count("followup") == 4  # R4 -- scores zero until rewriting
+    assert kinds.count("summarize") == 4  # R5 -- vector search cannot do this
     assert len(dataset.set_b) == 8
 ```
 
@@ -796,9 +796,9 @@ async def test_a_label_is_reachable_only_if_its_quote_sits_on_its_page(db_sessio
     assert await unreachable_labels(db_session, questions) == ["wrong-page", "no-such-text"]
 ```
 
-- [ ] **Step 3: Run it to verify it fails** — module does not exist.
+- [x] **Step 3: Run it to verify it fails** — module does not exist.
 
-- [ ] **Step 4: Write the dataset skeleton**
+- [x] **Step 4: Write the dataset skeleton**
 
 Twenty entries in Set A and eight in Set B. The four below are the shape; the
 remaining twenty-four are drafted in Step 6. A label is two claims: the quote
@@ -873,7 +873,7 @@ docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
 > that starts on the previous page carries the previous page's number: such a
 > label can never be hit. `--check-labels` in Step 5 exists to catch just that.
 
-- [ ] **Step 5: Write the runner**
+- [x] **Step 5: Write the runner**
 
 ```python
 # eval/run.py
@@ -917,7 +917,8 @@ class Dataset:
 
 
 def load_dataset(path: str) -> Dataset:
-    raw = yaml.safe_load(open(path, encoding="utf-8"))
+    with open(path, encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle)
     return Dataset(
         set_a=[LabelledQuestion(**{**q, "turns": tuple(q.get("turns", ()))}) for q in raw["set_a"]],
         set_b=[BehaviourQuestion(**q) for q in raw["set_b"]],
@@ -1025,9 +1026,7 @@ async def _main(full: bool) -> None:
             candidates = await retriever.search(
                 Plan(strategy="VECTOR_ONLY", queries=(question.question,), filters=Filters())
             )
-            hits = [
-                Hit(sha_by_id[c.ref.document_id], c.ref.page_number) for c in candidates
-            ]
+            hits = [Hit(sha_by_id[c.ref.document_id], c.ref.page_number) for c in candidates]
             recalls.append(recall_at_k(hits, gold, top_k))
             ranks.append(reciprocal_rank(hits, gold))
 
@@ -1079,7 +1078,7 @@ if __name__ == "__main__":
     asyncio.run(_run(args.full, args.check_labels))
 ```
 
-- [ ] **Step 6: Draft the 28 items from the corpus**
+- [x] **Step 6: Draft the 28 items from the corpus**
 
 The agent drafts them by reading `child_chunks.content` over SQL. No OpenAI call and **no retrieval run**: picking questions out of search results makes the system's own output its answer key.
 
@@ -1093,7 +1092,7 @@ The agent drafts them by reading `child_chunks.content` over SQL. No OpenAI call
 | `followup`: has `turns`; `question` is the last turn and cannot stand alone | Scoring zero until R4 is by design |
 | `summarize`: `gold_page` is the page carrying the document's scope article | Vector search cannot do this until R5 |
 
-- [ ] **Step 7: Let the machine check the labels**
+- [x] **Step 7: Let the machine check the labels**
 
 ```bash
 uv run python -m eval.run --check-labels
