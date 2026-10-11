@@ -305,9 +305,8 @@ uv run python -m eval.run --full           # adds citation accuracy and mean ite
 
 The last two need `LLM_PROVIDER=openai` and an ingested corpus: the corpus is
 embedded by the real model, and a stub query vector measured against it is
-noise. The baseline every retrieval change has to beat belongs in §8 of
-[`docs/retrieval-design.md`](docs/retrieval-design.md); it has not been
-measured yet.
+noise. The baseline every retrieval change has to beat is recorded in §8.7 of
+[`docs/retrieval-design.md`](docs/retrieval-design.md).
 
 ## Configuration
 

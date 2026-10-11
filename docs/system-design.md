@@ -399,10 +399,25 @@ leaders) as a loop and retries — capped at 2 retries here, against its default
 
 1. **Sanitize:** repair broken table pipes, collapse blank runs, strip repeated headers/footers.
    **Fenced code blocks are skipped entirely** — pipe-repair regex corrupts them.
-2. **Parent chunks:** 500–1000 tokens, split on markdown headings first, then paragraphs.
-3. **Child chunks:** 100–200 tokens within each parent, carrying `parent_index` and `page_number`.
-4. **Drop empties:** chunks under 20 tokens, or pure boilerplate — *before* anything bills per token.
-5. Assign deterministic `chunk_index` in document order. This is what makes S5 idempotent.
+2. **Outline:** the document's headings give every chunk a `heading_path`. The markdown level a
+   parser put on a heading is **not** used as its depth: in one OCR'd decree the same kind of line
+   ("Điều N.") arrived as h2, h3, h4, bold and plain text, and 29 of its 54 articles were not `#`
+   headings at all. Instead, from the document itself and with no list of keywords:
+   - a heading is a markdown heading or a line bold from end to end;
+   - one that reads "words + number" ("Điều 6.", "Chương II", "Article 3") has a *kind*, the words;
+     a kind that recurs is structure, and a plain line is accepted when it is the next number of a
+     known kind;
+   - a heading closes the open heading of its own kind and everything inside it, and kind A is
+     nested under kind B only if somewhere two or more A sit between two consecutive B.
+
+   A document with no numbered headings falls back to its markdown levels. Known limit: unnumbered
+   headings with noisy levels are still filed by those levels.
+3. **Parent chunks:** 500–1000 tokens, split at the outline's headings first, then by tokens.
+4. **Child chunks:** 100–200 tokens within each parent, carrying `parent_index`, `page_number` and
+   the parent's `heading_path`.
+5. **Drop empties:** chunks under 20 tokens, or pure boilerplate — *before* anything bills per token.
+6. Assign deterministic `chunk_index` in document order. This is what makes S5 idempotent.
+7. Write the document's title into `chunks.json`, once, for S4 and S5 to read (see S4).
 
 Pure CPU, no network, no external calls. The one stage where a full re-run costs milliseconds.
 
@@ -417,6 +432,10 @@ Pure CPU, no network, no external calls. The one stage where a full re-run costs
 Two LLM concerns, one stage, because they share a quota and a failure mode.
 
 **Hard metadata** — filename, page number, created_at. Free, no LLM.
+
+Each chunk is sent with its `heading_path`, and the context sentence must say what or whom the
+chunk applies to when only the heading does. A clause in the middle of an article rarely names its
+subject; written from the chunk alone, the sentence could not either.
 
 **Soft metadata + context** — batched `gpt-6-luna` calls, **20 child chunks per request**, using
 structured output keyed by chunk id:
@@ -444,7 +463,12 @@ retrieval slightly; a dead-lettered document helps nobody.
 
 **In:** `enriched.json`  **Out:** `staging/{doc_id}/embeddings.npy` + manifest
 
-1. Batch **100 texts per request** to `text-embedding-3-large`, `dimensions=1536`.
+1. Batch **100 texts per request** to `text-embedding-3-large`, `dimensions=1536`. The text embedded
+   for a chunk is `title > heading_path`, then the S3 context sentence, then the content — and S5
+   stores exactly that text as `contextualized`. The first line is what separates two provisions
+   that read the same word for word (a fine for cars and the same clause for motorbikes).
+   The keyword index does not share this yet: `child_chunks.tsv` is generated from `content` alone,
+   so a keyword search still cannot see an article's title. That belongs to the R2 plan.
 2. **L2-normalize every vector.** Non-negotiable — `vector_ip_ops` assumes it.
 3. Assert returned count == input count; assert every vector is 1536-dim and finite.
 4. Write `.npy` (float32) plus a JSON manifest mapping row index → `chunk_index`.

@@ -586,9 +586,9 @@ Commit message đề xuất: `feat(worker): re-ingest from the parse checkpoint`
 
 **Files:** không có code.
 
-- [ ] **Step 1: Hỏi trước khi chạy.** Bước này gọi OpenAI cho khoảng 3.000 chunk (S3 và S4 của 10 tài liệu), ước chừng 0,25 USD.
+- [x] **Step 1: Hỏi trước khi chạy.** Bước này gọi OpenAI cho khoảng 3.000 chunk (S3 và S4 của 10 tài liệu), ước chừng 0,25 USD.
 
-- [ ] **Step 2: Bật stack với code mới và nạp lại**
+- [x] **Step 2: Bật stack với code mới và nạp lại**
 
 ```bash
 docker compose up -d --wait db rabbitmq redis minio
@@ -598,7 +598,7 @@ docker compose exec worker-cpu python -m worker.reingest --all --restore-from da
 
 `worker-ocr` không cần chạy: không stage nào của lần này dùng hàng đợi `ocr`. Theo dõi qua `GET /documents` cho tới khi cả 10 tài liệu trở lại `COMPLETED`.
 
-- [ ] **Step 3: Kiểm dữ liệu**
+- [x] **Step 3: Kiểm dữ liệu**
 
 ```bash
 docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
@@ -610,7 +610,7 @@ SQL
 
 Expected: với chín văn bản luật, gần như mọi parent nằm dưới một điều (trừ phần mở đầu và phụ lục). Rồi kiểm riêng ba trang giống chữ nhau: `heading_path` của parent ở trang 14, 20 và 25 của NĐ 168 phải lần lượt chứa "xe ô tô", "xe mô tô" và "xe máy chuyên dùng".
 
-- [ ] **Step 4: Chạy lại kiểm nhãn**
+- [x] **Step 4: Chạy lại kiểm nhãn**
 
 ```bash
 uv run python -m eval.run --check-labels
@@ -618,13 +618,13 @@ uv run python -m eval.run --check-labels
 
 Expected: `labels           20 reachable`. Chia chunk đã đổi, nên một đoạn trích có thể đã rơi sang chunk khác; nhãn nào bị báo thì sửa `quote`, không sửa `gold_page` trừ khi trang thật sự sai.
 
-- [ ] **Step 5: Hỏi lại câu đã sai** (1 embed + 1 chat)
+- [x] **Step 5: Hỏi lại câu đã sai** (1 embed + 1 chat)
 
 "Người điều khiển xe ô tô không chấp hành hiệu lệnh của đèn tín hiệu giao thông bị phạt bao nhiêu tiền?" Đạt khi câu trả lời là 18 đến 20 triệu đồng **và** trích dẫn chỉ vào trang 14. Dù đạt hay không, đọc `context_detail` trong `query_traces` để biết trang 14 có vào ngữ cảnh không, và ghi lại.
 
-- [ ] **Step 6: Đo con số nền của R1** — đây là Task 12 Step 9 của plan R0 + R1: `uv run python -m eval.run`, ghi `recall@10` và `MRR` vào `docs/retrieval-design.md` §8.
+- [x] **Step 6: Đo con số nền của R1** — đây là Task 12 Step 9 của plan R0 + R1: `uv run python -m eval.run`, ghi `recall@10` và `MRR` vào `docs/retrieval-design.md` §8.
 
-- [ ] **Step 7: Dừng và báo cáo**
+- [x] **Step 7: Dừng và báo cáo**
 
 ---
 
@@ -633,9 +633,9 @@ Expected: `labels           20 reachable`. Chia chunk đã đổi, nên một đ
 **Files:**
 - Modify: `docs/system-design.md` §6 (S2, S3, S4)
 
-- [ ] **Step 1:** S2: thay "split on markdown headings first" bằng ba quy tắc của Task 1, kèm lý do (bảng số liệu ở đầu plan này) và phần lui về heading markdown cho tài liệu không có tiêu đề đánh số.
-- [ ] **Step 2:** S3: ghi rằng mỗi chunk được gửi kèm tiêu đề. S4: ghi dạng của văn bản được embed (`tên văn bản > tiêu đề`, câu ngữ cảnh, nội dung).
-- [ ] **Step 3:** Ghi một rủi ro còn lại: cột `child_chunks.tsv` (nền của BM25 ở R2) sinh từ `content`, không gồm tiêu đề, nên tìm theo từ khoá vẫn chưa thấy tên điều. Việc đó thuộc plan của R2.
+- [x] **Step 1:** S2: thay "split on markdown headings first" bằng ba quy tắc của Task 1, kèm lý do (bảng số liệu ở đầu plan này) và phần lui về heading markdown cho tài liệu không có tiêu đề đánh số.
+- [x] **Step 2:** S3: ghi rằng mỗi chunk được gửi kèm tiêu đề. S4: ghi dạng của văn bản được embed (`tên văn bản > tiêu đề`, câu ngữ cảnh, nội dung).
+- [x] **Step 3:** Ghi một rủi ro còn lại: cột `child_chunks.tsv` (nền của BM25 ở R2) sinh từ `content`, không gồm tiêu đề, nên tìm theo từ khoá vẫn chưa thấy tên điều. Việc đó thuộc plan của R2.
 
 Commit message đề xuất: `docs(design): describe keyword-based structure and heading-aware enrichment`
 

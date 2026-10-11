@@ -645,6 +645,25 @@ stage that might need it.
 **No stage merges without a before/after number from the eval set.** Including when the number says
 the stage did not help — that is a result too, and a reason to delete the node rather than carry it.
 
+### 8.7 The R1 baseline
+
+Measured 2026-10-11 with `python -m eval.run` (retrieval-only), R0 as built: vector search alone, every
+stage flag off.
+
+| | |
+|---|---|
+| Set A questions | 20 (`eval/dataset.yaml`, all labels machine-checked as reachable) |
+| **`recall@10`** | **0.850** |
+| **`MRR`** | **0.573** |
+| Corpus | 10 documents, 2,946 child chunks, re-ingested the same day with heading-aware chunking, enrichment and embedding |
+| Embedding | `text-embedding-3-large`, 1536 dimensions |
+
+Read it with two cautions. The set is provisionally approved, not yet frozen: a change to it voids
+this number. And 0.850 is higher than §8.4 predicts for a set in which eight questions (follow-ups and
+"summarise X") are meant to score zero until R4 and R5: several of those golds are evidently reachable
+by plain vector search, so they will not show the jump those stages are supposed to produce. A
+per-kind breakdown, which the runner does not print yet, would say which.
+
 ---
 
 ## 9. Repository layout

@@ -24,13 +24,13 @@ Cập nhật 2026-10-10, sau lượt thực thi đầu. Chưa có gì được c
 | --- | --- |
 | 1 → 9 (R0) | Đã commit trên `phase-2`. Tóm tắt ở mục R0. |
 | 9b, 9c | Xong. |
-| 9d | **Chờ**: gọi OpenAI (3 embed + 3 chat), cần được cho phép. |
+| 9d | Xong. Lần đầu sai một câu (lấy nhầm điều khoản giống chữ); sau plan [ngữ cảnh điều khoản](phase-2-article-context.vi.md) câu đó trả lời đúng, trích trang 14. |
 | 10, 11 | Xong. |
-| 12 | Step 1 → 7 xong: runner, test, 28 mục nháp, máy báo 20 nhãn trúng được. **Chờ**: người duyệt `eval/dataset.yaml` (Step 8), rồi đo con số nền bằng OpenAI (Step 9). |
-| 13 | README viết lại và các dữ kiện trong spec đã sửa (Step 1 → 3, 5). **Còn**: chạy thử các lệnh README đưa ra trên stack đã tắt (Step 4), và con số nền ở spec §8. |
+| 12 | Step 1 → 7 xong: runner, test, 28 mục nháp, máy báo 20 nhãn trúng được. Bộ câu hỏi được tạm duyệt (chưa đóng băng). Con số nền đo ngày 2026-10-11 trên corpus đã nạp lại: `recall@10` 0,850, `MRR` 0,573, ghi ở spec §8.7. |
+| 13 | README viết lại và các dữ kiện trong spec đã sửa (Step 1 → 3, 5). Các lệnh của README đã chạy thử, trừ `pnpm dev` (thuộc session FE) và một lần nạp thật khi không có `chandra`. |
 | 14 | Xong: khuyến nghị không dùng DeepSeek. |
 
-Suite hiện tại: 318 test xanh (`--ignore=tests/test_ocr_service.py`), `ruff check .` và `ruff format --check .` sạch.
+Sau review, lượt sửa và plan ngữ cảnh điều khoản: 342 test xanh (`--ignore=tests/test_ocr_service.py`), `ruff check .` và `ruff format --check .` sạch.
 
 ### Xung đột đã gỡ khi rebase
 

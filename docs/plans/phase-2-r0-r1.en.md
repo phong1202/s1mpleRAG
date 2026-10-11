@@ -24,13 +24,13 @@ Updated 2026-10-10, after the first execution pass. Nothing is committed; each t
 | --- | --- |
 | 1 → 9 (R0) | Committed on `phase-2`. Summarised under R0. |
 | 9b, 9c | Done. |
-| 9d | **Waiting**: it calls OpenAI (3 embeddings + 3 chat calls) and needs a go-ahead. |
+| 9d | Done. One answer was wrong at first (a look-alike provision); after the [article-context plan](phase-2-article-context.vi.md) that question is answered correctly, citing page 14. |
 | 10, 11 | Done. |
-| 12 | Steps 1 → 7 done: runner, tests, 28 drafted items, 20 labels reported reachable. **Waiting**: a person reviews `eval/dataset.yaml` (Step 8), then the baseline is measured with OpenAI (Step 9). |
-| 13 | README rewritten and the spec's facts corrected (Steps 1 → 3, 5). **Left**: running the README's commands with the stack down (Step 4), and the baseline in spec §8. |
+| 12 | Steps 1 → 7 done: runner, tests, 28 drafted items, 20 labels reported reachable. The set is provisionally approved (not yet frozen). Baseline measured 2026-10-11 on the re-ingested corpus: `recall@10` 0.850, `MRR` 0.573, recorded in spec §8.7. |
+| 13 | README rewritten and the spec's facts corrected (Steps 1 → 3, 5). The README's commands were run, except `pnpm dev` (the FE session's) and a live ingest with `chandra` absent. |
 | 14 | Done: the recommendation is not to use DeepSeek. |
 
-The suite now: 318 tests green (`--ignore=tests/test_ocr_service.py`), `ruff check .` and `ruff format --check .` clean.
+After the review, the fix pass and the article-context plan: 342 tests green (`--ignore=tests/test_ocr_service.py`), `ruff check .` and `ruff format --check .` clean.
 
 ### Conflicts resolved in the rebase
 
