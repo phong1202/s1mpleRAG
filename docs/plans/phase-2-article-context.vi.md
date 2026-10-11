@@ -4,7 +4,7 @@
 
 **Mục tiêu:** Mỗi chunk mang theo tên điều, mục, chương và tên văn bản của nó, cả trong `heading_path` lẫn trong văn bản được embed, để các điều khoản giống chữ nhau không còn bị lấy nhầm.
 
-**Kiến trúc:** S2 thôi tin vào cấp heading của markdown và nhận diện cấu trúc văn bản luật bằng từ khoá (Phần, Chương, Mục, Điều). S3 được đưa tiêu đề của chunk khi viết câu ngữ cảnh. S4 ghép tên văn bản và tiêu đề vào đầu văn bản được embed. Một lệnh nạp lại chạy S2 → S5 từ checkpoint của S1, nên không phải OCR lại.
+**Kiến trúc:** S2 thôi tin vào cấp heading của markdown: nó coi mọi dòng heading hoặc in đậm là tiêu đề, và suy ra thứ bậc từ cách các tiêu đề đánh số lặp lại trong chính tài liệu, không dùng danh sách từ khoá nào. S3 được đưa tiêu đề của chunk khi viết câu ngữ cảnh. S4 ghép tên văn bản và tiêu đề vào đầu văn bản được embed. Một lệnh nạp lại chạy S2 → S5 từ checkpoint của S1, nên không phải OCR lại.
 
 **Tech Stack:** Celery · PyMuPDF/Chandra (không đổi) · OpenAI qua `shared/llm.py` · pytest · uv · ruff
 
@@ -29,20 +29,23 @@ Hệ quả: 29 trên 54 điều của NĐ 168 không được nhận là tiêu �
 
 Thuật toán ở Task 1 đã được chạy thử trên checkpoint của cả 10 tài liệu: trang 14 nhận tiêu đề "Điều 6 … xe ô tô …", trang 20 "Điều 7 … xe mô tô, xe gắn máy …", trang 25 "Điều 8 … xe máy chuyên dùng".
 
+Giới hạn đã biết của thuật toán: nó cần tiêu đề có số. Một tài liệu chỉ có tiêu đề không đánh số và cấp heading lộn xộn vẫn được chia như hiện nay, tức vẫn có thể sai cây.
+
 ## Global Constraints
 
 - **Git:** KHÔNG chạy `git commit`, `git push`, `git merge`. Mỗi task kết thúc bằng dừng và báo cáo.
 - **Suite xanh ở cuối mọi task:** `uv run pytest -q --ignore=tests/test_ocr_service.py`, `uv run ruff check .`, `uv run ruff format --check .`.
 - **Gọi OpenAI là việc có chủ đích.** Chỉ Task 5 gọi: nạp lại 10 tài liệu là khoảng 3.000 chunk qua S3 và S4, ước chừng 0,25 USD theo bảng giá ở Task 14 của plan R0 + R1. Hỏi trước khi chạy.
 - **Không OCR lại.** Nạp lại bắt đầu từ `parsed.json`. Checkpoint trong MinIO tự hết hạn sau 7 ngày (các tài liệu nạp ngày 06 và 07/10); bản sao của cả 10 file nằm ở `data/parsed-backup/` (không commit).
-- **Tài liệu không phải văn bản luật không được đổi hành vi:** không có dòng Phần, Chương, Mục, Điều nào thì S2 chia theo heading markdown như hiện nay.
+- **Tài liệu không có tiêu đề đánh số không được đổi hành vi:** S2 chia theo heading markdown như hiện nay.
+- **Không viết cứng từ khoá của một loại tài liệu nào vào code.** Cấu trúc được học từ từng tài liệu.
 - **`web/` không thuộc plan này.**
 - **Sau khi nạp lại, mọi chunk đổi.** Nhãn của `eval/dataset.yaml` neo vào `(sha256, page)` nên vẫn còn nghĩa, nhưng phải chạy lại `--check-labels`. Con số nền của R1 chỉ được đo sau Task 5.
 
 ## Cấu trúc file
 
 ```
-worker/steps/chunking.py      SỬA — cấu trúc theo từ khoá; child mang heading_path (Task 1, 2)
+worker/steps/chunking.py      SỬA — dàn ý học từ tài liệu; child mang heading_path (Task 1, 2)
 shared/llm.py                 SỬA — enrich() gửi kèm tiêu đề (Task 2)
 worker/steps/embedding.py     SỬA — contextualize() ghép tên văn bản và tiêu đề (Task 3)
 worker/stages.py              SỬA — embed/persist truyền tên văn bản; relaunch_from_structure (Task 3, 4)
@@ -56,195 +59,251 @@ docs/system-design.md         SỬA — §6 S2, S3, S4 (Task 6)
 
 ---
 
-## Task 1: S2 nhận diện cấu trúc bằng từ khoá
+## Task 1: S2 dựng dàn ý từ chính tài liệu, không cần danh sách từ khoá
+
+Bản đầu của task này nhận diện bốn từ "Phần, Chương, Mục, Điều" viết cứng trong code. Bản này bỏ danh sách đó. Ba quy tắc, không quy tắc nào nhắc tới một từ cụ thể:
+
+1. **Tiêu đề là gì.** Một dòng heading markdown, hoặc một dòng in đậm từ đầu tới cuối. Số dấu `#` không được dùng làm độ sâu.
+2. **Loại của tiêu đề.** Tiêu đề có dạng "chữ + số" ("Điều 6.", "Chương II", "Article 3", "Phụ lục I") thuộc một loại, là phần chữ. Loại nào xuất hiện từ hai lần trở lên trong tài liệu thì là cấu trúc. Một dòng thường cũng được nhận nếu nó là số kế tiếp của một loại đã biết ("Điều 7." ngay sau "Điều 6.").
+3. **Thứ bậc.** Một tiêu đề đóng tiêu đề cùng loại đang mở, cùng mọi thứ nằm trong nó. Loại A chỉ là phần chia nhỏ của loại B nếu có chỗ hai tiêu đề A trở lên nằm giữa hai tiêu đề B liên tiếp; không thì A không bao giờ được xếp dưới B.
+
+Tài liệu không có tiêu đề đánh số nào thì chia theo heading markdown như hiện nay.
+
+Đã chạy thử trên checkpoint của cả 10 tài liệu (2026-10-11): thuật toán tự tìm ra "chương, mục, điều", và cả "phụ lục", "mẫu số" ở hai nghị định; số điều tìm được là 87, 109, 89, 38, 53, 65, 19, 21, 55, so với 85, 111, 89, 39, 54, 65, 19, 21, 55 của bản dùng từ khoá. Trang 14 của NĐ 168 nhận đường dẫn "Chương II … > Mục 1 … > Điều 6 … xe ô tô …".
 
 **Files:**
-- Modify: `worker/steps/chunking.py` (`split_sections` và các hằng số ngay trên nó)
+- Modify: `worker/steps/chunking.py` (thêm `split_document`; `chunk_document` gọi nó; `split_sections` giữ nguyên làm đường lui)
 - Modify: `tests/test_chunking.py`
 
 **Interfaces:**
-- Produces: `split_sections(markdown, stack=None) -> list[tuple[str, str]]`, chữ ký không đổi. Với văn bản luật, `heading_path` có dạng `Chương II. <tên> > Mục 1. <tên> > Điều 6. <tên>`.
+- Produces: `split_document(pages: list[str]) -> list[list[tuple[str, str]]]`: với mỗi trang, danh sách `(heading_path, body)`. Cần cả tài liệu một lúc, vì loại và thứ bậc được học từ toàn bộ các tiêu đề.
 
 - [ ] **Step 1: Viết test đỏ**
 
 ```python
-# tests/test_chunking.py — thêm vào cuối. `split_sections` đã được import ở đầu file.
-def _paths(markdown: str, stack=None) -> list[str]:
-    return [path for path, _ in split_sections(markdown, stack)]
+# tests/test_chunking.py — thêm vào cuối; thêm `split_document` vào dòng import từ
+# worker.steps.chunking ở đầu file.
 
 
-def test_an_article_is_a_heading_whatever_markup_the_parser_gave_it():
+def _paths(*pages: str) -> list[str]:
+    return [path for page in split_document(list(pages)) for path, _ in page]
+
+
+def test_a_numbered_heading_counts_whatever_markup_the_parser_gave_it():
     """One decree, parsed in one run, held the same kind of line as h2, h3, h4,
-    h5, bold and plain text. Only the bold ones were being missed -- 29 of 54
-    articles -- and every chunk under them inherited the wrong heading."""
-    markdown = (
+    h5, bold and plain text. Only '#' lines were read as headings, so 29 of its
+    54 articles were missed and their chunks inherited the wrong heading."""
+    page = (
         "##### Điều 5. Mot\nnoi dung 5\n\n"
         "**Điều 6. Xử phạt người điều khiển xe ô tô**\nnoi dung 6\n\n"
         "Điều 7. Xử phạt người điều khiển xe mô tô\nnoi dung 7\n"
     )
 
-    assert _paths(markdown) == [
+    assert _paths(page) == [
         "Điều 5. Mot",
         "Điều 6. Xử phạt người điều khiển xe ô tô",
         "Điều 7. Xử phạt người điều khiển xe mô tô",
     ]
 
 
-def test_depth_comes_from_the_keyword_not_the_markdown_level():
+def test_depth_comes_from_how_headings_recur_not_from_the_markdown_level():
     """`# Điều 2` followed by `## Chương II` used to file the whole chapter
-    under Article 2."""
-    markdown = "# Điều 2. Đối tượng\nx\n\n## Chương II\n\n## HÀNH VI VI PHẠM\n\n#### Mục 1. QUY TẮC\ny\n\n**Điều 6. Xe ô tô**\nz\n"
+    under Article 2. A chapter never falls twice between two articles, so it
+    cannot be a subdivision of one."""
+    page = (
+        "# Điều 1. A\nx\n\n# Điều 2. B\nx\n\n"
+        "## Chương II\n\n## HÀNH VI VI PHẠM\n\n"
+        "#### Mục 1. QUY TẮC\ny\n\n**Điều 6. Xe ô tô**\nz\n\n"
+        "#### Mục 2. KHÁC\n\n**Điều 7. C**\nz\n\n"
+        "## Chương III\n\n## THI HÀNH\n\n**Điều 8. D**\nz\n"
+    )
 
-    assert _paths(markdown)[-1] == "Chương II. HÀNH VI VI PHẠM > Mục 1. QUY TẮC > Điều 6. Xe ô tô"
+    paths = _paths(page)
+
+    assert "Chương II. HÀNH VI VI PHẠM > Mục 1. QUY TẮC > Điều 6. Xe ô tô" in paths
+    assert paths[-1] == "Chương III. THI HÀNH > Điều 8. D"
 
 
-def test_a_new_article_closes_the_one_before_it():
-    assert _paths("**Điều 6. A**\nx\n\n**Điều 7. B**\ny\n") == ["Điều 6. A", "Điều 7. B"]
+def test_no_list_of_words_is_involved():
+    """The kinds are whatever the document numbers. Nothing here names them."""
+    page = (
+        "# Part 1\n\n## Article 1. Scope\nx\n\n## Article 2. Terms\ny\n\n"
+        "# Part 2\n\n## Article 3. Fees\nz\n"
+    )
+
+    assert _paths(page) == [
+        "Part 1",
+        "Part 1 > Article 1. Scope",
+        "Part 1 > Article 2. Terms",
+        "Part 2",
+        "Part 2 > Article 3. Fees",
+    ]
 
 
 def test_a_reference_or_a_quoted_article_is_not_a_heading():
     """"Điều 24 của Luật này" is a reference, and an amending decree quotes
-    whole articles of the decree it amends. Neither opens a section here."""
-    markdown = (
+    whole articles of the decree it amends. Neither opens a section."""
+    page = (
         "**Điều 1. Sửa đổi, bổ sung Điều 9**\n"
         "Điều 24 của Luật này được áp dụng.\n"
         "“Điều 9. Cơ sở dữ liệu\n"
-        "a) theo quy định tại Điều 6. của Nghị định này\n"
+        "a) theo quy định tại Điều 6. của Nghị định này\n\n"
+        "**Điều 2. Hiệu lực**\nx\n"
     )
 
-    assert _paths(markdown) == ["Điều 1. Sửa đổi, bổ sung Điều 9"]
+    assert _paths(page) == ["Điều 1. Sửa đổi, bổ sung Điều 9", "Điều 2. Hiệu lực"]
 
 
 def test_the_open_article_carries_over_a_page_break():
-    stack: list[str] = []
-    split_sections("## Chương I\n\n## QUY ĐỊNH CHUNG\n\n**Điều 6. Xe ô tô**\nkhoan 1\n", stack)
+    first = "**Điều 5. A**\nx\n\n**Điều 6. Xe ô tô**\nkhoan 1\n"
 
-    assert _paths("khoan 9, tiep theo trang truoc\n", stack) == [
-        "Chương I. QUY ĐỊNH CHUNG > Điều 6. Xe ô tô"
-    ]
+    assert _paths(first, "khoan 9, tiep theo trang truoc\n")[-1] == "Điều 6. Xe ô tô"
 
 
-def test_a_document_with_no_legal_structure_still_follows_its_markdown():
+def test_a_document_with_no_numbered_headings_still_follows_its_markdown():
     assert _paths("# A\nx\n\n## B\ny\n\n# C\nz\n") == ["A", "A > B", "C"]
 ```
 
-- [ ] **Step 2: Chạy để xác nhận đỏ**
+- [ ] **Step 2: Chạy để xác nhận đỏ** — `ImportError: cannot import name 'split_document'`.
 
-```bash
-uv run pytest -q tests/test_chunking.py
-```
+- [ ] **Step 3: Thêm `split_document` và cho `chunk_document` dùng nó**
 
-Expected: 5 FAIL trong 6 test mới (test cuối xanh sẵn, nó giữ hành vi cũ); 11 test có sẵn vẫn PASS.
-
-- [ ] **Step 3: Thay `split_sections`**
-
-Giữ dòng `_HEADING = re.compile(...)`. Thay toàn bộ hàm `split_sections` hiện tại bằng khối dưới đây, và giữ lại docstring cũ của hàm (ba đoạn về heading, về việc dòng tiêu đề ở lại trong thân, và về `stack`).
+Đặt khối dưới đây ngay sau hàm `split_sections` hiện có. `_HEADING` đã có sẵn trong file.
 
 ```python
 # worker/steps/chunking.py
-# Vietnamese legal structure, outermost first. The markup a parser put on such
-# a line is ignored: within one corpus the same "Điều" arrives as h2, h3, h4,
-# h5, bold or plain text, so a markdown level says nothing about depth.
-_LEGAL_LEVELS = ("Phần", "Chương", "Mục", "Điều")
-_LEGAL = re.compile(
-    r"^(?:(Phần)\s+(?:thứ\s+\S+|[IVXLC\d]+)|(Chương)\s+[IVXLC\d]+|(Mục)\s+\d+|(Điều)\s+\d+[a-z]?\.)"
-    r"(?=[\s.:]|$)"
-)
 _MARKUP = re.compile(r"^[#\s*_]+|[\s*_]+$")
+_NUMBERED = re.compile(r"^((?:[^\W\d_]+\s+){1,2})(\d+[a-z]?|[IVXLCDM]+)(?=[\s.:)]|$)")
 _TITLE_MAX = 300
 
 
-def _legal_level(line: str) -> tuple[int, str] | None:
-    """(depth, title) when the line opens a part, chapter, section or article.
-    A quoted article inside an amending decree starts with a quote mark and a
-    reference in running text ("Điều 24 của Luật này") has no full stop after
-    the number: neither matches."""
+def _marked(line: str) -> bool:
+    text = line.strip()
+    return bool(_HEADING.match(text)) or (text.startswith("**") and text.endswith("**") and len(text) > 4)
+
+
+def _kind(line: str) -> tuple[str, str, str] | None:
+    """(kind, number, bare title) of a numbered heading line."""
     bare = _MARKUP.sub("", line)
-    found = _LEGAL.match(bare)
+    found = _NUMBERED.match(bare)
     if not found:
         return None
-    keyword = next(group for group in found.groups() if group)
-    return _LEGAL_LEVELS.index(keyword) + 1, bare[:_TITLE_MAX]
+    return found.group(1).strip().casefold(), found.group(2), bare[:_TITLE_MAX]
 
 
-def _is_bare_marker(title: str) -> bool:
-    """"Chương II" with its name on the following line."""
-    return not title[_LEGAL.match(title).end() :].strip(" .:")
+def learn(lines: list[str]) -> tuple[set[str], set[tuple[str, str]]]:
+    """The kinds that recur among marked lines, and the pairs (a, b) meaning
+    'a is not a subdivision of b'.
+
+    A kind subdivides another only if somewhere two or more of it sit between
+    one heading of the other and the next: four sections inside one chapter.
+    A chapter never does that to an article -- at most one chapter falls
+    between two consecutive articles -- so a chapter is never filed under one,
+    whatever '#' level the parser gave either."""
+    seen = [k[0] for line in lines if _marked(line) and (k := _kind(line))]
+    kinds = {k for k in seen if seen.count(k) >= 2}
+    seen = [k for k in seen if k in kinds]
+    outside: set[tuple[str, str]] = set()
+    for a in kinds:
+        for b in kinds - {a}:
+            most = run = 0
+            started = False
+            for k in seen:
+                if k == b:
+                    started, run = True, 0
+                elif k == a and started:
+                    run += 1
+                    most = max(most, run)
+            if most < 2:
+                outside.add((a, b))
+    return kinds, outside
 
 
-def _names_the_marker(line: str) -> bool:
-    text = line.strip()
-    return bool(_HEADING.match(text)) or text.startswith("**") or text.isupper()
-
-
-def split_sections(markdown: str, stack: list[str] | None = None) -> list[tuple[str, str]]:
-    sections: list[tuple[str, str]] = []
-    stack = [] if stack is None else stack
-    path, buffer = " > ".join(stack), []
-    untitled: int | None = None
-
-    for line in markdown.splitlines():
-        legal = _legal_level(line)
-        if legal:
-            if buffer:
-                sections.append((path, "\n".join(buffer).strip()))
-            level, title = legal
-            # Everything at this depth or deeper closes, and so does any
-            # markdown heading: its level was never comparable.
-            stack[:] = [h for h in stack if (seen := _legal_level(h)) and seen[0] < level]
-            stack.append(title)
-            untitled = len(stack) - 1 if _is_bare_marker(title) else None
-            path, buffer = " > ".join(stack), [line]
-            continue
-        if untitled is not None and line.strip():
-            if _names_the_marker(line):
-                stack[untitled] = f"{stack[untitled]}. {_MARKUP.sub('', line)}"[:_TITLE_MAX]
-                path = " > ".join(stack)
-            untitled = None
+def split_document(pages: list[str]) -> list[list[tuple[str, str]]]:
+    """Per page, the (heading_path, body) sections."""
+    lines = [line for page in pages for line in page.splitlines()]
+    kinds, outside = learn(lines)
+    if not kinds:
+        # No numbered headings to go by: the markdown levels are all there is.
+        open_headings: list[str] = []
+        return [split_sections(page, open_headings) for page in pages]
+    stack: list[tuple[str, str]] = []  # (kind, title)
+    last_number: dict[str, str] = {}
+    out = []
+    untitled = None
+    for page in pages:
+        sections, buffer = [], []
+        path = " > ".join(t for _, t in stack)
+        for line in page.splitlines():
+            k = _kind(line)
+            marked = _marked(line)
+            opens = bool(k) and k[0] in kinds and (marked or _follows(last_number.get(k[0]), k[1]))
+            if opens:
+                if buffer:
+                    sections.append((path, "\n".join(buffer).strip()))
+                kind, number, title = k
+                if any(kd == kind for kd, _ in stack):
+                    del stack[[kd for kd, _ in stack].index(kind) :]
+                while stack and (kind, stack[-1][0]) in outside:
+                    stack.pop()
+                stack.append((kind, title))
+                last_number[kind] = number
+                untitled = len(stack) - 1 if not title[_NUMBERED.match(title).end() :].strip(" .:") else None
+                path, buffer = " > ".join(t for _, t in stack), [line]
+                continue
+            if untitled is not None and line.strip():
+                if marked or line.strip().isupper():
+                    kd, t = stack[untitled]
+                    stack[untitled] = (kd, f"{t}. {_MARKUP.sub('', line)}"[:_TITLE_MAX])
+                    path = " > ".join(t for _, t in stack)
+                untitled = None
             buffer.append(line)
-            continue
-        found = _HEADING.match(line)
-        if found and not any(_legal_level(h) for h in stack):
-            if buffer:
-                sections.append((path, "\n".join(buffer).strip()))
-            level = len(found.group(1))
-            del stack[level - 1 :]
-            stack.append(found.group(2).strip())
-            path, buffer = " > ".join(stack), [line]
-            continue
-        buffer.append(line)
+        if buffer:
+            sections.append((path, "\n".join(buffer).strip()))
+        out.append([(p, b) for p, b in sections if b])
+    return out
 
-    if buffer:
-        sections.append((path, "\n".join(buffer).strip()))
-    return [(path, body) for path, body in sections if body]
+
+def _follows(previous: str | None, number: str) -> bool:
+    """A plain line continues a numbered series only as its very next item."""
+    return bool(previous) and previous.isdigit() and number.isdigit() and int(number) == int(previous) + 1
 ```
 
-- [ ] **Step 4: Chạy test** — PASS, 17 test trong file này.
+Trong `chunk_document`, thay vòng lặp theo trang:
+
+```python
+    pages = [(page["page"], sanitize(page["markdown"])) for page in parsed["pages"]]
+    outline = split_document([text for _, text in pages])
+    for (page_number, _), sections in zip(pages, outline, strict=True):
+        for heading_path, section in sections:
+            ...  # thân vòng lặp giữ nguyên; page["page"] thành page_number
+```
+
+Biến `open_headings` của `chunk_document` không còn cần: `split_document` tự giữ trạng thái qua các trang.
+
+- [ ] **Step 4: Chạy test** — PASS: 6 test mới và 11 test có sẵn.
 
 - [ ] **Step 5: Đối chiếu với dữ liệu thật**
 
 ```bash
 uv run python - <<'PY'
 import json, pathlib
-from worker.steps.chunking import sanitize, split_sections
+from worker.steps.chunking import sanitize, split_document
 backup = pathlib.Path("data/parsed-backup")
 names = dict(line.split("|", 1) for line in (backup / "documents.txt").read_text().splitlines())
 for doc, name in sorted(names.items(), key=lambda item: item[1]):
-    stack, articles = [], set()
-    for page in json.loads((backup / f"{doc}.parsed.json").read_text())["pages"]:
-        for path, _ in split_sections(sanitize(page["markdown"]), stack):
-            last = path.split(" > ")[-1] if path else ""
-            if last.startswith("Điều"):
-                articles.add(last.split(".")[0])
-    print(f"{len(articles):4} điều  {name}")
+    pages = json.loads((backup / f"{doc}.parsed.json").read_text())["pages"]
+    paths = [p for page in split_document([sanitize(x["markdown"]) for x in pages]) for p, _ in page]
+    last = {p.split(" > ")[-1].split(".")[0] for p in paths if p}
+    print(f"{sum(1 for x in last if x.casefold().startswith('điều')):4} điều  {name}")
 PY
 ```
 
-Expected, theo lần chạy thử ngày 2026-10-11: 85, 111, 89, 39, 54, 65, 19, 21, 55 điều cho chín văn bản luật và 0 cho file tiếng Nhật. So từng con số với số điều thật của văn bản; lệch từ 2 điều trở lên thì dừng và báo, đừng nới regex cho khớp.
+Expected: 87, 109, 89, 38, 53, 65, 19, 21, 55 cho chín văn bản luật, 0 cho file tiếng Nhật. So từng con số với số điều thật của văn bản; văn bản nào lệch từ 2 điều trở lên thì tìm dòng bị sót và báo, đừng nới quy tắc cho khớp.
 
 - [ ] **Step 6: Suite đầy đủ, rồi dừng**
 
-Commit message đề xuất: `fix(chunking): read legal structure from keywords, not markdown levels`
+Commit message đề xuất: `fix(chunking): build the outline from how headings recur, not from markdown levels`
 
 ---
 
@@ -580,7 +639,7 @@ Expected: `labels           20 reachable`. Chia chunk đã đổi, nên một đ
 **Files:**
 - Modify: `docs/system-design.md` §6 (S2, S3, S4)
 
-- [ ] **Step 1:** S2: thay "split on markdown headings first" bằng mô tả nhận diện theo từ khoá cho văn bản luật, kèm lý do (bảng số liệu ở đầu plan này) và phần lui về heading markdown cho tài liệu khác.
+- [ ] **Step 1:** S2: thay "split on markdown headings first" bằng ba quy tắc của Task 1, kèm lý do (bảng số liệu ở đầu plan này) và phần lui về heading markdown cho tài liệu không có tiêu đề đánh số.
 - [ ] **Step 2:** S3: ghi rằng mỗi chunk được gửi kèm tiêu đề. S4: ghi dạng của văn bản được embed (`tên văn bản > tiêu đề`, câu ngữ cảnh, nội dung).
 - [ ] **Step 3:** Ghi một rủi ro còn lại: cột `child_chunks.tsv` (nền của BM25 ở R2) sinh từ `content`, không gồm tiêu đề, nên tìm theo từ khoá vẫn chưa thấy tên điều. Việc đó thuộc plan của R2.
 
@@ -590,7 +649,7 @@ Commit message đề xuất: `docs(design): describe keyword-based structure and
 
 ## Definition of Done
 
-1. Sáu test mới của `split_sections` xanh, và các tài liệu không phải văn bản luật chia như cũ.
+1. Sáu test mới của `split_document` xanh; không từ khoá của loại tài liệu nào nằm trong code; tài liệu không có tiêu đề đánh số chia như cũ.
 2. Mỗi child trong `chunks.json` mang `heading_path`; request của `enrich()` gửi kèm tiêu đề.
 3. Văn bản được embed và văn bản lưu ở `contextualized` giống hệt nhau, và mở đầu bằng tên văn bản cùng tiêu đề.
 4. `python -m worker.reingest --all` nạp lại cả corpus mà không gọi OCR.

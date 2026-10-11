@@ -47,6 +47,11 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
         return context
 
     async def generate(query, context, trace):
+        # Retrieval is over and nothing has been written. Ending the
+        # transaction here returns the connection to the pool for the seconds
+        # the model takes; left open it sits "idle in transaction", and a
+        # pool's worth of slow answers would stall every other endpoint.
+        await session.commit()
         text, citations = await _generate(query, context, provider)
         trace.record("generate_detail", ms=0, cited=[c.ordinal for c in citations])
         return text, citations

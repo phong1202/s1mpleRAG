@@ -54,3 +54,26 @@ async def test_the_filters_reach_the_retrieval_query(query_client, seeded_corpus
 
     assert matching.json()["data"]["citations"] != []
     assert other.json()["data"]["citations"] == []
+
+
+async def test_no_transaction_is_open_while_the_model_writes(
+    query_client, db_session, seeded_corpus, monkeypatch
+):
+    """A connection held "idle in transaction" for the seconds the model takes
+    is a connection no other request can use. The pool is fifteen wide: that
+    many slow answers at once would stall document status polling too."""
+    client, provider = query_client
+    provider.script(Draft, Draft(answer="Lap hoa don dieu chinh [1]."))
+    open_during_the_call: list[bool] = []
+    scripted = provider.complete
+
+    async def complete(messages, schema):
+        open_during_the_call.append(db_session.in_transaction())
+        return await scripted(messages, schema)
+
+    monkeypatch.setattr(provider, "complete", complete)
+
+    response = await client.post("/query", json={"question": "hoa don dien tu"})
+
+    assert response.status_code == 200
+    assert open_during_the_call == [False]
