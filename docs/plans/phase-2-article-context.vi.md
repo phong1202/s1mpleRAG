@@ -10,7 +10,7 @@
 
 **Spec:** [`docs/system-design.md`](../system-design.md) §6 (S2, S3, S4). Plan này sửa hành vi của ba stage đó; Task 6 cập nhật spec.
 
-**Bản tiếng Anh:** viết sau khi plan này được duyệt, để không phải dịch hai lần.
+**Bản tiếng Anh:** [`phase-2-article-context.en.md`](phase-2-article-context.en.md). Bản tiếng Việt này là bản đã được thực thi và mang các bước đã đánh dấu.
 
 ---
 
@@ -330,10 +330,9 @@ def test_a_child_carries_the_heading_of_its_parent():
     """S3 and S4 see children only. Without the heading on the child, the
     stage that writes its context cannot know which article it sits in."""
     body = " ".join(["noi dung"] * 400)
-    parsed = {"pages": [{"page": 1, "markdown": f"**Điều 6. Xe ô tô**
-{body}"}]}
+    page = f"**Điều 5. A**\nx\n\n**Điều 6. Xe ô tô**\n{body}"
 
-    chunks = chunk_document(parsed)
+    chunks = chunk_document({"pages": [{"page": 1, "markdown": page}]})
 
     assert chunks["children"]
     assert {c["heading_path"] for c in chunks["children"]} == {"Điều 6. Xe ô tô"}
@@ -424,14 +423,14 @@ def test_the_embedded_text_opens_with_the_document_and_the_heading():
         heading="Điều 6. Xử phạt người điều khiển xe ô tô",
     )
 
-    assert text.splitlines()[0] == "Nghị định 168/2024/NĐ-CP > Điều 6. Xử phạt người điều khiển xe ô tô"
+    assert text.splitlines()[0] == (
+        "Nghị định 168/2024/NĐ-CP > Điều 6. Xử phạt người điều khiển xe ô tô"
+    )
     assert text.endswith("b) Không chấp hành hiệu lệnh của đèn tín hiệu giao thông;")
 
 
 def test_a_chunk_with_no_title_and_no_heading_is_embedded_as_before():
-    assert contextualize("ctx", "noi dung") == "ctx
-
-noi dung"
+    assert contextualize("ctx", "noi dung") == "ctx\n\nnoi dung"
 ```
 
 - [x] **Step 2: Chạy để xác nhận đỏ** — `TypeError: contextualize() got an unexpected keyword argument 'title'`.
@@ -450,9 +449,7 @@ def contextualize(
     The document title and the heading path come first. They are what tells
     apart two provisions that read the same word for word."""
     where = " > ".join(part for part in (title, heading) if part)
-    return "
-
-".join(part for part in (where, context, content) if part).strip()
+    return "\n\n".join(part for part in (where, context, content) if part).strip()
 ```
 
 S2 ghi `documents.title` vào `chunks.json` một lần (khoá `title`, trong stage `structure`), và cả S4 lẫn S5 đọc `chunks.get("title")` cùng `child.get("heading_path")`. Một nguồn duy nhất, nên văn bản lưu ở `contextualized` không thể lệch khỏi văn bản đã được embed. Hai nơi gọi `contextualize` là `worker/stages.py` (embed) và `worker/steps/persistence.py`.
