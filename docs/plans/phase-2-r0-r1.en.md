@@ -355,9 +355,9 @@ The nine tasks of R0 have never run against real embeddings, a real model or a r
 
 **Files:** none. This task only runs and records. If it turns up a fault, the fix is a task of its own, with its own test.
 
-- [ ] **Step 1: Ask before running.** This task calls OpenAI: 3 embeddings and 3 chat calls (Global Constraints).
+- [x] **Step 1: Ask before running.** This task calls OpenAI: 3 embeddings and 3 chat calls (Global Constraints).
 
-- [ ] **Step 2: Bring the stack up on this branch's code**
+- [x] **Step 2: Bring the stack up on this branch's code**
 
 ```bash
 docker compose up -d --wait db rabbitmq redis minio
@@ -368,7 +368,7 @@ docker compose exec api sh -c 'echo $LLM_PROVIDER'
 
 Expected: `1` (the API has `/query`), then `openai`. The source is bind-mounted and this branch adds no dependency, so recreating the container is enough; the image needs no rebuild.
 
-- [ ] **Step 3: Ask three questions**
+- [x] **Step 3: Ask three questions**
 
 ```bash
 ask() {
@@ -383,7 +383,7 @@ ask "Tỷ giá USD hôm nay là bao nhiêu?"
 
 The first two have answers in the corpus, in two different documents. The third does not.
 
-- [ ] **Step 4: Check each answer**
+- [x] **Step 4: Check each answer**
 
 | Check | Passes when |
 | --- | --- |
@@ -394,11 +394,21 @@ The first two have answers in the corpus, in two different documents. The third 
 | The outside question | It says plainly that the sources do not answer; no number is invented |
 | Latency | Note each `latency_ms` |
 
-- [ ] **Step 5: Record the outcome, then stop**
+- [x] **Step 5: Record the outcome, then stop**
 
 Report one line per question: the question, the document and page cited, right or wrong, `latency_ms`. For a failure, add the `X-Request-ID` header and `docker compose logs api` around that request, then stop: nothing is fixed inside this task.
 
 A pass here is also Definition of Done item 1.
+
+**Outcome (2026-10-10):** all three requests returned 200 through the real provider, and all three wrote their `query_traces` row.
+
+| Question | Citations | Verdict | `latency_ms` |
+| --- | --- | --- | --- |
+| What is the fine for a car driver ignoring a traffic light? | `nd-168-2024…` p. 25 | **Wrong.** It answered "6 to 8 million" and attributed it to cars, but page 25 is Article 8, penalties for drivers of **special-purpose machinery**. The citation is true to the page; the answer is wrong for the question | 6,635 |
+| What must an inland waterway vessel satisfy to operate? | `luat-giao-thong-duong-thuy…` pp. 17 and 41 | Right: the content of Article 24, every class of vessel | 5,566 |
+| Today's USD exchange rate? | none | Right: says plainly the sources do not answer | 2,310 |
+
+The read path runs end to end. The fault in the first answer is one of quality, not machinery: three articles of the decree use the same wording for cars, motorbikes and special-purpose machinery, retrieval picked the wrong article, and the prompt gives the model only `(page N)` and the passage text, with no `heading_path` or document name, so the model cannot tell which kind of vehicle a passage is about. Not fixed in this task.
 
 ---
 

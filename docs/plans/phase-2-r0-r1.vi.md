@@ -355,9 +355,9 @@ Chín task của R0 chưa từng chạy với embedding thật, model thật hay
 
 **Files:** không có. Task này chỉ chạy và ghi lại kết quả. Nếu lộ ra lỗi, phần sửa là một task riêng với test của nó.
 
-- [ ] **Step 1: Hỏi trước khi chạy.** Task này gọi OpenAI: 3 lần embed và 3 lần chat (Global Constraints).
+- [x] **Step 1: Hỏi trước khi chạy.** Task này gọi OpenAI: 3 lần embed và 3 lần chat (Global Constraints).
 
-- [ ] **Step 2: Bật stack với code của nhánh này**
+- [x] **Step 2: Bật stack với code của nhánh này**
 
 ```bash
 docker compose up -d --wait db rabbitmq redis minio
@@ -368,7 +368,7 @@ docker compose exec api sh -c 'echo $LLM_PROVIDER'
 
 Expected: `1` (API đã có `/query`) rồi `openai`. Source được bind-mount và nhánh này không thêm dependency nào, nên tạo lại container là đủ, không cần build lại image.
 
-- [ ] **Step 3: Hỏi ba câu**
+- [x] **Step 3: Hỏi ba câu**
 
 ```bash
 ask() {
@@ -383,7 +383,7 @@ ask "Tỷ giá USD hôm nay là bao nhiêu?"
 
 Hai câu đầu có đáp án trong corpus, ở hai tài liệu khác nhau. Câu thứ ba thì không.
 
-- [ ] **Step 4: Kiểm từng câu trả lời**
+- [x] **Step 4: Kiểm từng câu trả lời**
 
 | Kiểm | Đạt khi |
 | --- | --- |
@@ -394,11 +394,21 @@ Hai câu đầu có đáp án trong corpus, ở hai tài liệu khác nhau. Câu
 | Câu ngoài corpus | Nói rõ nguồn không trả lời được; không bịa ra con số nào |
 | Độ trễ | Ghi lại `latency_ms` của từng câu |
 
-- [ ] **Step 5: Ghi kết quả, rồi dừng**
+- [x] **Step 5: Ghi kết quả, rồi dừng**
 
 Báo cáo mỗi câu một dòng: câu hỏi, tài liệu và trang được trích, đúng hay sai, `latency_ms`. Câu nào hỏng thì kèm header `X-Request-ID` và `docker compose logs api` quanh request đó, rồi dừng: không sửa trong task này.
 
 Kết quả đạt ở đây cũng là mục 1 của Definition of Done.
+
+**Kết quả (2026-10-10):** cả ba request trả 200 qua provider thật, và cả ba đều ghi được hàng `query_traces`.
+
+| Câu hỏi | Trích dẫn | Đánh giá | `latency_ms` |
+| --- | --- | --- | --- |
+| Ô tô không chấp hành đèn tín hiệu bị phạt bao nhiêu? | `nd-168-2024…` tr. 25 | **Sai.** Trả lời "6 đến 8 triệu" và gán cho ô tô, nhưng trang 25 là Điều 8, xử phạt người điều khiển **xe máy chuyên dùng**. Trích dẫn đúng với trang, câu trả lời sai với câu hỏi | 6.635 |
+| Phương tiện thủy nội địa cần điều kiện gì để hoạt động? | `luat-giao-thong-duong-thuy…` tr. 17 và 41 | Đúng: nội dung Điều 24, đủ các nhóm phương tiện | 5.566 |
+| Tỷ giá USD hôm nay? | không có | Đúng: nói rõ nguồn không trả lời được | 2.310 |
+
+Đường đọc chạy thông từ đầu tới cuối. Lỗi ở câu đầu là lỗi chất lượng, không phải lỗi máy móc: ba điều của nghị định dùng cùng một câu chữ cho ô tô, xe máy và xe máy chuyên dùng, truy hồi lấy nhầm điều, và prompt chỉ đưa cho model `(page N)` cùng nội dung đoạn, không có `heading_path` hay tên tài liệu, nên model không thể biết đoạn đó nói về loại xe nào. Chưa sửa trong task này.
 
 ---
 
