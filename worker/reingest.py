@@ -3,9 +3,14 @@
     python -m worker.reingest --all
     python -m worker.reingest <document_id> [<document_id> ...]
     python -m worker.reingest --all --restore-from data/parsed-backup
+    python -m worker.reingest --force <document_id>
 
 --restore-from puts back parse checkpoints that storage has expired, from
 files named <document_id>.parsed.json.
+
+--force relaunches a document that is not finished. It is for a document
+stuck in a running status because its task was lost. Make sure nothing is
+running for it first: two chains over one document corrupt its chunks.
 """
 
 import argparse
@@ -16,7 +21,6 @@ from sqlalchemy import select
 from app.models import Document
 from shared.storage import get_store
 from worker.db import session_scope
-from worker.repositories.documents import DocumentBusy
 from worker.stages import relaunch_from_structure
 
 
@@ -25,6 +29,7 @@ def main() -> None:
     parser.add_argument("document_ids", nargs="*")
     parser.add_argument("--all", action="store_true", help="every completed document")
     parser.add_argument("--restore-from", type=pathlib.Path)
+    parser.add_argument("--force", action="store_true", help="also a document not finished")
     args = parser.parse_args()
 
     ids = list(args.document_ids)
@@ -42,11 +47,12 @@ def main() -> None:
             store.put(key, backup.read_bytes())
             print(f"restored   {document_id}")
         try:
-            relaunch_from_structure(document_id)
-        except (DocumentBusy, FileNotFoundError) as exc:
-            # One document that cannot be relaunched must not strand the rest.
+            relaunch_from_structure(document_id, force=args.force)
+        except Exception as exc:
+            # One document that cannot be relaunched must not strand the rest:
+            # busy, its row gone, no checkpoint, or the broker refusing it.
             failed.append(document_id)
-            print(f"skipped    {document_id}: {exc}")
+            print(f"skipped    {document_id}: {type(exc).__name__}: {exc}")
             continue
         print(f"relaunched {document_id}")
     if failed:

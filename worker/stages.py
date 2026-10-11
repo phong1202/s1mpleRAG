@@ -299,12 +299,13 @@ def launch(document_id: str) -> None:
     chain(parse.s(document_id), structure.s(), enrich.s(), embed.s(), persist.s()).apply_async()
 
 
-def relaunch_from_structure(document_id: str) -> None:
+def relaunch_from_structure(document_id: str, force: bool = False) -> None:
     """Runs S2 to S5 again from the parse checkpoint: for a change to
     chunking, enrichment or embedding, which OCR has no part in.
 
     chunks.json goes first, or S2 would take its checkpoint skip and nothing
-    downstream would change."""
+    downstream would change. `force` relaunches a document that is not
+    finished: one whose task was lost."""
     from shared.storage import get_store
 
     store = get_store()
@@ -314,6 +315,13 @@ def relaunch_from_structure(document_id: str) -> None:
     # skip on the first one's enriched.json and store old context sentences
     # against new chunks, joined by chunk_index, with nothing to say so.
     with session_scope() as session:
-        DocumentStateRepository(session).reopen(uuid.UUID(document_id))
-    store.delete(f"staging/{document_id}/chunks.json")
-    chain(structure.s(document_id), enrich.s(), embed.s(), persist.s()).apply_async()
+        before = DocumentStateRepository(session).reopen(uuid.UUID(document_id), force=force)
+    try:
+        store.delete(f"staging/{document_id}/chunks.json")
+        chain(structure.s(document_id), enrich.s(), embed.s(), persist.s()).apply_async()
+    except Exception:
+        # The document is committed as QUEUED and no chain exists to move it:
+        # left so, it would refuse every later relaunch as "still running".
+        with session_scope() as session:
+            DocumentStateRepository(session).restore(uuid.UUID(document_id), before)
+        raise

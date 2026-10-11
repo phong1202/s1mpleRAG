@@ -412,14 +412,29 @@ leaders) as a loop and retries — capped at 2 retries here, against its default
      the way that kind's headings are written ("Điều 24 của Luật này." has no full stop after 24);
    - a heading closes the open heading of its own kind and everything inside it. Kind A is never
      filed under kind B when B is a subdivision of A (two or more B sit between consecutive A), nor
-     when A only begins after the last B and nothing that lives inside B appears again;
-   - an unnumbered markdown heading is a sub-level of whichever numbered heading is open.
+     when A only begins after the last B and nothing that lives inside B appears again. When two
+     kinds each look like a subdivision of the other, the one the document opened with is the outer;
+   - a number may end in one letter of any alphabet ("10a", "04đ", "VIIa");
+   - an unnumbered markdown heading is a sub-level of whichever numbered heading is open, unless it
+     is no deeper than that heading, when it closes it. Two exceptions, both read off the heading
+     itself: one written as an item of a list running under the numbered heading ("3. …" after a
+     plain "2. …") belongs to it whatever level the OCR gave it, and ends at the next item of that
+     list; one that opens with a quotation mark is quoted text and stays inside.
 
    A document with no numbered headings falls back to its markdown levels. A bold kind that only begins
    after the last heading of every other kind is an appendix (forms, annexes) and stands on its own.
-   Known limits: an appendix with no numbered heading stays under the final article (two in the
-   corpus); and a document's first chapter heading, if the parser lost it, leaves the articles before
-   the second chapter without a chapter.
+   Known limits:
+   - an appendix with no numbered heading stays under the final article (two in the corpus), and a
+     numbered appendix that is marked as a heading only once is filed under the form before it;
+   - a document's first chapter heading, if the parser lost it, leaves the articles before the second
+     chapter without a chapter;
+   - a numbered heading is never filed under an unnumbered one: "### Step 1" keeps no trace of the
+     "## Installation" above it;
+   - the appendix rule cannot tell forms from two bold "Table N" captions inside a document's last
+     numbered section: those captions become top-level headings;
+   - a numbered heading the parser marked with `#` is accepted without checking its number, so an
+     article quoted in a footnote as a heading is taken for one (two chunks in the corpus);
+   - lines inside a fenced code block are read like any other: a `# comment` is a heading.
 3. **Parent chunks:** 500–1000 tokens, split at the outline's headings first, then by tokens.
 4. **Child chunks:** 100–200 tokens within each parent, carrying `parent_index`, `page_number` and
    the parent's `heading_path`.

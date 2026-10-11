@@ -376,7 +376,7 @@ def test_bold_forms_after_the_last_heading_stand_on_their_own():
         "**Mẫu số 01**\nf1\n\n**Mẫu số 02.** Văn bản đề nghị\nf2\n"
     )
 
-    assert _outline(page)[-2:] == ["Mẫu số 01", "Mẫu số 02."]
+    assert _outline(page)[-2:] == ["Mẫu số 01", "Mẫu số 02. Văn bản đề nghị"]
 
 
 def test_bold_captions_between_numbered_headings_stay_out_of_the_outline():
@@ -385,3 +385,147 @@ def test_bold_captions_between_numbered_headings_stay_out_of_the_outline():
     page = "# Chapter 1\nx\n\n**Table 1**\nt\n\n# Chapter 2\ny\n\n**Table 2**\nt\n"
 
     assert _outline(page) == ["Chapter 1", "Chapter 2"]
+
+
+def test_sections_in_two_chapters_keep_their_chapter():
+    """Two chapters between one chapter's last section and the next one's
+    first looked like chapters subdividing sections, so a section closed its
+    own chapter: 233 chunks of two real decrees lost the chapter they sit in."""
+    page = (
+        "# Chapter 1\n\n## Section 1\na\n\n## Section 2\nb\n\n# Chapter 2\nc\n\n"
+        "# Chapter 3\n\n## Section 1\nd\n\n## Section 2\ne\n"
+    )
+
+    assert _outline(page)[-2:] == ["Chapter 3 > Section 1", "Chapter 3 > Section 2"]
+
+
+def test_a_clause_tagged_as_a_heading_ends_at_the_next_clause():
+    """OCR tagged clause 1 of an article as a heading and left clauses 2 to 9
+    as text, and all of them were filed under "1. Lịch bay căn cứ:"."""
+    page = (
+        "### Điều 35. A\nx\n\n### Điều 36. Lịch bay\n\n#### 1. Lịch bay căn cứ:\n"
+        "a) nhu cầu thị trường;\nb) năng lực khai thác.\n\n"
+        "2. Hãng hàng không có trách nhiệm bồi thường.\n\n3. Hành khách được hỗ trợ.\n"
+    )
+
+    sections = [(path, body.split()[0]) for path, body in split_document([page])[0]]
+
+    assert sections[-2:] == [
+        ("Điều 36. Lịch bay > 1. Lịch bay căn cứ:", "####"),
+        ("Điều 36. Lịch bay", "2."),
+    ]
+
+
+def test_an_amount_at_the_start_of_a_line_is_not_the_next_clause():
+    page = (
+        "### Điều 1. A\nx\n\n### Điều 2. Mức phạt\n\n#### 1. Phạt tiền từ\n"
+        "1.000.000 đồng đến 2.000.000 đồng đối với hành vi sau đây.\n"
+    )
+
+    assert _outline(page)[-1] == "Điều 2. Mức phạt > 1. Phạt tiền từ"
+
+
+def test_a_heading_no_deeper_than_the_numbered_one_closes_it():
+    """ "Configuration" was filed under "Step 2 Install", the last step of the
+    section before it: the unnumbered heading's own level was never read."""
+    page = (
+        "## Installation\n\n### Step 1 Download\na\n\n### Step 2 Install\nb\n\n"
+        "## Configuration\nc\n\n## Fiscal Year 2024\nd\n\n## Outlook\ne\n"
+    )
+
+    paths = _outline(page)
+
+    assert "Configuration" in paths and "Outlook" in paths
+    assert not any(" > Configuration" in path or " > Outlook" in path for path in paths)
+
+
+def test_a_quoted_article_stays_under_the_article_that_quotes_it():
+    """An amending decree quotes the article it rewrites, as a heading at the
+    same level as its own. The quotation mark is what says it belongs inside."""
+    page = (
+        "#### Điều 24. Sửa đổi, bổ sung Điều 61\nx\n\n#### “Điều 61. Thẩm quyền\ny\n\n"
+        "#### Điều 25. Sửa đổi, bổ sung Điều 62\nz\n"
+    )
+
+    assert _outline(page)[1] == "Điều 24. Sửa đổi, bổ sung Điều 61 > “Điều 61. Thẩm quyền"
+
+
+def test_a_form_keeps_the_title_written_after_its_bold_marker():
+    """ "**Mẫu số 04b.** Văn bản chấp thuận" lost its title, and the letterhead
+    on the next line was taken for one: "Mẫu số 04b.. BỘ CÔNG AN"."""
+    page = (
+        "### Điều 1. A\nx\n\n### Điều 2. Trách nhiệm thi hành\ny\n\n"
+        "**Mẫu số 01.** Đơn đề nghị\nBỘ CÔNG AN\nf1\n\n"
+        "**Mẫu số 02.** Văn bản chấp thuận\nBỘ CÔNG AN\nf2\n"
+    )
+
+    assert _outline(page)[-2:] == ["Mẫu số 01. Đơn đề nghị", "Mẫu số 02. Văn bản chấp thuận"]
+
+
+def test_a_sentence_after_a_bold_marker_is_not_its_title():
+    page = (
+        "**Điều 1.** Nghị định này có hiệu lực từ ngày ký.\n\n"
+        "**Điều 2.** Các Bộ trưởng chịu trách nhiệm thi hành.\n"
+    )
+
+    assert _outline(page) == ["Điều 1.", "Điều 2."]
+
+
+def test_a_number_may_end_in_any_letter():
+    """ "04đ" was not a number, so the form was filed under "04d"; "VIIa" was
+    not one either, and the chapter's articles had no chapter. A series may
+    also skip a letter: Vietnamese has no "f"."""
+    page = (
+        "## Chương VII\n\n## MỘT\n\n### Điều 98d. A\nx\n\n### Điều 98đ. B\ny\n\n"
+        "### Điều 98e. C\nz\n\nĐiều 98g. D\nw\n\n"
+        "## Chương VIIa\n\n## HAI\n\n### Điều 99. E\nv\n"
+    )
+
+    assert _outline(page)[2:] == [
+        "Chương VII. MỘT > Điều 98đ. B",
+        "Chương VII. MỘT > Điều 98e. C",
+        "Chương VII. MỘT > Điều 98g. D",
+        "Chương VIIa. HAI",
+        "Chương VIIa. HAI > Điều 99. E",
+    ]
+
+
+def test_a_table_row_in_capitals_is_not_the_name_of_the_heading_above():
+    page = "## Table 1\n| ID | NAME |\n| 1 | A |\n\n## Table 2\n| ID | NAME |\n"
+
+    assert _outline(page) == ["Table 1", "Table 2"]
+
+
+def test_asterisks_inside_text_are_left_alone():
+    """Splitting glued headings rewrote every "****", a masked card number
+    included."""
+    page = "### Điều 1. A\nCard: **** **** **** 1234\n\n### Điều 2. B\ny\n"
+
+    assert "**** **** **** 1234" in split_document([page])[0][0][1]
+
+
+def test_a_paragraph_tagged_as_a_heading_is_not_one():
+    page = "### Điều 1. A\nx\n\n### Điều 2. B\n\n#### " + "rất dài " * 60 + "\ny\n"
+
+    assert _outline(page)[-1] == "Điều 2. B"
+
+
+def test_a_numbered_section_is_not_an_item_of_the_step_above_it():
+    """A clause tagged as a heading belongs to its article whatever level the
+    OCR gave it -- but "# 3. Results" is no item of "## Step 2": no list was
+    running under that step for it to continue."""
+    page = (
+        "# 1. Introduction\na\n\n# 2. Methods\n\n## Step 1 Collect\nb\n\n"
+        "## Step 2 Clean\nc\n\n# 3. Results\nd\n"
+    )
+
+    assert _outline(page)[-1] == "3. Results"
+
+
+def test_a_clause_heading_shallower_than_its_article_still_belongs_to_it():
+    page = (
+        "#### Điều 25. A\nx\n\n#### Điều 26. Thuê, mua tàu bay\n1. Một.\n2. Hai.\n\n"
+        "### 3. Quy định về thuê tàu bay\ny\n"
+    )
+
+    assert _outline(page)[-1] == "Điều 26. Thuê, mua tàu bay > 3. Quy định về thuê tàu bay"

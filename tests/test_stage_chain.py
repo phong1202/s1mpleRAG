@@ -826,3 +826,66 @@ def test_a_relaunch_starts_with_a_clean_failure_record(seeded_document):
 
     document = reload(seeded_document.id)
     assert (document.status, document.attempts, document.last_error) == ("COMPLETED", 0, None)
+
+
+def test_a_relaunch_that_cannot_be_published_leaves_the_document_as_it_was(
+    seeded_document, monkeypatch
+):
+    """The document was marked QUEUED and committed before the chain was
+    published. With the broker down nothing ran, and every later relaunch was
+    refused: 'a chain is still running'."""
+    import pytest
+
+    import worker.stages as stages
+
+    launch(str(seeded_document.id))
+
+    class Unpublishable:
+        def apply_async(self):
+            raise ConnectionError("broker down")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(stages, "chain", lambda *tasks: Unpublishable())
+        with pytest.raises(ConnectionError):
+            stages.relaunch_from_structure(str(seeded_document.id))
+
+    assert reload(seeded_document.id).status == "COMPLETED"
+    stages.relaunch_from_structure(str(seeded_document.id))
+    assert reload(seeded_document.id).status == "COMPLETED"
+
+
+def test_a_document_stuck_mid_stage_can_be_relaunched_on_purpose(seeded_document):
+    """A task lost by the broker leaves its document in a running status for
+    good. Re-ingestion exists for that case too, but only when asked for."""
+    from worker.pipeline.state import stage_failed
+    from worker.stages import relaunch_from_structure
+
+    launch(str(seeded_document.id))
+    stage_failed(str(seeded_document.id), "ENRICHING", ConnectionError("lost"))
+
+    relaunch_from_structure(str(seeded_document.id), force=True)
+
+    assert reload(seeded_document.id).status == "COMPLETED"
+
+
+def test_reingest_goes_on_after_a_document_that_fails(monkeypatch):
+    """One document whose row is gone, or a broker error on one publish, ended
+    the whole run before the documents after it were reached."""
+    import pytest
+
+    import worker.reingest as reingest
+
+    seen = []
+
+    def relaunch(document_id, force=False):
+        seen.append(document_id)
+        if document_id == "first":
+            raise RuntimeError("row is gone")
+
+    monkeypatch.setattr(reingest, "relaunch_from_structure", relaunch)
+    monkeypatch.setattr("sys.argv", ["reingest", "first", "second"])
+
+    with pytest.raises(SystemExit, match="1 of 2"):
+        reingest.main()
+
+    assert seen == ["first", "second"]

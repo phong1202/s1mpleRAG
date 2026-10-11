@@ -36,10 +36,11 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
         expanded = await expand_parents(ChunkRepository(session), candidates)
         trace.record("expand_detail", ms=0, parents=[_where(c) for c in expanded])
         # The last read of this pass, and nothing has been written. Ending the
-        # transaction here returns the connection to the pool before any model
-        # is called -- the gate, the generator, a reranker: left open it sits
-        # "idle in transaction" for as long as they take, and a pool's worth of
-        # slow answers would stall every other endpoint.
+        # transaction here returns the connection to the pool before the gate
+        # or the generator calls a model: left open it sits "idle in
+        # transaction" for as long as they take, and a pool's worth of slow
+        # answers would stall every other endpoint. A reranker runs in `fuse`,
+        # before this point, and will need the same care when R3 adds it.
         await session.commit()
         return expanded
 

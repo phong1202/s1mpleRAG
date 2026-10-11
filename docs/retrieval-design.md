@@ -664,6 +664,12 @@ Corpus: 10 documents, 2,982 child chunks, ingested with the outline learned from
 with the title and heading path in the embedded text. Embedding: `text-embedding-3-large`, 1536
 dimensions. All 20 labels machine-checked as reachable.
 
+**The stored corpus is one outline fix behind the code.** A third review, after this measurement,
+found about 260 chunks with a wrong heading path (sections that had lost their chapter in two
+documents, clauses filed under the clause before them) and the outline was corrected. The database
+still holds the chunks as they were measured. The numbers above are the baseline for that corpus;
+after the next re-ingest they have to be measured again before anything is compared with them.
+
 How to read it:
 
 - **Follow-ups score 0.250, as §8.4 intends.** Their last turn names no topic ("Thế nếu người ngồi sau

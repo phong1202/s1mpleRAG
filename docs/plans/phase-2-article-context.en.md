@@ -670,3 +670,21 @@ Left unfixed: forms and appendices that are only ever bold ("Mẫu số", "Phụ
 The re-ingest command now locks the document row, refuses a document that is still running, and clears the failure record of the previous run.
 
 After the appendix rule was added (a bold kind that only begins after the last heading of every other kind stands on its own) the corpus was re-ingested once more: 2,982 child chunks; the forms of decree 151 and the appendices of decree 236 stand on their own. Two unnumbered appendices (decree 208 pp. 49–62, decree 151 pp. 34–38) still sit under the final article. Baseline re-measured: `recall@10` 0.750, `MRR` 0.517.
+
+## After the third review (2026-10-11)
+
+This review ran on the fixes of the second and found that they had put a wrong heading on about 260 real chunks. Fixed, each with a failing test first:
+
+- **Sections lost their chapter.** In decree 208 and the Waterway Law two chapters sit between the last section of one chapter and the first section of the next chapter that has any, so chapters looked like subdivisions of sections. 233 chunks carried "Mục 1 > Điều 7" instead of "Chương II > Mục 1 > Điều 7". When two kinds each look like a subdivision of the other, the one the document opened with is now the outer.
+- **One clause labelled the clauses after it.** OCR tagged "1. Lịch bay căn cứ:" as a heading and left clauses 2 to 9 as text, so all eight carried the label of clause 1 (30 chunks in 5 documents). A heading written as a list item now ends at the next item of that list.
+- **Ordinary markdown documents were mis-nested.** "## Configuration" sat under "### Step 2 Install". An unnumbered heading no deeper than the open numbered heading now closes it. A heading that opens with a quotation mark (an article quoted by an amending decree) stays inside the article that quotes it.
+- **Form titles were lost.** "**Mẫu số 04b.** Văn bản chấp thuận…" kept only "Mẫu số 04b.", and the "BỘ CÔNG AN" line after it was taken for the name. The text after a bold marker is now the title unless it ends like a sentence.
+- **Numbers with a letter.** "04đ" and "VIIa" are numbers; a series of suffixes need not follow the Latin alphabet (Vietnamese goes d, đ, e, g).
+- **Re-ingestion.** A chain that could not be published (broker down) left the document QUEUED for good; its state is now put back. `--force` relaunches a document stuck because its task was lost. One failing document no longer ends the run.
+- Minor: `****` inside text is no longer rewritten; a paragraph over 300 characters tagged as a heading does not become one; a table row in capitals is not taken for a heading's name.
+
+Checked on the 10 real documents from their parse checkpoints: 2,986 child chunks, the article series unbroken in all nine legal documents, no clause carrying another clause's label.
+
+Not fixed, recorded in `docs/system-design.md` §6: unnumbered appendices; a numbered appendix marked as a heading only once (7 chunks of decree 151); an article quoted in a footnote as a heading (2 chunks); a numbered heading is never filed under an unnumbered one; two bold "Table N" captions in the last numbered section are taken for appendices; lines inside a code block.
+
+**The database does not have these fixes.** The stored corpus was chunked by the code before the third review. It needs one more re-ingest (OpenAI calls), and then the baseline has to be measured again.

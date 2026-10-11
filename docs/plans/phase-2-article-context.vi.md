@@ -667,3 +667,21 @@ Còn lại, chưa sửa: các mẫu biểu và phụ lục chỉ in đậm ("M�
 Lệnh nạp lại giờ khoá hàng tài liệu, từ chối tài liệu còn đang chạy, và xoá bản ghi lỗi của lần chạy trước.
 
 Sau khi thêm quy tắc phụ lục (loại in đậm chỉ bắt đầu sau tiêu đề cuối cùng của mọi loại khác thì đứng riêng) corpus được nạp lại lần nữa: 2.982 chunk con; mẫu biểu của NĐ 151 và phụ lục của NĐ 236 đứng riêng. Hai phụ lục không đánh số (NĐ 208 trang 49–62, NĐ 151 trang 34–38) vẫn nằm dưới điều cuối. Con số nền đo lại: `recall@10` 0,750, `MRR` 0,517.
+
+## Sau lần review thứ ba (2026-10-11)
+
+Lần review này chạy trên lượt sửa của lần thứ hai và tìm ra rằng lượt sửa đó làm sai tiêu đề của khoảng 260 chunk thật. Đã sửa, mỗi lỗi có test đỏ → xanh:
+
+- **Mục mất chương.** Ở NĐ 208 và Luật Đường thủy, giữa mục cuối của một chương và mục đầu của chương có mục kế tiếp có hai chương, nên thuật toán tưởng chương là phần chia nhỏ của mục. 233 chunk mang đường dẫn "Mục 1 > Điều 7" thay vì "Chương II > Mục 1 > Điều 7". Giờ khi hai loại trông như chia nhỏ lẫn nhau thì loại xuất hiện trước trong tài liệu là loại ngoài.
+- **Một khoản gắn nhãn cho các khoản sau nó.** OCR đánh dấu "1. Lịch bay căn cứ:" là heading, còn khoản 2 đến 9 là chữ thường, nên cả tám khoản mang nhãn của khoản 1 (30 chunk ở 5 văn bản). Giờ một heading viết như mục của danh sách sẽ kết thúc ở mục kế tiếp của danh sách đó.
+- **Tài liệu markdown thông thường bị xếp sai.** "## Configuration" nằm dưới "### Step 2 Install". Giờ một heading không đánh số mà không sâu hơn tiêu đề đánh số đang mở thì đóng tiêu đề đó. Heading mở đầu bằng dấu ngoặc kép (điều được trích trong nghị định sửa đổi) vẫn nằm trong điều trích nó.
+- **Tên mẫu biểu bị mất.** "**Mẫu số 04b.** Văn bản chấp thuận…" chỉ còn "Mẫu số 04b.", rồi dòng "BỘ CÔNG AN" kế tiếp bị lấy làm tên. Giờ phần chữ sau mốc in đậm là tên, trừ khi nó kết thúc như một câu.
+- **Số có hậu tố.** "04đ" và "VIIa" giờ là số; chuỗi hậu tố không cần là chữ cái kế tiếp trong bảng Latin (tiếng Việt đi d, đ, e, g).
+- **Lệnh nạp lại.** Gửi chain thất bại (broker sập) từng để tài liệu kẹt ở QUEUED vĩnh viễn; giờ trạng thái được trả lại. Thêm `--force` cho tài liệu kẹt do mất task. Một tài liệu lỗi không còn làm dừng cả lượt.
+- Việc nhỏ: `****` trong nội dung không còn bị viết lại; đoạn văn dài hơn 300 ký tự bị đánh dấu nhầm là heading thì không thành tiêu đề; dòng bảng viết hoa không bị lấy làm tên tiêu đề.
+
+Kiểm trên 10 tài liệu thật bằng checkpoint parse: 2.986 chunk con, chuỗi số điều liền mạch ở cả chín văn bản luật, không còn khoản nào mang nhãn của khoản khác.
+
+Chưa sửa, đã ghi vào `docs/system-design.md` §6: phụ lục không đánh số; phụ lục đánh số chỉ được đánh dấu heading một lần (7 chunk của NĐ 151); điều được trích trong chú thích dưới dạng heading (2 chunk); tiêu đề đánh số không bao giờ nằm dưới tiêu đề không đánh số; hai chú thích in đậm "Table N" trong mục đánh số cuối cùng bị coi là phụ lục; dòng trong khối code.
+
+**CSDL chưa có lượt sửa này.** Corpus đang lưu được chia bằng code trước lần review thứ ba. Cần nạp lại một lần nữa (gọi OpenAI) rồi đo lại con số nền.

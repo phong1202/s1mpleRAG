@@ -292,6 +292,21 @@ them as "removed" and proposes to drop every one. Delete those operations from
 the revision; no test would notice the HNSW index going, queries would only
 get slower.
 
+## Re-ingesting after a change to chunking
+
+A change to chunking, enrichment or embedding does not need OCR again. The parse checkpoint of every
+document is kept in object storage for seven days, and this re-runs the stages after it:
+
+```bash
+uv run python -m worker.reingest --all                                # every completed document
+uv run python -m worker.reingest <document_id> [<document_id> ...]
+uv run python -m worker.reingest --all --restore-from data/parsed-backup   # checkpoints expired
+```
+
+It calls the LLM provider for every chunk again. A document that is still being processed is skipped
+and reported; `--force` relaunches one anyway, for a document stuck in a running status because its
+task was lost. The old chunks stay searchable until the new ones replace them.
+
 ## Evaluation
 
 `eval/dataset.yaml` holds a fixed set of labelled questions, anchored to
