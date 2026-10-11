@@ -157,3 +157,12 @@ def test_a_phantom_citation_is_logged(caplog):
         map_citations("Something [7].", _context())
 
     assert "[7]" in caplog.text
+
+
+def test_the_instructions_forbid_answering_from_the_models_own_knowledge():
+    """Asked about cars with no source on cars, the model gave the right fine
+    from memory and added that the sources did not support it. A figure with
+    no source reads the same whether it is right or out of date."""
+    system = build_prompt(Query(text="q"), _context())[0]["content"]
+
+    assert "even if you know" in system
