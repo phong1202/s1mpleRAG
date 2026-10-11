@@ -320,7 +320,7 @@ Câu ngữ cảnh hiện được viết từ nội dung của riêng chunk, nê
 - Consumes: `heading_path` của parent (Task 1)
 - Produces: mỗi child trong `chunks.json` có `"heading_path": str | None`; request của `enrich()` gửi `{"id", "heading", "content"}` cho mỗi chunk
 
-- [ ] **Step 1: Viết test đỏ**
+- [x] **Step 1: Viết test đỏ**
 
 ```python
 # tests/test_chunking.py — thêm vào cuối. `chunk_document` đã được import ở đầu file.
@@ -361,9 +361,9 @@ def test_enrich_sends_each_chunks_heading_and_asks_for_whom_it_applies(monkeypat
 
 Test có sẵn `test_enrich_asks_for_schema_bound_output_on_the_configured_model` khẳng định chỉ có `id` và `content` được gửi đi; sửa dòng cuối của nó thành `{"id", "heading", "content"}`.
 
-- [ ] **Step 2: Chạy để xác nhận đỏ** — `KeyError: 'heading_path'` ở test chunking; thiếu khoá `heading` ở test provider.
+- [x] **Step 2: Chạy để xác nhận đỏ** — `KeyError: 'heading_path'` ở test chunking; thiếu khoá `heading` ở test provider.
 
-- [ ] **Step 3: Sửa code**
+- [x] **Step 3: Sửa code**
 
 ```python
 # worker/steps/chunking.py — trong chunk_document, dict của child thêm một dòng
@@ -389,7 +389,7 @@ Test có sẵn `test_enrich_asks_for_schema_bound_output_on_the_configured_model
 
 `StubProvider` không đổi: nó không đọc tiêu đề.
 
-- [ ] **Step 4: Chạy test, suite đầy đủ, rồi dừng**
+- [x] **Step 4: Chạy test, suite đầy đủ, rồi dừng**
 
 Commit message đề xuất: `feat(enrich): give the context sentence its chunk's heading`
 

@@ -248,7 +248,7 @@ def test_enrich_asks_for_schema_bound_output_on_the_configured_model(monkeypatch
     item = schema["json_schema"]["schema"]["properties"]["chunks"]["items"]
     assert item["properties"]["category"]["enum"] == sorted(CATEGORIES)
     sent = json.loads(request["messages"][-1]["content"])
-    assert {key for chunk in sent for key in chunk} == {"id", "content"}
+    assert {key for chunk in sent for key in chunk} == {"id", "heading", "content"}
 
 
 def test_the_defaults_are_the_current_models():
@@ -261,3 +261,19 @@ def test_the_defaults_are_the_current_models():
     assert fields["openai_chat_model"].default == "gpt-6-luna"
     assert fields["openai_embed_model"].default == "text-embedding-3-large"
     assert fields["openai_reasoning_effort"].default == "low"
+
+
+def test_enrich_sends_each_chunks_heading_and_asks_for_whom_it_applies(monkeypatch, chunks):
+    """A clause in the middle of an article does not say whose fine it is. The
+    heading does, and the context sentence is the only place that can carry it
+    into the embedding."""
+    requests: list[dict] = []
+    provider = _openai_returning(monkeypatch, chat_content='{"chunks": []}', requests=requests)
+
+    provider.enrich([{**c, "heading_path": "Điều 6. Xe ô tô"} for c in chunks])
+
+    (request,) = requests
+    sent = json.loads(request["messages"][-1]["content"])
+    assert {chunk["heading"] for chunk in sent} == {"Điều 6. Xe ô tô"}
+    assert {key for chunk in sent for key in chunk} == {"id", "heading", "content"}
+    assert "heading" in request["messages"][0]["content"]

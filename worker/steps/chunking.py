@@ -272,6 +272,7 @@ def chunk_document(parsed: dict) -> dict:
                             "content": child_text,
                             "token_count": child_tokens,
                             "page_number": page_number,
+                            "heading_path": heading_path or None,
                             "language": language,
                         }
                     )

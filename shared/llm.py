@@ -99,11 +99,17 @@ class OpenAIProvider:
     def enrich(self, chunks: list[dict]) -> list[EnrichedChunk]:
         prompt = (
             "For each chunk, write ONE sentence of context situating it, in the "
-            "chunk's own language, and choose exactly one category."
+            "chunk's own language, and choose exactly one category. "
+            "Each chunk comes with its heading: the chapter, section and article "
+            "it sits under. When the chunk itself does not say what or whom it "
+            "applies to and the heading does, the sentence must say so."
         )
         # Only what the task reads: every other field of a chunk would be
         # tokens paid for and ignored.
-        sent = [{"id": c["id"], "content": c["content"]} for c in chunks]
+        sent = [
+            {"id": c["id"], "heading": c.get("heading_path") or "", "content": c["content"]}
+            for c in chunks
+        ]
         response = _translating_errors(
             self._client.chat.completions.create,
             model=self._chat_model,

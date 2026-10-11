@@ -249,3 +249,15 @@ def test_the_open_article_carries_over_a_page_break():
 
 def test_a_document_with_no_numbered_headings_still_follows_its_markdown():
     assert _paths("# A\nx\n\n## B\ny\n\n# C\nz\n") == ["A", "A > B", "C"]
+
+
+def test_a_child_carries_the_heading_of_its_parent():
+    """S3 and S4 see children only. Without the heading on the child, the
+    stage that writes its context cannot know which article it sits in."""
+    body = " ".join(["noi dung"] * 400)
+    page = f"**Điều 5. A**\nx\n\n**Điều 6. Xe ô tô**\n{body}"
+
+    chunks = chunk_document({"pages": [{"page": 1, "markdown": page}]})
+
+    assert chunks["children"]
+    assert {c["heading_path"] for c in chunks["children"]} == {"Điều 6. Xe ô tô"}
