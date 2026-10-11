@@ -112,3 +112,15 @@ async def test_search_sets_the_index_parameters_for_its_transaction(db_session):
     scan = await db_session.execute(text("SELECT current_setting('hnsw.iterative_scan')"))
     assert ef.scalar_one() == "100"
     assert scan.scalar_one() == "strict_order"
+
+
+async def test_a_document_filter_returns_only_that_documents_chunks(db_session):
+    await seed_chunks(db_session)
+    wanted = await seed_chunks(db_session)
+
+    hits = await ChunkRepository(db_session).search(
+        unit_vector(0), over_fetch=50, filters=Filters(document_id=wanted.id)
+    )
+
+    assert len(hits) == 12
+    assert {hit.document_id for hit in hits} == {wanted.id}

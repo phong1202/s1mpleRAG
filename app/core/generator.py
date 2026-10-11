@@ -20,7 +20,8 @@ from shared.llm import AsyncLLMProvider
 
 logger = logging.getLogger(__name__)
 
-_CITATION = re.compile(r"\[(\d+)\]")
+# [1], and [1, 2]: models write a list as readily as [1][2].
+_CITATION = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 _SYSTEM = (
     "Answer the question using ONLY the sources below. "
@@ -76,7 +77,8 @@ def map_citations(text: str, context: Context) -> tuple[Citation, ...]:
     by_ordinal.update({p.ordinal: p for p in context.untrusted})
 
     citations: list[Citation] = []
-    for raw in dict.fromkeys(_CITATION.findall(text)):  # first use wins, once each
+    cited = [n for group in _CITATION.findall(text) for n in re.split(r"\s*,\s*", group)]
+    for raw in dict.fromkeys(cited):  # first use wins, once each
         passage = by_ordinal.get(int(raw))
         if passage is None:
             # A phantom citation. Dropping it keeps a usable answer; accepting
@@ -91,7 +93,9 @@ def map_citations(text: str, context: Context) -> tuple[Citation, ...]:
                     document_id=reference.document_id,
                     filename=reference.filename,
                     page_number=reference.page_number,
-                    quote=passage.text[:280],
+                    # What matched the question, not the top of the parent the
+                    # model was given to read.
+                    quote=(passage.matched or passage.text)[:280],
                 )
             )
         else:

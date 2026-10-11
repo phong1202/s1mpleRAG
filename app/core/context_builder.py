@@ -50,7 +50,13 @@ def build_context(previous: Context, candidates: list[Candidate], budget: int) -
         if isinstance(ref, DocRef):
             seen_parents.add(ref.parent_id)
             passages.append(
-                Passage(ordinal=ordinal, text=candidate.text, ref=ref, heading=candidate.heading)
+                Passage(
+                    ordinal=ordinal,
+                    text=candidate.text,
+                    ref=ref,
+                    heading=candidate.heading,
+                    matched=candidate.matched,
+                )
             )
         else:
             seen_urls.add(ref.url)

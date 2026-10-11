@@ -171,6 +171,18 @@ class Settings(BaseSettings):
     web_search_enabled: bool = False  # R8
 
     @model_validator(mode="after")
+    def _require_a_wide_enough_candidate_queue(self) -> "Settings":
+        # pgvector reads ef_search candidates and returns the best of them:
+        # asking for 50 out of a queue barely wider degrades the tail with no
+        # error anywhere.
+        if self.retrieval_ef_search < 2 * self.retrieval_over_fetch:
+            raise ValueError(
+                "RETRIEVAL_EF_SEARCH must be at least twice RETRIEVAL_OVER_FETCH "
+                f"(got {self.retrieval_ef_search} and {self.retrieval_over_fetch})"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _require_complete_database_config(self) -> "Settings":
         if self.database_url_override:
             return self

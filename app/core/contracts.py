@@ -86,8 +86,10 @@ class Candidate:
     score: float
     text: str
     ref: Ref
-    # Set by parent expansion: where the parent sits in its document.
+    # Set by parent expansion: where the parent sits in its document, and the
+    # text of the child that matched before the parent's text replaced it.
     heading: str | None = None
+    matched: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,7 @@ class Passage:
     text: str
     ref: DocRef
     heading: str | None = None
+    matched: str | None = None
 
 
 @dataclass(frozen=True)

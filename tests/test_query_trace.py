@@ -72,7 +72,7 @@ async def test_a_failed_trace_write_does_not_fail_the_answer(
     # Broken from the inside: _persist_trace imports QueryTrace when it runs.
     # Replacing _persist_trace itself would remove the very try/except this
     # test is about, and the request would fail for a reason of the test's own.
-    monkeypatch.setattr("app.models.QueryTrace", broken)
+    monkeypatch.setattr("app.services.query_service.QueryTrace", broken)
 
     response = await client.post("/query", json={"question": "hoa don"})
 
@@ -90,7 +90,7 @@ async def test_a_trace_the_database_rejects_leaves_the_session_usable(
     def questionless(**columns):
         return QueryTrace(**{**columns, "question": None})  # violates NOT NULL
 
-    monkeypatch.setattr("app.models.QueryTrace", questionless)
+    monkeypatch.setattr("app.services.query_service.QueryTrace", questionless)
 
     response = await client.post("/query", json={"question": "hoa don"})
 
@@ -120,3 +120,17 @@ async def test_the_trace_says_what_reached_the_context_and_what_was_cited(
     assert [p["n"] for p in shown] == list(range(1, len(shown) + 1))
     assert shown[0]["file"] == "decree.pdf" and shown[0]["page"] >= 1
     assert detail["generate_detail"]["cited"] == [1]
+
+
+async def test_a_request_that_fails_still_leaves_a_trace(query_client, db_session, seeded_corpus):
+    """A table that holds successes only cannot say what broke. The request is
+    lost; where it got to, and what stopped it, need not be."""
+    client, _ = query_client  # nothing scripted: the generator's call raises
+
+    response = await client.post("/query", json={"question": "hoa don dien tu"})
+
+    row = (await db_session.execute(select(QueryTrace))).scalar_one()
+    assert response.status_code == 500
+    assert row.nodes[-1]["node"] == "generate"
+    assert row.nodes[-1]["detail"]["error"]
+    assert row.citation_count == 0

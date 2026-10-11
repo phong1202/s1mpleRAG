@@ -196,3 +196,14 @@ def test_ef_search_is_at_least_twice_the_over_fetch(db_env):
     settings = Settings(_env_file=None)
 
     assert settings.retrieval_ef_search >= 2 * settings.retrieval_over_fetch
+
+
+def test_ef_search_must_cover_twice_the_over_fetch(db_env):
+    """Asking the index for 50 neighbours out of a queue 60 wide degrades the
+    tail in silence. It was a comment; now the service refuses to start."""
+    import pytest
+
+    from app.config import Settings
+
+    with pytest.raises(ValueError, match="RETRIEVAL_EF_SEARCH"):
+        Settings(retrieval_over_fetch=50, retrieval_ef_search=60)

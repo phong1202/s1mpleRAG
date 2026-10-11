@@ -99,3 +99,13 @@ async def test_expansion_carries_the_parents_heading(db_session):
     expanded = await expand_parents(ChunkRepository(db_session), candidates)
 
     assert all(c.heading and c.heading.startswith("Chuong I > Dieu ") for c in expanded)
+
+
+async def test_expansion_keeps_the_text_of_the_child_that_matched(db_session):
+    await seed_chunks(db_session)
+    candidates = await _candidates(db_session)
+
+    expanded = await expand_parents(ChunkRepository(db_session), candidates)
+
+    assert all(c.matched and c.matched.startswith("child ") for c in expanded)
+    assert all(c.text.startswith("parent ") for c in expanded)

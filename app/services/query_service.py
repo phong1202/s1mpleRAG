@@ -4,9 +4,10 @@ import time
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.contracts import DocCitation, Filters, Query
+from app.core.contracts import DocCitation, Filters, Query, Trace
 from app.core.deps import build_stages
 from app.core.pipeline import answer as run_pipeline
+from app.models import QueryTrace
 from app.schemas.query import CitationOut, QueryRequest, QueryResponse
 from shared.llm import AsyncLLMProvider
 
@@ -25,16 +26,27 @@ class QueryService:
         settings = get_settings()
         started = time.perf_counter()
 
-        result = await run_pipeline(
-            Query(
-                text=payload.question,
-                filters=Filters(category=payload.category, document_id=payload.document_id),
-            ),
-            build_stages(self._session, self._provider, settings),
-            max_iterations=settings.retrieval_max_iterations,
-        )
+        trace = Trace()
+        try:
+            result = await run_pipeline(
+                Query(
+                    text=payload.question,
+                    filters=Filters(category=payload.category, document_id=payload.document_id),
+                ),
+                build_stages(self._session, self._provider, settings),
+                max_iterations=settings.retrieval_max_iterations,
+                trace=trace,
+            )
+        except Exception:
+            # The request is lost; where it got to need not be. The row is
+            # committed here because get_session rolls back on the way out,
+            # and a table of successes only cannot say what broke.
+            await self._session.rollback()
+            await _persist_trace(self._session, payload.question, trace, citation_count=0)
+            await self._session.commit()
+            raise
 
-        await _persist_trace(self._session, payload.question, result)
+        await _persist_trace(self._session, payload.question, trace, len(result.citations))
 
         return QueryResponse(
             answer=result.text,
@@ -56,11 +68,9 @@ def _serialise(citation) -> CitationOut:
     return CitationOut(ordinal=citation.ordinal, kind="web", url=citation.url, title=citation.title)
 
 
-async def _persist_trace(session, question: str, result) -> None:
+async def _persist_trace(session, question: str, trace: Trace, citation_count: int) -> None:
     """Best effort by design: a broken trace table must not take down the
     feature it exists to observe."""
-    from app.models import QueryTrace
-
     try:
         # A savepoint, not a bare flush: a failed INSERT aborts the transaction
         # it ran in, and the commit that ends the request would fail after it.
@@ -69,12 +79,10 @@ async def _persist_trace(session, question: str, result) -> None:
             session.add(
                 QueryTrace(
                     question=question,
-                    iterations=result.trace.iterations,
-                    total_ms=result.trace.total_ms,
-                    citation_count=len(result.citations),
-                    nodes=[
-                        {"node": n.node, "ms": n.ms, "detail": n.detail} for n in result.trace.nodes
-                    ],
+                    iterations=trace.iterations,
+                    total_ms=trace.total_ms,
+                    citation_count=citation_count,
+                    nodes=[{"node": n.node, "ms": n.ms, "detail": n.detail} for n in trace.nodes],
                 )
             )
     except Exception:

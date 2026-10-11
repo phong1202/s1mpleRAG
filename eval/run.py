@@ -1,7 +1,10 @@
 """Retrieval-only by default: recall@10 and MRR need no chat call, only one
 embedding per question, so the metric you check after every tuning change costs
-next to nothing. `--full` runs the
-whole pipeline and is only needed for citation accuracy and fabrication rate.
+next to nothing. `--full` runs the whole pipeline and adds citation accuracy
+and mean iterations.
+
+Set B (fabrication, the decision to go outside the corpus) is not scored yet:
+both need a judge of the answer's text, which arrives with R7.
 """
 
 import argparse
@@ -96,6 +99,22 @@ async def unreachable_labels(session, questions: list[LabelledQuestion]) -> list
     return missing
 
 
+def by_kind(rows: list[tuple[str, float, float]]) -> dict[str, tuple[int, float, float]]:
+    """(n, recall, MRR) for each kind of question, from (kind, recall, rank)
+    rows. The overall figure cannot say which stage a miss belongs to."""
+    grouped: dict[str, list[tuple[float, float]]] = {}
+    for kind, recall, rank in rows:
+        grouped.setdefault(kind, []).append((recall, rank))
+    return {
+        kind: (
+            len(scores),
+            sum(r for r, _ in scores) / len(scores),
+            sum(k for _, k in scores) / len(scores),
+        )
+        for kind, scores in grouped.items()
+    }
+
+
 def _as_query(question: LabelledQuestion):
     """The question as a user would have sent it: the last turn, with the
     turns before it as history. Until R4 reads the history, a follow-up is
@@ -151,6 +170,8 @@ async def _main(full: bool) -> None:
 
     recalls: list[float] = []
     ranks: list[float] = []
+    scored: list[tuple[str, float, float]] = []
+    missed: list[str] = []
     cited_right_page: list[float] = []
     iterations: list[int] = []
 
@@ -168,6 +189,9 @@ async def _main(full: bool) -> None:
             hits = [Hit(sha_by_id[c.ref.document_id], c.ref.page_number) for c in candidates]
             recalls.append(recall_at_k(hits, gold, top_k))
             ranks.append(reciprocal_rank(hits, gold))
+            scored.append((question.kind, recalls[-1], ranks[-1]))
+            if not recalls[-1]:
+                missed.append(question.id)
 
             if not full:
                 continue
@@ -192,6 +216,9 @@ async def _main(full: bool) -> None:
     print(f"n                {n}")
     print(f"recall@{top_k:<10} {sum(recalls) / n:.3f}")
     print(f"MRR              {sum(ranks) / n:.3f}")
+    for kind, (count, recall, rank) in by_kind(scored).items():
+        print(f"  {kind:<14} n={count:<3} recall {recall:.3f}  MRR {rank:.3f}")
+    print(f"missed           {', '.join(missed) or '-'}")
     if full:
         print(f"citation acc.    {sum(cited_right_page) / len(cited_right_page):.3f}")
         print(f"mean iterations  {sum(iterations) / len(iterations):.2f}")

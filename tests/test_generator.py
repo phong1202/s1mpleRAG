@@ -166,3 +166,26 @@ def test_the_instructions_forbid_answering_from_the_models_own_knowledge():
     system = build_prompt(Query(text="q"), _context())[0]["content"]
 
     assert "even if you know" in system
+
+
+def test_a_citation_listing_several_sources_names_each_of_them():
+    """Models write [1, 2] as readily as [1][2]. Read as one unknown source,
+    both citations were being dropped as phantoms."""
+    cited = map_citations("Claim [1, 2].", _context())
+
+    assert [c.ordinal for c in cited] == [1, 2]
+
+
+def test_the_quote_is_the_passage_that_matched_not_the_top_of_its_parent():
+    """The parent is what the model reads; the child is what matched the
+    question. Quoting the parent's first lines showed text about emergency
+    lanes beside an answer about traffic lights."""
+    from dataclasses import replace
+
+    context = _context()
+    passage = replace(context.passages[0], matched="b) Khong chap hanh den tin hieu;")
+    context = replace(context, passages=(passage,))
+
+    (citation,) = map_citations("Claim [1].", context)
+
+    assert citation.quote == "b) Khong chap hanh den tin hieu;"

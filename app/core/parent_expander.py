@@ -41,6 +41,7 @@ async def expand_parents(
             rank=position,
             text=parents[parent_id].content.strip(),
             heading=parents[parent_id].heading_path,
+            matched=candidate.text,
         )
         for position, (parent_id, candidate) in enumerate(winners.items(), start=1)
     ]

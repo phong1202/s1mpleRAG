@@ -5,6 +5,7 @@ import pytest
 
 from eval.run import (
     LabelledQuestion,
+    by_kind,
     load_dataset,
     recall_at_k,
     reciprocal_rank,
@@ -139,3 +140,11 @@ async def test_the_ruler_scores_what_leaves_fuse_with_the_earlier_turns_as_histo
         ("retrieve", "the plan"),
         ("fuse", ["raw"]),
     ]
+
+
+def test_scores_are_broken_down_by_kind_of_question():
+    """One number hides which stage a miss belongs to: follow-ups are meant to
+    score zero until R4, so 0.85 overall says nothing until it is split."""
+    rows = [("baseline", 1.0, 1.0), ("baseline", 0.0, 0.0), ("followup", 1.0, 0.5)]
+
+    assert by_kind(rows) == {"baseline": (2, 0.5, 0.5), "followup": (1, 1.0, 0.5)}

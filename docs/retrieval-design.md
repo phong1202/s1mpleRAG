@@ -658,11 +658,24 @@ stage flag off.
 | Corpus | 10 documents, 2,946 child chunks, re-ingested the same day with heading-aware chunking, enrichment and embedding |
 | Embedding | `text-embedding-3-large`, 1536 dimensions |
 
+By kind of question:
+
+| Kind | n | `recall@10` | `MRR` |
+|---|---|---|---|
+| baseline | 8 | 0.875 | 0.729 |
+| code | 4 | 1.000 | 0.661 |
+| followup | 4 | 0.750 | 0.406 |
+| summarize | 4 | 0.750 | 0.342 |
+
+Missed: `a08`, `a14`, `a20`.
+
 Read it with two cautions. The set is provisionally approved, not yet frozen: a change to it voids
-this number. And 0.850 is higher than §8.4 predicts for a set in which eight questions (follow-ups and
-"summarise X") are meant to score zero until R4 and R5: several of those golds are evidently reachable
-by plain vector search, so they will not show the jump those stages are supposed to produce. A
-per-kind breakdown, which the runner does not print yet, would say which.
+these numbers. And the last two rows are not what §8.4 intends. Follow-ups and "summarise X" are
+meant to score zero until R4 and R5 exist; here three of each four are already found by plain vector
+search, so they cannot show the jump those stages are supposed to produce. Before the set is frozen
+those eight questions should be replaced by ones a single vector search cannot answer: a follow-up
+whose last turn names nothing ("còn trường hợp kia thì sao?"), and a summary whose gold is not the
+page that states the document's scope.
 
 ---
 

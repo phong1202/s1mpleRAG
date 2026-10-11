@@ -54,6 +54,10 @@ async def _run(name: str, stage: Callable, trace: Trace, *args) -> Any:
     except Exception as error:
         fallback_stage = _FALLBACKS.get(name)
         if fallback_stage is None:
+            # No empty version of this stage means the request fails -- but
+            # the trace still says which stage stopped it, and why.
+            ms = int((time.perf_counter() - started) * 1000)
+            trace.record(name, ms=ms, error=f"{type(error).__name__}: {error}")
             raise
         result = await fallback_stage(*args)
         fallback = str(error)
@@ -61,8 +65,11 @@ async def _run(name: str, stage: Callable, trace: Trace, *args) -> Any:
     return result
 
 
-async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer:
-    trace = Trace()
+async def answer(
+    query: Query, stages: Stages, max_iterations: int, trace: Trace | None = None
+) -> Answer:
+    # Passed in by a caller that wants the trace even when this raises.
+    trace = Trace() if trace is None else trace
     context = Context.empty()
 
     # Outside the loop: re-entry is at `plan`. The gate writes the refined
