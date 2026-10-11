@@ -29,11 +29,7 @@ def build_context(previous: Context, candidates: list[Candidate], budget: int) -
 
     for candidate in candidates:
         ref = candidate.ref
-        seen = (
-            ref.parent_id in seen_parents
-            if isinstance(ref, DocRef)
-            else ref.url in seen_urls
-        )
+        seen = ref.parent_id in seen_parents if isinstance(ref, DocRef) else ref.url in seen_urls
         if seen:
             # Checked before the budget, because a passage already held costs
             # nothing and so must not be what ends the loop. At R6 iteration two

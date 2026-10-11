@@ -23,16 +23,23 @@ pytestmark = pytest.mark.asyncio
 
 def _candidate(text: str) -> Candidate:
     return Candidate(
-        source="vector", rank=1, score=1.0, text=text,
+        source="vector",
+        rank=1,
+        score=1.0,
+        text=text,
         ref=DocRef(
-            document_id=uuid.uuid4(), parent_id=uuid.uuid4(), child_id=uuid.uuid4(),
-            page_number=1, filename="d.pdf",
+            document_id=uuid.uuid4(),
+            parent_id=uuid.uuid4(),
+            child_id=uuid.uuid4(),
+            page_number=1,
+            filename="d.pdf",
         ),
     )
 
 
 def _stages(**overrides) -> Stages:
     """R0 wiring with real no-ops, overridable per test."""
+
     async def retrieve(plan, trace):
         return [_candidate(f"passage for {plan.queries[0]}")]
 
@@ -77,8 +84,9 @@ async def test_the_loop_runs_again_when_the_gate_says_insufficient():
     """This is the test that keeps R6 cheap. If it passes at R0, R6 is a
     constant change and a function swap -- nothing structural."""
     verdicts = [
-        GateVerdict(sufficient=False, missing="thieu phan thay the",
-                    refined_query="hoa don thay the"),
+        GateVerdict(
+            sufficient=False, missing="thieu phan thay the", refined_query="hoa don thay the"
+        ),
         GateVerdict(sufficient=True),
     ]
     seen = []
@@ -134,21 +142,18 @@ async def test_context_accumulates_across_iterations():
         captured["passages"] = [p.text for p in context.passages]
         return "answer", ()
 
-    await answer(
-        Query(text="first"), _stages(gate=gate, generate=generate), max_iterations=3
-    )
+    await answer(Query(text="first"), _stages(gate=gate, generate=generate), max_iterations=3)
 
     assert captured["passages"] == ["passage for first", "passage for second"]
 
 
 async def test_the_loop_answers_anyway_when_it_runs_out_of_iterations():
     """Out of budget is not an error. A partial answer beats a status code."""
+
     async def always_insufficient(query, context, trace):
         return GateVerdict(sufficient=False, refined_query="again")
 
-    result = await answer(
-        Query(text="q"), _stages(gate=always_insufficient), max_iterations=3
-    )
+    result = await answer(Query(text="q"), _stages(gate=always_insufficient), max_iterations=3)
 
     assert isinstance(result, Answer)
     assert result.trace.iterations == 3
@@ -159,19 +164,25 @@ async def test_every_stage_writes_one_trace_entry_per_pass():
 
     recorded = [n.node for n in result.trace.nodes]
     assert recorded == [
-        "rewrite", "plan", "retrieve", "fuse", "expand", "build_context", "gate",
-        "generate", "reflect",
+        "rewrite",
+        "plan",
+        "retrieve",
+        "fuse",
+        "expand",
+        "build_context",
+        "gate",
+        "generate",
+        "reflect",
     ]
 
 
 async def test_a_failing_stage_degrades_to_its_no_op():
     """A decision node that raises costs a capability, never the request."""
+
     async def broken_rewrite(query, trace):
         raise ValueError("model returned prose instead of json")
 
-    result = await answer(
-        Query(text="cau hoi"), _stages(rewrite=broken_rewrite), max_iterations=1
-    )
+    result = await answer(Query(text="cau hoi"), _stages(rewrite=broken_rewrite), max_iterations=1)
 
     assert isinstance(result, Answer)
     assert any(n.detail.get("fallback") for n in result.trace.nodes)
@@ -181,6 +192,7 @@ async def test_a_stage_without_a_no_op_is_allowed_to_fail_the_request():
     """`retrieve`, `expand`, `build_context` and `generate` have no meaningful
     empty version. Swallowing their failures would return a confident answer
     built from nothing."""
+
     async def broken_retrieve(plan, trace):
         raise RuntimeError("the database is gone")
 

@@ -67,9 +67,7 @@ async def test_fetch_parents_returns_the_content_of_every_id(db_session):
     parent."""
     await seed_chunks(db_session)
     repository = ChunkRepository(db_session)
-    hits = await repository.search(
-        vector=unit_vector(0), over_fetch=50, filters=Filters()
-    )
+    hits = await repository.search(vector=unit_vector(0), over_fetch=50, filters=Filters())
     parent_ids = list({hit.parent_id for hit in hits})
 
     contents = await repository.fetch_parents(parent_ids)

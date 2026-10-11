@@ -70,9 +70,7 @@ async def test_a_question_with_no_matching_corpus_still_answers(query_client, se
     client, provider = query_client
     provider.script(Draft, Draft(answer="Khong tim thay trong tai lieu."))
 
-    response = await client.post(
-        "/query", json={"question": "gi do", "category": "MARKETING"}
-    )
+    response = await client.post("/query", json={"question": "gi do", "category": "MARKETING"})
 
     assert response.status_code == 200
     assert response.json()["data"]["citations"] == []

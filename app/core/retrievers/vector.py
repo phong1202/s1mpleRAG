@@ -18,9 +18,7 @@ class VectorRetriever:
 
     async def search(self, plan: Plan) -> list[Candidate]:
         over_fetch = get_settings().retrieval_over_fetch
-        vectors = await asyncio.gather(
-            *(self._provider.embed_query(q) for q in plan.queries)
-        )
+        vectors = await asyncio.gather(*(self._provider.embed_query(q) for q in plan.queries))
 
         best: dict[uuid.UUID, ChildHit] = {}
         for vector in vectors:

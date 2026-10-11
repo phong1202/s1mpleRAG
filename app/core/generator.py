@@ -63,7 +63,7 @@ def map_citations(text: str, context: Context) -> tuple[Citation, ...]:
     by_ordinal.update({p.ordinal: p for p in context.untrusted})
 
     citations: list[Citation] = []
-    for raw in dict.fromkeys(_CITATION.findall(text)):      # first use wins, once each
+    for raw in dict.fromkeys(_CITATION.findall(text)):  # first use wins, once each
         passage = by_ordinal.get(int(raw))
         if passage is None:
             # A phantom citation. Dropping it keeps a usable answer; accepting
@@ -82,9 +82,7 @@ def map_citations(text: str, context: Context) -> tuple[Citation, ...]:
             )
         else:
             citations.append(
-                WebCitation(
-                    ordinal=passage.ordinal, url=reference.url, title=reference.title
-                )
+                WebCitation(ordinal=passage.ordinal, url=reference.url, title=reference.title)
             )
     return tuple(citations)
 

@@ -16,9 +16,7 @@ pytestmark = pytest.mark.asyncio
 
 async def _candidates(session, query: str = "hoa don"):
     retriever = VectorRetriever(session, AsyncStubProvider(dimensions=1536))
-    return await retriever.search(
-        Plan(strategy="VECTOR_ONLY", queries=(query,), filters=Filters())
-    )
+    return await retriever.search(Plan(strategy="VECTOR_ONLY", queries=(query,), filters=Filters()))
 
 
 async def test_expansion_returns_one_candidate_per_parent(db_session):
@@ -85,9 +83,7 @@ async def test_expanded_ranks_are_contiguous_from_one(db_session):
     crowded = candidates[0].ref.parent_id
     siblings = [c for c in candidates if c.ref.parent_id == crowded]
     others = [c for c in candidates if c.ref.parent_id != crowded]
-    reordered = [
-        replace(c, rank=rank) for rank, c in enumerate(siblings + others, start=1)
-    ]
+    reordered = [replace(c, rank=rank) for rank, c in enumerate(siblings + others, start=1)]
 
     expanded = await expand_parents(ChunkRepository(db_session), reordered)
 

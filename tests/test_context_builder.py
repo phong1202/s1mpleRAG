@@ -103,7 +103,10 @@ def test_web_candidates_land_in_the_untrusted_list():
     """R8 is far off, but the split is structural. If web text could reach
     `passages`, the prompt builder would have no way to keep it out."""
     web = Candidate(
-        source="web", rank=1, score=1.0, text="from the internet",
+        source="web",
+        rank=1,
+        score=1.0,
+        text="from the internet",
         ref=WebRef(url="https://example.test", title="Example"),
     )
 

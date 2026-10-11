@@ -59,9 +59,7 @@ async def test_sub_queries_are_merged_without_duplicating_a_child(db_session):
     await seed_chunks(db_session)
     retriever = _retriever(db_session)
 
-    one = await retriever.search(
-        Plan(strategy="VECTOR_ONLY", queries=("a",), filters=Filters())
-    )
+    one = await retriever.search(Plan(strategy="VECTOR_ONLY", queries=("a",), filters=Filters()))
     two = await retriever.search(
         Plan(strategy="VECTOR_ONLY", queries=("a", "b"), filters=Filters())
     )

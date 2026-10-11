@@ -41,9 +41,11 @@ class QueryService:
 def _serialise(citation) -> CitationOut:
     if isinstance(citation, DocCitation):
         return CitationOut(
-            ordinal=citation.ordinal, kind="document", document_id=citation.document_id,
-            filename=citation.filename, page_number=citation.page_number, quote=citation.quote,
+            ordinal=citation.ordinal,
+            kind="document",
+            document_id=citation.document_id,
+            filename=citation.filename,
+            page_number=citation.page_number,
+            quote=citation.quote,
         )
-    return CitationOut(
-        ordinal=citation.ordinal, kind="web", url=citation.url, title=citation.title
-    )
+    return CitationOut(ordinal=citation.ordinal, kind="web", url=citation.url, title=citation.title)

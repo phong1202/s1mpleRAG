@@ -75,8 +75,9 @@ async def answer(query: Query, stages: Stages, max_iterations: int) -> Answer:
         candidates = await _run("retrieve", stages.retrieve, trace, plan, trace)
         candidates = await _run("fuse", stages.fuse, trace, query, candidates, trace)
         candidates = await _run("expand", stages.expand, trace, candidates, trace)
-        context = await _run("build_context", stages.build_context, trace,
-                             context, candidates, trace)
+        context = await _run(
+            "build_context", stages.build_context, trace, context, candidates, trace
+        )
         verdict = await _run("gate", stages.gate, trace, query, context, trace)
         trace.iterations = iteration
         if verdict.sufficient:
