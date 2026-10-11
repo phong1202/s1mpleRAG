@@ -7,7 +7,13 @@ const nextConfig = {
   // the API needs no CORS grant for it and its address stays server-side.
   async rewrites() {
     const api = process.env.API_URL ?? 'http://localhost:8000'
-    return [{ source: '/backend/:path*', destination: `${api}/:path*` }]
+    return [
+      // Development only: /query answered from fixtures instead of the
+      // backend, which spends OpenAI money on every real question. See
+      // app/api/mock/query/route.ts.
+      ...(process.env.QUERY_MOCK === '1' ? [{ source: '/backend/query', destination: '/api/mock/query' }] : []),
+      { source: '/backend/:path*', destination: `${api}/:path*` },
+    ]
   },
   experimental: {
     // How long the rewrite above waits for the backend, 30 s by default.
