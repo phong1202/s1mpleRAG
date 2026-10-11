@@ -410,7 +410,7 @@ Kết quả đạt ở đây cũng là mục 1 của Definition of Done.
 **Interfaces:**
 - Produces: `QueryTrace(id, question, standalone, strategy, iterations, total_ms, total_tokens, citation_count, nodes: JSONB, created_at)`
 
-- [ ] **Step 1: Viết test đỏ**
+- [x] **Step 1: Viết test đỏ**
 
 ```python
 # tests/test_query_trace.py
@@ -457,9 +457,9 @@ async def test_optional_columns_stay_null_until_their_stage_exists(db_session):
     assert trace.standalone is None and trace.strategy is None
 ```
 
-- [ ] **Step 2: Chạy để xác nhận đỏ** — `ImportError: cannot import name 'QueryTrace'`
+- [x] **Step 2: Chạy để xác nhận đỏ** — `ImportError: cannot import name 'QueryTrace'`
 
-- [ ] **Step 3: Viết model**
+- [x] **Step 3: Viết model**
 
 ```python
 # app/models/query_trace.py
@@ -496,7 +496,7 @@ class QueryTrace(Base):
     )
 ```
 
-- [ ] **Step 4: Sinh migration, rồi cắt nó về đúng một bảng**
+- [x] **Step 4: Sinh migration, rồi cắt nó về đúng một bảng**
 
 ```bash
 uv run alembic revision --autogenerate -m "query traces"
@@ -523,7 +523,7 @@ Expected: ba dòng, cột `tsv`, index `hnsw` và index `gin (tsv)`.
 
 `uv run alembic check` vẫn sẽ báo các mục "removed" ở trên. Đó là trạng thái có sẵn của `main`, không phải việc của task này; nó chỉ không được nhắc tới `query_traces`.
 
-- [ ] **Step 5: Chạy test, rồi dừng** — PASS, 2 test.
+- [x] **Step 5: Chạy test, rồi dừng** — PASS, 2 test.
 
 Commit message đề xuất: `feat(db): add the query trace table`
 

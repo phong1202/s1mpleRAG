@@ -410,7 +410,7 @@ A pass here is also Definition of Done item 1.
 **Interfaces:**
 - Produces: `QueryTrace(id, question, standalone, strategy, iterations, total_ms, total_tokens, citation_count, nodes: JSONB, created_at)`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_query_trace.py
@@ -457,9 +457,9 @@ async def test_optional_columns_stay_null_until_their_stage_exists(db_session):
     assert trace.standalone is None and trace.strategy is None
 ```
 
-- [ ] **Step 2: Run it to verify it fails** — `ImportError: cannot import name 'QueryTrace'`
+- [x] **Step 2: Run it to verify it fails** — `ImportError: cannot import name 'QueryTrace'`
 
-- [ ] **Step 3: Write the model**
+- [x] **Step 3: Write the model**
 
 ```python
 # app/models/query_trace.py
@@ -496,7 +496,7 @@ class QueryTrace(Base):
     )
 ```
 
-- [ ] **Step 4: Generate the migration, then cut it down to one table**
+- [x] **Step 4: Generate the migration, then cut it down to one table**
 
 ```bash
 uv run alembic revision --autogenerate -m "query traces"
@@ -523,7 +523,7 @@ Expected: three lines — the `tsv` column, the `hnsw` index and the `gin (tsv)`
 
 `uv run alembic check` will still report the "removed" items above. That is `main`'s standing state, not this task's business; it must simply not mention `query_traces`.
 
-- [ ] **Step 5: Run the tests, then stop** — PASS, 2 tests.
+- [x] **Step 5: Run the tests, then stop** — PASS, 2 tests.
 
 Proposed commit message: `feat(db): add the query trace table`
 
