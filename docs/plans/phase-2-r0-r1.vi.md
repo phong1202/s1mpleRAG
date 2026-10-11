@@ -89,6 +89,7 @@ Mọi task đều ngầm mang những ràng buộc này. Giá trị chép nguyê
 | **R0** | 9b, 9c, 9d | Nhánh qua được CI của `main`; provider thật trả về đúng schema; một câu hỏi thật có trích dẫn chỉ đúng trang |
 | **R1** | 10 → 12 | Mỗi truy vấn ghi một hàng trace; `eval/run.py` in `recall@10` và `MRR` trên bộ có nhãn |
 | **Đóng** | 13 | `README.md` và spec mô tả đúng hệ thống đang có |
+| **Riêng** | 14 | Khuyến nghị có dùng DeepSeek hay không, cho từng lời gọi LLM |
 
 R0 xong khi một câu hỏi về một PDF đã nạp thật trả về kèm trích dẫn chỉ đúng trang. R1 xong khi bạn có **một con số nền được ghi lại** — thứ mà R2 đến R8 phải vượt qua.
 
@@ -179,7 +180,7 @@ CI trên `main` chạy `ruff format --check .` cho mọi PR. Chín task đầu �
 - Modify: `app/config.py`, `app/core/context_builder.py`, `app/core/generator.py`, `app/core/pipeline.py`, `app/core/retrievers/vector.py`, `app/services/query_service.py`
 - Modify: `tests/test_async_llm_provider.py`, `tests/test_chunk_repository.py`, `tests/test_context_builder.py`, `tests/test_generator.py`, `tests/test_parent_expander.py`, `tests/test_pipeline.py`, `tests/test_query_api.py`, `tests/test_vector_retriever.py`
 
-- [ ] **Step 1: Xác nhận đỏ**
+- [x] **Step 1: Xác nhận đỏ**
 
 ```bash
 uv run ruff format --check .
@@ -187,15 +188,15 @@ uv run ruff format --check .
 
 Expected: `14 files would be reformatted`.
 
-- [ ] **Step 2: Format**
+- [x] **Step 2: Format**
 
 ```bash
 uv run ruff format .
 ```
 
-- [ ] **Step 3: Kiểm tra diff** — `git diff --stat` liệt kê đúng 14 file ở trên; đọc lướt diff, chỉ có gộp và tách dòng.
+- [x] **Step 3: Kiểm tra diff** — `git diff --stat` liệt kê đúng 14 file ở trên; đọc lướt diff, chỉ có gộp và tách dòng.
 
-- [ ] **Step 4: Chạy đủ ba kiểm tra của CI, rồi dừng**
+- [x] **Step 4: Chạy đủ ba kiểm tra của CI, rồi dừng**
 
 ```bash
 uv run ruff format --check . && uv run ruff check . && uv run pytest -q --ignore=tests/test_ocr_service.py
@@ -1216,6 +1217,34 @@ Expected: chỉ còn những dòng nói về lịch sử (bảng §12 kể lại
 - [ ] **Step 6: Dừng và báo cáo**
 
 Commit message đề xuất: `docs: describe the system as built`
+
+---
+
+## Task 14: Đánh giá DeepSeek cho các lời gọi LLM
+
+Thêm ngày 2026-10-10 theo yêu cầu. Câu hỏi: có nên dùng DeepSeek trong hệ thống không, và cho lời gọi nào. Task này là nghiên cứu và một khuyến nghị; **không đổi code**. Nếu câu trả lời là có, việc thêm provider là một plan riêng. Task này không thuộc Definition of Done của R0 + R1.
+
+**Files:** không có code. Kết quả ghi vào mục "Kết quả" ngay dưới.
+
+Hệ thống gọi LLM ở năm chỗ, và mỗi chỗ đòi một thứ khác nhau:
+
+| Lời gọi | Ở đâu | Đòi gì ở provider |
+| --- | --- | --- |
+| S3 enrich | worker, `OpenAIProvider.enrich` | Structured output `strict` với enum đóng; tiếng Việt; hàng nghìn chunk mỗi tài liệu; giới hạn tốc độ rõ ràng |
+| S4 embed | worker, `OpenAIProvider.embed` | Một API embedding; đổi model hay số chiều là nạp lại toàn bộ corpus |
+| Embed câu hỏi | API, `AsyncOpenAIProvider.embed_query` | Đúng model của S4 |
+| Sinh câu trả lời | API, `AsyncOpenAIProvider.complete` | Trả về đúng schema Pydantic; độ trễ thấp; tiếng Việt |
+| Các node quyết định R4 → R7 | API, chưa làm | Nhiều lời gọi nhỏ có schema cho mỗi câu hỏi: giá và độ trễ mỗi lời gọi là thứ quyết định |
+
+- [ ] **Step 1: Lấy dữ kiện của hôm nay.** Model, cửa sổ ngữ cảnh, giá (cache hit, cache miss, output), có API embedding hay không, hỗ trợ structured output tới mức nào (`json_schema` `strict` hay chỉ JSON mode), tương thích OpenAI SDK, giới hạn tốc độ, chính sách dữ liệu. Mọi con số kèm URL của trang đã đọc; thứ gì không kiểm được thì ghi "chưa kiểm".
+
+- [ ] **Step 2: Lấy giá hiện tại của hai model đang dùng** (`OPENAI_CHAT_MODEL` và `text-embedding-3-large`) để so.
+
+- [ ] **Step 3: Ước tính chi phí trên từng provider**, có phép tính: enrich một tài liệu 600 chunk; 1.000 câu hỏi chỉ có bước sinh; 1.000 câu hỏi khi đã có bốn node quyết định.
+
+- [ ] **Step 4: Ghi khuyến nghị cho từng lời gọi, rồi dừng.** Dùng, giữ OpenAI, hoặc không làm được; kèm rủi ro và những gì `shared/llm.py` phải đổi.
+
+**Kết quả:** *(chưa có)*
 
 ---
 

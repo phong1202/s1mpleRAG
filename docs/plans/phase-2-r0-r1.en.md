@@ -89,6 +89,7 @@ Every task implicitly carries these. Values copied verbatim from the spec.
 | **R0** | 9b, 9c, 9d | The branch passes `main`'s CI; the real provider returns what the schema asks for; a real question comes back citing the right page |
 | **R1** | 10 → 12 | Every query writes a trace row; `eval/run.py` prints `recall@10` and `MRR` against a labelled set |
 | **Close** | 13 | `README.md` and the spec describe the system as built |
+| **Separate** | 14 | A recommendation on DeepSeek, per LLM call |
 
 R0 is done when a question about a real ingested PDF comes back with a citation naming the right page. R1 is done when you have a **baseline number written down** — the thing R2 through R8 have to beat.
 
@@ -179,7 +180,7 @@ CI on `main` runs `ruff format --check .` on every PR. The first nine tasks were
 - Modify: `app/config.py`, `app/core/context_builder.py`, `app/core/generator.py`, `app/core/pipeline.py`, `app/core/retrievers/vector.py`, `app/services/query_service.py`
 - Modify: `tests/test_async_llm_provider.py`, `tests/test_chunk_repository.py`, `tests/test_context_builder.py`, `tests/test_generator.py`, `tests/test_parent_expander.py`, `tests/test_pipeline.py`, `tests/test_query_api.py`, `tests/test_vector_retriever.py`
 
-- [ ] **Step 1: Verify it is red**
+- [x] **Step 1: Verify it is red**
 
 ```bash
 uv run ruff format --check .
@@ -187,15 +188,15 @@ uv run ruff format --check .
 
 Expected: `14 files would be reformatted`.
 
-- [ ] **Step 2: Format**
+- [x] **Step 2: Format**
 
 ```bash
 uv run ruff format .
 ```
 
-- [ ] **Step 3: Check the diff** — `git diff --stat` lists exactly the 14 files above; skim the diff, it is only lines joined and split.
+- [x] **Step 3: Check the diff** — `git diff --stat` lists exactly the 14 files above; skim the diff, it is only lines joined and split.
 
-- [ ] **Step 4: Run CI's three checks, then stop**
+- [x] **Step 4: Run CI's three checks, then stop**
 
 ```bash
 uv run ruff format --check . && uv run ruff check . && uv run pytest -q --ignore=tests/test_ocr_service.py
@@ -1216,6 +1217,34 @@ Expected: only lines that tell history (the §12 table recounting the old decisi
 - [ ] **Step 6: Stop and report**
 
 Proposed commit message: `docs: describe the system as built`
+
+---
+
+## Task 14: Assess DeepSeek for the LLM calls
+
+Added 2026-10-10 on request. The question: should the system use DeepSeek, and for which calls. This task is research and a recommendation; **no code changes**. If the answer is yes, adding the provider is a plan of its own. This task is not part of the R0 + R1 Definition of Done.
+
+**Files:** no code. The outcome is written under "Outcome" just below.
+
+The system calls an LLM in five places, and each asks something different:
+
+| Call | Where | What it needs from a provider |
+| --- | --- | --- |
+| S3 enrich | worker, `OpenAIProvider.enrich` | Strict structured output with a closed enum; Vietnamese; thousands of chunks per document; clear rate limits |
+| S4 embed | worker, `OpenAIProvider.embed` | An embeddings API; changing model or dimension means re-ingesting the whole corpus |
+| Query embedding | API, `AsyncOpenAIProvider.embed_query` | The same model as S4 |
+| Answer generation | API, `AsyncOpenAIProvider.complete` | A reply bound to a Pydantic schema; low latency; Vietnamese |
+| Decision nodes R4 → R7 | API, not built | Several small schema-bound calls per question: price and latency per call decide it |
+
+- [ ] **Step 1: Get today's facts.** Models, context windows, prices (cache hit, cache miss, output), whether there is an embeddings API, how far structured output goes (strict `json_schema` or JSON mode only), OpenAI SDK compatibility, rate limits, data policy. Every number carries the URL of the page it was read from; what cannot be checked is marked "not verified".
+
+- [ ] **Step 2: Get the current prices of the two models in use** (`OPENAI_CHAT_MODEL` and `text-embedding-3-large`) to compare against.
+
+- [ ] **Step 3: Estimate the cost on each provider**, with the arithmetic: enriching one 600-chunk document; 1,000 questions with generation only; 1,000 questions once four decision nodes exist.
+
+- [ ] **Step 4: Write a recommendation per call, then stop.** Use it, keep OpenAI, or not possible; with the risks and what `shared/llm.py` would have to change.
+
+**Outcome:** *(none yet)*
 
 ---
 
