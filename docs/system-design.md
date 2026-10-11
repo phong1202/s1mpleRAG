@@ -415,10 +415,11 @@ leaders) as a loop and retries — capped at 2 retries here, against its default
      when A only begins after the last B and nothing that lives inside B appears again;
    - an unnumbered markdown heading is a sub-level of whichever numbered heading is open.
 
-   A document with no numbered headings falls back to its markdown levels. Known limits: forms and
-   appendices that are only ever bold ("Mẫu số 01", "Phụ lục I" in two of the corpus's decrees) are
-   not recognised as structure and stay under the final article; and a document's first chapter
-   heading, if the parser lost it, leaves the articles before the second chapter without a chapter.
+   A document with no numbered headings falls back to its markdown levels. A bold kind that only begins
+   after the last heading of every other kind is an appendix (forms, annexes) and stands on its own.
+   Known limits: an appendix with no numbered heading stays under the final article (two in the
+   corpus); and a document's first chapter heading, if the parser lost it, leaves the articles before
+   the second chapter without a chapter.
 3. **Parent chunks:** 500–1000 tokens, split at the outline's headings first, then by tokens.
 4. **Child chunks:** 100–200 tokens within each parent, carrying `parent_index`, `page_number` and
    the parent's `heading_path`.

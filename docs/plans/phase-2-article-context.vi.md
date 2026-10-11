@@ -665,3 +665,5 @@ Kết quả trên chín văn bản luật: chuỗi số điều liền mạch, k
 Còn lại, chưa sửa: các mẫu biểu và phụ lục chỉ in đậm ("Mẫu số", "Phụ lục" ở NĐ 151 và NĐ 236) không được nhận là cấu trúc nên vẫn nằm dưới điều cuối cùng.
 
 Lệnh nạp lại giờ khoá hàng tài liệu, từ chối tài liệu còn đang chạy, và xoá bản ghi lỗi của lần chạy trước.
+
+Sau khi thêm quy tắc phụ lục (loại in đậm chỉ bắt đầu sau tiêu đề cuối cùng của mọi loại khác thì đứng riêng) corpus được nạp lại lần nữa: 2.982 chunk con; mẫu biểu của NĐ 151 và phụ lục của NĐ 236 đứng riêng. Hai phụ lục không đánh số (NĐ 208 trang 49–62, NĐ 151 trang 34–38) vẫn nằm dưới điều cuối. Con số nền đo lại: `recall@10` 0,750, `MRR` 0,517.

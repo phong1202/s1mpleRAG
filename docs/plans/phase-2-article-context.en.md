@@ -668,3 +668,5 @@ On the nine legal documents the article series is now unbroken, no number missin
 Left unfixed: forms and appendices that are only ever bold ("Mẫu số", "Phụ lục" in decrees 151 and 236) are not recognised as structure and still sit under the final article.
 
 The re-ingest command now locks the document row, refuses a document that is still running, and clears the failure record of the previous run.
+
+After the appendix rule was added (a bold kind that only begins after the last heading of every other kind stands on its own) the corpus was re-ingested once more: 2,982 child chunks; the forms of decree 151 and the appendices of decree 236 stand on their own. Two unnumbered appendices (decree 208 pp. 49–62, decree 151 pp. 34–38) still sit under the final article. Baseline re-measured: `recall@10` 0.750, `MRR` 0.517.

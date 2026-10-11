@@ -650,32 +650,33 @@ the stage did not help — that is a result too, and a reason to delete the node
 Measured 2026-10-11 with `python -m eval.run` (retrieval-only), R0 as built: vector search alone, every
 stage flag off.
 
-| | |
-|---|---|
-| Set A questions | 20 (`eval/dataset.yaml`, all labels machine-checked as reachable) |
-| **`recall@10`** | **0.850** |
-| **`MRR`** | **0.573** |
-| Corpus | 10 documents, 2,946 child chunks, re-ingested the same day with heading-aware chunking, enrichment and embedding |
-| Embedding | `text-embedding-3-large`, 1536 dimensions |
-
-By kind of question:
-
 | Kind | n | `recall@10` | `MRR` |
 |---|---|---|---|
-| baseline | 8 | 0.875 | 0.729 |
-| code | 4 | 1.000 | 0.661 |
-| followup | 4 | 0.750 | 0.406 |
-| summarize | 4 | 0.750 | 0.342 |
+| **all** | **20** | **0.750** | **0.517** |
+| baseline | 8 | 0.875 | 0.708 |
+| code | 4 | 1.000 | 0.569 |
+| followup | 4 | 0.250 | 0.250 |
+| summarize | 4 | 0.750 | 0.348 |
 
-Missed: `a08`, `a14`, `a20`.
+Missed: `a08`, `a13`, `a14`, `a16`, `a20`.
 
-Read it with two cautions. The set is provisionally approved, not yet frozen: a change to it voids
-these numbers. And the last two rows are not what §8.4 intends. Follow-ups and "summarise X" are
-meant to score zero until R4 and R5 exist; here three of each four are already found by plain vector
-search, so they cannot show the jump those stages are supposed to produce. Before the set is frozen
-those eight questions should be replaced by ones a single vector search cannot answer: a follow-up
-whose last turn names nothing ("còn trường hợp kia thì sao?"), and a summary whose gold is not the
-page that states the document's scope.
+Corpus: 10 documents, 2,982 child chunks, ingested with the outline learned from each document and
+with the title and heading path in the embedded text. Embedding: `text-embedding-3-large`, 1536
+dimensions. All 20 labels machine-checked as reachable.
+
+How to read it:
+
+- **Follow-ups score 0.250, as §8.4 intends.** Their last turn names no topic ("Thế nếu người ngồi sau
+  không đội thì sao?"), so a search on that turn alone finds the right page once in four. This is the
+  row R4 has to move.
+- **"Summarise X" scores 0.750, which is not what §8.4 intends.** Its gold is the page stating the
+  document's scope, and with the title in every embedded text plain vector search finds that page. One
+  gold page cannot measure a summary; R5 needs a measure of its own (how much of the document's
+  outline the context covers). The four questions are kept as they are until then.
+- An earlier run the same day gave 0.850 / 0.573. It used four easier follow-ups and an outline that
+  mislabelled some articles; it is not comparable and is not the baseline.
+- The set is approved for use but small: one question is 5 points of recall overall and 25 within a
+  kind of four.
 
 ---
 
