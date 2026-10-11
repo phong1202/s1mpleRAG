@@ -18,14 +18,19 @@ Phase 1 is merged into `main` (PR #1). On 2026-10-10 `phase-2` was rebased onto 
 
 ### Status
 
+Updated 2026-10-10, after the first execution pass. Nothing is committed; each task has a snapshot of its own awaiting review.
+
 | Task | Status |
 | --- | --- |
-| 1 → 9 (R0) | Committed on `phase-2`. Never run against the real provider. Summarised under R0. |
-| 9b, 9c, 9d | New: formatting, the provider fix, then the first real question. Do them before R1. |
-| 10 → 12 (R1) | Not started. Amended to match `main`; see each task. |
-| 13 | New: the README and the spec's stale lines. |
+| 1 → 9 (R0) | Committed on `phase-2`. Summarised under R0. |
+| 9b, 9c | Done. |
+| 9d | **Waiting**: it calls OpenAI (3 embeddings + 3 chat calls) and needs a go-ahead. |
+| 10, 11 | Done. |
+| 12 | Steps 1 → 7 done: runner, tests, 28 drafted items, 20 labels reported reachable. **Waiting**: a person reviews `eval/dataset.yaml` (Step 8), then the baseline is measured with OpenAI (Step 9). |
+| 13 | README rewritten and the spec's facts corrected (Steps 1 → 3, 5). **Left**: running the README's commands with the stack down (Step 4), and the baseline in spec §8. |
+| 14 | Done: the recommendation is not to use DeepSeek. |
 
-Right after the rebase: 304 tests green (`--ignore=tests/test_ocr_service.py`), `ruff check .` clean, `ruff format --check .` **red** (Task 9b).
+The suite now: 318 tests green (`--ignore=tests/test_ocr_service.py`), `ruff check .` and `ruff format --check .` clean.
 
 ### Conflicts resolved in the rebase
 
@@ -1135,7 +1140,7 @@ Proposed commit message: `feat(eval): add the retrieval evaluation harness`
 - The README is a way in, not a copy of the design: each section summarises, then links to `docs/system-design.md` or `docs/retrieval-design.md`.
 - Copy no value out of `.env`. The configuration table takes names and defaults from `.env.example` and `app/config.py`.
 
-- [ ] **Step 1: Take the facts from the code, not from memory**
+- [x] **Step 1: Take the facts from the code, not from memory**
 
 ```bash
 grep -n '@router\.' app/controllers/*.py                  # endpoints
@@ -1143,7 +1148,7 @@ grep -v '^#' .env.example | grep -v '^$' | cut -d= -f1    # configuration variab
 grep -n '^  [a-z-]*:$' docker-compose.yml                 # services
 ```
 
-- [ ] **Step 2: Rewrite section by section**
+- [x] **Step 2: Rewrite section by section**
 
 | Section | What to do |
 | --- | --- |
@@ -1152,7 +1157,7 @@ grep -n '^  [a-z-]*:$' docker-compose.yml                 # services
 | Layout | Add `app/core/`, `worker/`, `shared/`, `web/`, `eval/`, `tests/`, `docs/`, `alembic/`. Keep the sentence about controller → service → repository → model. |
 | *(new)* Requirements | Docker and Compose, `uv`, `pnpm` for `web/`. A 16 GB NVIDIA GPU for `chandra`, not shared with anything else. On WSL the RAM limit has to be raised (link to the host RAM section of `docs/system-design.md`). |
 | Running locally (uv) | Keep the `uv` paragraphs. Correct: the API needs RabbitMQ, Redis and MinIO as well as `db`. `LLM_PROVIDER=stub` is the default; `openai` costs money. Add how to run `web/` (`pnpm install`, `pnpm dev`). |
-| Running with Docker | `docker compose up -d --build` now brings up `chandra` too: a model download, and a GPU. Add the way to run without a GPU (leave out `chandra` and `worker-ocr`). Note that changing `task_routes` needs an `api` restart, since the publisher is what decides the queue. |
+| Running with Docker | `docker compose up -d --build` now brings up `chandra` too: a model download, and a GPU. Add the way to run without a GPU: leave out `chandra` but still run `worker-ocr` with `--no-deps`, since every document starts on the `ocr` queue. Note that changing `task_routes` needs an `api` restart, since the publisher is what decides the queue. |
 | Response envelope | Keep. Change the examples to real payloads: `id` is a UUID, the 404 comes from `/documents/{id}/status`. |
 | Endpoints | Replace the whole table with the one below. |
 | Linting | Keep as is. Add one sentence: CI runs these same two commands on every PR into `main`. |
@@ -1175,7 +1180,7 @@ The endpoint table, from the code as it stands:
 | DELETE | `/documents/{id}` | 200 with `data: null`; 404 if absent. |
 | POST | `/query` | An answer with citations. |
 
-- [ ] **Step 3: Check the README against the code**
+- [x] **Step 3: Check the README against the code**
 
 ```bash
 # every endpoint the code declares is in the README, and nothing else is
@@ -1195,7 +1200,7 @@ Expected: the two endpoint lists agree; no `missing:` line; the last grep prints
 
 - [ ] **Step 4: Run what the README tells the reader to run** — every command block under "Running", "Linting", "Testing" and "Migrations" is run once, on a fresh clone or on the dev machine with the stack down. Where a command does not work, fix the README, not the code.
 
-- [ ] **Step 5: Correct the spec's stale facts**
+- [x] **Step 5: Correct the spec's stale facts**
 
 Facts only. No argument is rewritten.
 

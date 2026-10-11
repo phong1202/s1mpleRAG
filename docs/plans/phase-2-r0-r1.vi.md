@@ -18,14 +18,19 @@ Phase 1 đã merge vào `main` (PR #1). Ngày 2026-10-10 `phase-2` được reba
 
 ### Trạng thái
 
+Cập nhật 2026-10-10, sau lượt thực thi đầu. Chưa có gì được commit; mỗi task có một snapshot riêng chờ duyệt.
+
 | Task | Trạng thái |
 | --- | --- |
-| 1 → 9 (R0) | Đã commit trên `phase-2`. Chưa chạy lần nào với provider thật. Tóm tắt ở mục R0. |
-| 9b, 9c, 9d | Mới: format, sửa provider, rồi câu hỏi thật đầu tiên. Làm trước R1. |
-| 10 → 12 (R1) | Chưa làm. Đã sửa theo `main`; xem từng task. |
-| 13 | Mới: README và các câu lỗi thời trong spec. |
+| 1 → 9 (R0) | Đã commit trên `phase-2`. Tóm tắt ở mục R0. |
+| 9b, 9c | Xong. |
+| 9d | **Chờ**: gọi OpenAI (3 embed + 3 chat), cần được cho phép. |
+| 10, 11 | Xong. |
+| 12 | Step 1 → 7 xong: runner, test, 28 mục nháp, máy báo 20 nhãn trúng được. **Chờ**: người duyệt `eval/dataset.yaml` (Step 8), rồi đo con số nền bằng OpenAI (Step 9). |
+| 13 | README viết lại và các dữ kiện trong spec đã sửa (Step 1 → 3, 5). **Còn**: chạy thử các lệnh README đưa ra trên stack đã tắt (Step 4), và con số nền ở spec §8. |
+| 14 | Xong: khuyến nghị không dùng DeepSeek. |
 
-Ngay sau rebase: 304 test xanh (`--ignore=tests/test_ocr_service.py`), `ruff check .` sạch, `ruff format --check .` **đỏ** (Task 9b).
+Suite hiện tại: 318 test xanh (`--ignore=tests/test_ocr_service.py`), `ruff check .` và `ruff format --check .` sạch.
 
 ### Xung đột đã gỡ khi rebase
 
@@ -1135,7 +1140,7 @@ Commit message đề xuất: `feat(eval): add the retrieval evaluation harness`
 - README là lối vào, không phải bản sao của thiết kế: mỗi mục tóm tắt rồi link sang `docs/system-design.md` hoặc `docs/retrieval-design.md`.
 - Không chép giá trị nào từ `.env`. Bảng cấu hình lấy tên biến và mặc định từ `.env.example` và `app/config.py`.
 
-- [ ] **Step 1: Lấy sự thật từ code, không từ trí nhớ**
+- [x] **Step 1: Lấy sự thật từ code, không từ trí nhớ**
 
 ```bash
 grep -n '@router\.' app/controllers/*.py                  # endpoints
@@ -1143,7 +1148,7 @@ grep -v '^#' .env.example | grep -v '^$' | cut -d= -f1    # configuration variab
 grep -n '^  [a-z-]*:$' docker-compose.yml                 # services
 ```
 
-- [ ] **Step 2: Viết lại từng mục**
+- [x] **Step 2: Viết lại từng mục**
 
 | Mục | Việc phải làm |
 | --- | --- |
@@ -1152,7 +1157,7 @@ grep -n '^  [a-z-]*:$' docker-compose.yml                 # services
 | Layout | Thêm `app/core/`, `worker/`, `shared/`, `web/`, `eval/`, `tests/`, `docs/`, `alembic/`. Giữ câu về luồng controller → service → repository → model. |
 | *(mới)* Requirements | Docker và Compose, `uv`, `pnpm` cho `web/`. GPU NVIDIA 16 GB cho `chandra`, và không dùng chung GPU đó với việc khác. Trên WSL phải nới giới hạn RAM (link sang mục host RAM của `docs/system-design.md`). |
 | Running locally (uv) | Giữ đoạn về `uv`. Sửa: API cần cả RabbitMQ, Redis và MinIO chứ không chỉ `db`. `LLM_PROVIDER=stub` là mặc định; `openai` thì tốn tiền. Thêm cách chạy `web/` (`pnpm install`, `pnpm dev`). |
-| Running with Docker | `docker compose up -d --build` giờ kéo cả `chandra`: tải model và cần GPU. Thêm cách chạy không có GPU (bỏ `chandra` và `worker-ocr`). Nhắc: đổi `task_routes` thì phải restart `api`, vì bên publish mới là bên quyết định queue. |
+| Running with Docker | `docker compose up -d --build` giờ kéo cả `chandra`: tải model và cần GPU. Thêm cách chạy không có GPU: bỏ `chandra` nhưng vẫn chạy `worker-ocr` bằng `--no-deps`, vì mọi tài liệu đều bắt đầu ở hàng đợi `ocr`. Nhắc: đổi `task_routes` thì phải restart `api`, vì bên publish mới là bên quyết định queue. |
 | Response envelope | Giữ. Đổi ví dụ sang payload thật: `id` là UUID, ví dụ 404 lấy từ `/documents/{id}/status`. |
 | Endpoints | Thay cả bảng bằng bảng bên dưới. |
 | Linting | Giữ nguyên. Thêm một câu: CI chạy đúng hai lệnh này cho mọi PR vào `main`. |
@@ -1175,7 +1180,7 @@ Bảng endpoint, theo code hiện tại:
 | DELETE | `/documents/{id}` | 200 với `data: null`; 404 nếu không có. |
 | POST | `/query` | Câu trả lời kèm trích dẫn. |
 
-- [ ] **Step 3: Kiểm tra README khớp code**
+- [x] **Step 3: Kiểm tra README khớp code**
 
 ```bash
 # every endpoint the code declares is in the README, and nothing else is
@@ -1195,7 +1200,7 @@ Expected: hai danh sách endpoint khớp nhau; không dòng `missing:` nào; l�
 
 - [ ] **Step 4: Chạy thử các lệnh README đưa ra** — mọi khối lệnh trong "Running", "Linting", "Testing" và "Migrations" được chạy một lần trên một clone sạch, hoặc trên máy dev với stack đã tắt. Lệnh nào không chạy được thì sửa README, không sửa code.
 
-- [ ] **Step 5: Sửa các dữ kiện lỗi thời trong spec**
+- [x] **Step 5: Sửa các dữ kiện lỗi thời trong spec**
 
 Chỉ sửa dữ kiện. Không viết lại lập luận nào.
 

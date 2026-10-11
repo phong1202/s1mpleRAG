@@ -834,10 +834,13 @@ The system splits cleanly at the write/read boundary, and the two phases ship in
 Everything in §§3–9, 11–14 of this document. Ends with real embeddings in `parent_chunks` and
 `child_chunks`, verified by a similarity query.
 
-### Phase 2 — Retrieval (deferred)
+### Phase 2 — Retrieval
 
-Everything in §10: `app/core/` (`retriever.py`, `context_builder.py`, `generator.py`),
-`POST /query`, `query_controller.py`, `query_service.py`, and the `DISTINCT ON` retrieval SQL.
+Everything in §10: `app/core/`, `POST /query`, `query_controller.py`, `query_service.py`, and the
+retrieval SQL. Its design has since grown into a document of its own,
+[`retrieval-design.md`](retrieval-design.md), which supersedes §10 where the two differ; the first
+stage (R0, basic RAG) is built on the `phase-2` branch, and the plan is
+[`plans/phase-2-r0-r1.en.md`](plans/phase-2-r0-r1.en.md).
 
 **Nothing from Phase 2 is stubbed during Phase 1** — no empty `app/core/` directory, no placeholder
 router. It arrives whole, or not at all.

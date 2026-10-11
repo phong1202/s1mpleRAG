@@ -47,7 +47,7 @@ Settled. If the implementation disagrees with a row here, the implementation is 
 | 4 | Seams | Built at **R0**, filled later | Five no-op stages exist from day one; upgrading is replacing a function, never restructuring |
 | 5 | Fusion | **RRF over rank**, `k = 60` | Cosine ∈ [0,1] and `ts_rank` unbounded cannot be summed |
 | 6 | Keyword search | Postgres `ts_rank_cd`, config by `language` | Not true BM25 — no IDF — but RRF reads rank, not score. See §5.2 |
-| 7 | Reranker | `bge-reranker-v2-m3`, self-hosted | Multilingual; own container, same pattern as `docling`; no third API vendor |
+| 7 | Reranker | `bge-reranker-v2-m3`, self-hosted | Multilingual; own container, same pattern as `chandra`; no third API vendor |
 | 8 | Cross-lingual recall | **Bilingual sub-queries at node ①** | A prompt line instead of a new embedding model and a full re-ingest |
 | 9 | Conversation state | Server-side `conversations` / `messages` | Auditable, and the trace needs somewhere to hang |
 | 10 | Loop bound | `MAX_ITERATIONS = 3`, hard | Out of budget still answers, never errors |
@@ -305,7 +305,7 @@ Hence the ordering: **narrow cheaply, then score expensively.** A reranker place
 search is polishing a candidate set that is still missing rows.
 
 `bge-reranker-v2-m3` runs in its own container at concurrency 1, models loaded at startup — the same
-shape as `docling`. **A timeout or error skips reranking and keeps the RRF order**, logged. Never a
+shape as `chandra`, the OCR server. **A timeout or error skips reranking and keeps the RRF order**, logged. Never a
 failed request.
 
 ### 5.5 Parent expansion
@@ -381,6 +381,10 @@ Three jobs, each fixing a different failure:
 the other language. `text-embedding-3-small` aligns Vietnamese and English weakly, so a Vietnamese
 question under-retrieves English chunks that answer it. Searching both and letting RRF fuse costs a
 prompt line; changing the embedding model costs a dimension change and a full re-ingest.
+
+> **Premise changed (2026-10-10).** Phase 1 shipped with `text-embedding-3-large`, not `-small`.
+> The weakness this paragraph argues from was `-small`'s. Before R4 is built, measure cross-lingual
+> recall on the eval set: bilingual expansion stays only if it still earns its prompt line.
 
 Failure modes: over-broadening (`standalone` must reuse the user's and the history's wording, never
 introduce concepts), hallucinated context (only entities already present in the history may be
@@ -674,7 +678,7 @@ app/services/query_service.py          ★ R0 — orchestrates app/core/
 app/repositories/chunk_repository.py   ★ R0 — read-only retrieval SQL
 
 shared/llm.py                    MODIFY — add an async Protocol beside the sync one
-reranker_service/                ★ R3 — own container, same shape as docling_service/
+reranker_service/                ★ R3 — own container, same shape as the chandra service in docker-compose.yml
 eval/
 ├── dataset.yaml                 ★ R1 — the labelled pairs
 └── run.py                       ★ R1 — retrieval-only by default, --full for generation
@@ -727,12 +731,11 @@ to answer "is reranking worth it". Nothing extra is built for evaluation.
 
 ---
 
-## 11. What Phase 1 must deliver
+## 11. What Phase 1 delivered
 
-**R2 and R5** cannot start until `phase-1` ships these. R0 and R1 need none of them — they
-need only the Phase 1 schema, which `phase-1` already carries, so the read path can be built and
-tested in parallel with the rest of ingestion. All four items are in the plan as of `78bfb53`; they
-are listed here so the dependency is explicit rather than remembered.
+**R2 and R5** stand on the columns below. Phase 1 has shipped all of them: they are on `main` as
+of 2026-10-10, filled for every ingested document. R0 and R1 need none of them. The table stays so
+the dependency is explicit rather than remembered.
 
 | Needed by | Phase 1 item | Where |
 |---|---|---|
@@ -744,7 +747,7 @@ are listed here so the dependency is explicit rather than remembered.
 | R1 | Nothing — labels anchor to `(sha256, page)`, which already exists | — |
 
 Four of these cannot be backfilled: `language` and `heading_path` are derived during chunking, and
-`title` during parsing. Adding them after S1/S2 ship costs a full re-ingest, Docling included.
+`title` during parsing. Adding them after S1/S2 shipped would have cost a full re-ingest, OCR included.
 
 ---
 
@@ -754,7 +757,7 @@ This document supersedes the following. Update the spec, or treat these rows as 
 
 | Spec location | Says | Amendment |
 |---|---|---|
-| §2 decision #3 | `text-embedding-3-small` chosen for a monolingual corpus | Corpus is **bilingual**. Model unchanged; cross-lingual recall is handled at query time by bilingual sub-queries (§6.1). Switching to a multilingual model stays available and gated on eval evidence — it costs a dimension change and a full re-ingest |
+| §2 decision #3 | `text-embedding-3-small` chosen for a monolingual corpus | Superseded twice. This document first kept the model and planned bilingual sub-queries (§6.1) for a bilingual corpus. Phase 1 then moved to `text-embedding-3-large`, shortened to 1536 dimensions, for its multilingual retrieval (MIRACL 54.9 vs 44.0). The corpus as ingested is Vietnamese plus one Japanese file |
 | §6 S2 | "split on markdown headings first, then paragraphs" | Now implemented, and additionally captures `heading_path` and `language` per parent |
 | §10 | Retrieval is a single-pass pipeline | Retained verbatim as **R0**. R1–R8 extend it |
 | §13 | Category taxonomy is the only closed enum | A second closed enum: `language ∈ {vi, en, other}` |
@@ -804,7 +807,8 @@ Without it the flags are decoration and the eval ablation is fiction.
   nothing else. The worker uses `LLMProvider` and its implementations; the read
   path uses `AsyncLLMProvider` and its own; neither touches the other's. Move
   the async half to `app/core/llm.py`, the sync half to `worker/llm.py`, and
-  `_unit_vector_from` to `shared/vectors.py` — **after Phase 1 merges**.
+  `_unit_vector_from` to `shared/vectors.py` — **after Phase 1 merges**. That
+  condition is met as of 2026-10-10; the split itself is still unscheduled.
   Splitting earlier means moving a file the ingestion branch is actively
   editing. The one argument against splitting at all: both `embed` methods must
   L2-normalise, and adjacency is what makes that shared requirement visible.
