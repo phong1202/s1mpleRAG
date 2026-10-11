@@ -1237,15 +1237,49 @@ The system calls an LLM in five places, and each asks something different:
 | Answer generation | API, `AsyncOpenAIProvider.complete` | A reply bound to a Pydantic schema; low latency; Vietnamese |
 | Decision nodes R4 → R7 | API, not built | Several small schema-bound calls per question: price and latency per call decide it |
 
-- [ ] **Step 1: Get today's facts.** Models, context windows, prices (cache hit, cache miss, output), whether there is an embeddings API, how far structured output goes (strict `json_schema` or JSON mode only), OpenAI SDK compatibility, rate limits, data policy. Every number carries the URL of the page it was read from; what cannot be checked is marked "not verified".
+- [x] **Step 1: Get today's facts.** Models, context windows, prices (cache hit, cache miss, output), whether there is an embeddings API, how far structured output goes (strict `json_schema` or JSON mode only), OpenAI SDK compatibility, rate limits, data policy. Every number carries the URL of the page it was read from; what cannot be checked is marked "not verified".
 
-- [ ] **Step 2: Get the current prices of the two models in use** (`OPENAI_CHAT_MODEL` and `text-embedding-3-large`) to compare against.
+- [x] **Step 2: Get the current prices of the two models in use** (`OPENAI_CHAT_MODEL` and `text-embedding-3-large`) to compare against.
 
-- [ ] **Step 3: Estimate the cost on each provider**, with the arithmetic: enriching one 600-chunk document; 1,000 questions with generation only; 1,000 questions once four decision nodes exist.
+- [x] **Step 3: Estimate the cost on each provider**, with the arithmetic: enriching one 600-chunk document; 1,000 questions with generation only; 1,000 questions once four decision nodes exist.
 
-- [ ] **Step 4: Write a recommendation per call, then stop.** Use it, keep OpenAI, or not possible; with the risks and what `shared/llm.py` would have to change.
+- [x] **Step 4: Write a recommendation per call, then stop.** Use it, keep OpenAI, or not possible; with the risks and what `shared/llm.py` would have to change.
 
-**Outcome:** *(none yet)*
+**Outcome** (researched 2026-10-10 from both vendors' official docs and price lists; no API was called to test):
+
+**Recommendation: do not move to DeepSeek, for any of the five calls.**
+
+| Call | Verdict | Main reason |
+| --- | --- | --- |
+| S3 enrich | Keep OpenAI | 1.3 to 2.6 times dearer on this workload; DeepSeek's Chat Completions accepts only `text` or `json_object`, not the strict `json_schema` that `_ENRICHED_SCHEMA` uses |
+| S4 embed, query embedding | Not possible | DeepSeek's API reference lists no embeddings endpoint |
+| Answer generation | Keep OpenAI | 1.4 to 2.8 times dearer; Vietnamese office hours fall in DeepSeek's peak window; data is processed and stored in China |
+| Decision nodes R4 → R7 | Keep OpenAI | The same price gap; `chat.completions.parse()` (Task 9c) does not work against DeepSeek |
+
+Prices per 1M tokens, from each vendor's pricing page:
+
+| Model | Input | Output |
+| --- | --- | --- |
+| `gpt-6-luna` (in use) | $0.10 | $0.50 |
+| `deepseek-flash`, peak | $0.30 | $1.20 |
+| `deepseek-flash`, off-peak | $0.15 | $0.60 |
+| `deepseek-v4-pro`, peak | $1.32 | $3.96 |
+
+Estimates, caching not counted:
+
+| Job | `gpt-6-luna` | `deepseek-flash` peak | `deepseek-flash` off-peak |
+| --- | --- | --- | --- |
+| Enrich one 600-chunk document (99K in, 45K out) | $0.032 | $0.084 | $0.042 |
+| 1,000 questions, generation only (3.0M in, 0.30M out) | $0.45 | $1.26 | $0.63 |
+| 1,000 questions with four decision nodes (6.2M in, 0.62M out) | $0.93 | $2.60 | $1.30 |
+
+DeepSeek's output price is above `gpt-6-luna`'s even off-peak, so it only comes out cheaper when most of the input is a cache hit.
+
+The one thing worth trying is answer quality: on Vals' English legal benchmarks `deepseek-flash` beats `gpt-6-luna`. That is not evidence for Vietnamese; to find out, measure with `eval.run --full` after R1.
+
+Not verified: Vietnamese quality (no benchmark found); latency at low reasoning effort; retention and training policy for data sent through the API (DeepSeek's two terms documents do not say); whether DeepSeek's Responses API really enforces a schema.
+
+Sources: `api-docs.deepseek.com` (pages `quick_start/pricing`, `api/create-chat-completion`, `guides/json_mode`, `quick_start/rate_limit`), `developers.openai.com/api/docs/pricing`, `vals.ai`.
 
 ---
 

@@ -1237,15 +1237,49 @@ Hệ thống gọi LLM ở năm chỗ, và mỗi chỗ đòi một thứ khác n
 | Sinh câu trả lời | API, `AsyncOpenAIProvider.complete` | Trả về đúng schema Pydantic; độ trễ thấp; tiếng Việt |
 | Các node quyết định R4 → R7 | API, chưa làm | Nhiều lời gọi nhỏ có schema cho mỗi câu hỏi: giá và độ trễ mỗi lời gọi là thứ quyết định |
 
-- [ ] **Step 1: Lấy dữ kiện của hôm nay.** Model, cửa sổ ngữ cảnh, giá (cache hit, cache miss, output), có API embedding hay không, hỗ trợ structured output tới mức nào (`json_schema` `strict` hay chỉ JSON mode), tương thích OpenAI SDK, giới hạn tốc độ, chính sách dữ liệu. Mọi con số kèm URL của trang đã đọc; thứ gì không kiểm được thì ghi "chưa kiểm".
+- [x] **Step 1: Lấy dữ kiện của hôm nay.** Model, cửa sổ ngữ cảnh, giá (cache hit, cache miss, output), có API embedding hay không, hỗ trợ structured output tới mức nào (`json_schema` `strict` hay chỉ JSON mode), tương thích OpenAI SDK, giới hạn tốc độ, chính sách dữ liệu. Mọi con số kèm URL của trang đã đọc; thứ gì không kiểm được thì ghi "chưa kiểm".
 
-- [ ] **Step 2: Lấy giá hiện tại của hai model đang dùng** (`OPENAI_CHAT_MODEL` và `text-embedding-3-large`) để so.
+- [x] **Step 2: Lấy giá hiện tại của hai model đang dùng** (`OPENAI_CHAT_MODEL` và `text-embedding-3-large`) để so.
 
-- [ ] **Step 3: Ước tính chi phí trên từng provider**, có phép tính: enrich một tài liệu 600 chunk; 1.000 câu hỏi chỉ có bước sinh; 1.000 câu hỏi khi đã có bốn node quyết định.
+- [x] **Step 3: Ước tính chi phí trên từng provider**, có phép tính: enrich một tài liệu 600 chunk; 1.000 câu hỏi chỉ có bước sinh; 1.000 câu hỏi khi đã có bốn node quyết định.
 
-- [ ] **Step 4: Ghi khuyến nghị cho từng lời gọi, rồi dừng.** Dùng, giữ OpenAI, hoặc không làm được; kèm rủi ro và những gì `shared/llm.py` phải đổi.
+- [x] **Step 4: Ghi khuyến nghị cho từng lời gọi, rồi dừng.** Dùng, giữ OpenAI, hoặc không làm được; kèm rủi ro và những gì `shared/llm.py` phải đổi.
 
-**Kết quả:** *(chưa có)*
+**Kết quả** (tra cứu ngày 2026-10-10, từ tài liệu và bảng giá chính thức của hai bên; chưa gọi thử API nào):
+
+**Khuyến nghị: không chuyển sang DeepSeek, ở cả năm lời gọi.**
+
+| Lời gọi | Kết luận | Lý do chính |
+| --- | --- | --- |
+| S3 enrich | Giữ OpenAI | Đắt hơn 1,3 đến 2,6 lần trên khối lượng này; Chat Completions của DeepSeek chỉ nhận `text` hoặc `json_object`, không nhận `json_schema` `strict` mà `_ENRICHED_SCHEMA` đang dùng |
+| S4 embed, embed câu hỏi | Không làm được | Tài liệu API của DeepSeek không có endpoint embedding nào |
+| Sinh câu trả lời | Giữ OpenAI | Đắt hơn 1,4 đến 2,8 lần; giờ hành chính ở Việt Nam rơi vào khung giá cao của DeepSeek; dữ liệu được xử lý và lưu ở Trung Quốc |
+| Node quyết định R4 → R7 | Giữ OpenAI | Cùng chênh lệch giá; `chat.completions.parse()` (Task 9c) không chạy được với DeepSeek |
+
+Giá cho mỗi 1 triệu token, theo trang giá của từng bên:
+
+| Model | Input | Output |
+| --- | --- | --- |
+| `gpt-6-luna` (đang dùng) | $0,10 | $0,50 |
+| `deepseek-flash`, giờ cao điểm | $0,30 | $1,20 |
+| `deepseek-flash`, ngoài giờ cao điểm | $0,15 | $0,60 |
+| `deepseek-v4-pro`, giờ cao điểm | $1,32 | $3,96 |
+
+Ước tính, chưa tính cache:
+
+| Việc | `gpt-6-luna` | `deepseek-flash` cao điểm | `deepseek-flash` ngoài cao điểm |
+| --- | --- | --- | --- |
+| Enrich một tài liệu 600 chunk (99K vào, 45K ra) | $0,032 | $0,084 | $0,042 |
+| 1.000 câu hỏi, chỉ sinh câu trả lời (3,0M vào, 0,30M ra) | $0,45 | $1,26 | $0,63 |
+| 1.000 câu hỏi khi có bốn node quyết định (6,2M vào, 0,62M ra) | $0,93 | $2,60 | $1,30 |
+
+Giá output của DeepSeek, kể cả ngoài giờ cao điểm, vẫn cao hơn `gpt-6-luna`, nên nó chỉ rẻ hơn được khi phần lớn input là cache hit.
+
+Chỗ duy nhất đáng thử là so chất lượng câu trả lời: trên các benchmark pháp lý tiếng Anh của Vals, `deepseek-flash` hơn `gpt-6-luna`. Đó chưa phải bằng chứng cho tiếng Việt; muốn biết thì đo bằng `eval.run --full` sau R1.
+
+Chưa kiểm được: chất lượng tiếng Việt (không tìm thấy benchmark nào); độ trễ ở mức suy luận thấp; chính sách lưu giữ và huấn luyện trên dữ liệu gửi qua API (hai văn bản điều khoản của DeepSeek không nói); Responses API của DeepSeek có ép schema thật hay không.
+
+Nguồn: `api-docs.deepseek.com` (các trang `quick_start/pricing`, `api/create-chat-completion`, `guides/json_mode`, `quick_start/rate_limit`), `developers.openai.com/api/docs/pricing`, `vals.ai`.
 
 ---
 
