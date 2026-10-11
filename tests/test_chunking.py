@@ -365,3 +365,23 @@ def test_sections_only_in_the_last_chapter_still_sit_inside_it():
     )
 
     assert _outline(page)[-1] == "Chương II. CỤ THỂ > Mục 2. HAI > Điều 4. D"
+
+
+def test_bold_forms_after_the_last_heading_stand_on_their_own():
+    """Twenty pages of forms after a decree's final article were only ever
+    bold, so they were not structure, and every chunk of them was filed under
+    "Trách nhiệm thi hành"."""
+    page = (
+        "### Điều 1. A\nx\n\n### Điều 2. Trách nhiệm thi hành\ny\n\n"
+        "**Mẫu số 01**\nf1\n\n**Mẫu số 02.** Văn bản đề nghị\nf2\n"
+    )
+
+    assert _outline(page)[-2:] == ["Mẫu số 01", "Mẫu số 02."]
+
+
+def test_bold_captions_between_numbered_headings_stay_out_of_the_outline():
+    """What makes a bold kind an appendix is that it only begins once every
+    other heading is behind it. A caption inside a chapter is not that."""
+    page = "# Chapter 1\nx\n\n**Table 1**\nt\n\n# Chapter 2\ny\n\n**Table 2**\nt\n"
+
+    assert _outline(page) == ["Chapter 1", "Chapter 2"]

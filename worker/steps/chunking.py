@@ -199,6 +199,8 @@ def learn(lines: list[str]) -> tuple[set[str], set[str], set[tuple[str, str]]]:
              markdown headings at all, when bold lines are all there is. Two
              bold "Table N" captions in a report with its own headings are not
              chapters.
+             The exception is a bold kind that only begins after the last
+             heading of every other kind: forms and appendices.
     dotted   the kinds whose number is followed by a full stop ("Điều 6.").
              A plain line of such a kind needs the full stop too, which is what
              separates a heading from "Điều 24 của Luật này".
@@ -215,6 +217,11 @@ def learn(lines: list[str]) -> tuple[set[str], set[str], set[tuple[str, str]]]:
     as_heading = {kind[0] for mark, kind in marked if mark == "#"}
     no_markdown = not any(_HEADING.match(line.strip()) for line in lines)
     kinds = {n for n in names if names.count(n) >= 2 and (n in as_heading or no_markdown)}
+    if kinds:
+        # A bold kind that only begins once every other heading is behind it
+        # is an appendix: forms, annexes. It stands on its own.
+        body_ends = max(i for i, n in enumerate(names) if n in kinds)
+        kinds |= {n for n in set(names) if names.count(n) >= 2 and names.index(n) > body_ends}
     dots = [kind[0] for _, kind in marked if kind[2] == "."]
     dotted = {n for n in kinds if 2 * dots.count(n) > names.count(n)}
     seen = [n for n in names if n in kinds]
