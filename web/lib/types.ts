@@ -51,29 +51,38 @@ export type DocumentSummary = {
 // rect means the same region at any zoom level.
 export type Rect = [number, number, number, number]
 
-// Where a chunk sits in its PDF. A chunk can span blocks and pages, hence a
-// list. Provisional, like SourceReference: proposed to the backend, which
-// does not produce it yet.
-export type SourceLocation = { page: number; rect?: Rect }
+// What the PDF viewer should bring into view: a page, optionally narrowed to
+// the regions to highlight on it. Citations only carry a page so far: the
+// backend does not produce regions yet (docs/system-design.md, 5.3).
+export type ViewerTarget = { page: number; rects?: Rect[] }
 
-// What the chat UI renders for a cited passage. Provisional: the backend has
-// no chat endpoint yet, so this is the UI's need, not a wire format.
-export type SourceReference = {
-  documentId: string
-  documentName: string
-  index: number
-  text: string
-  score: number
-  locations?: SourceLocation[]
+// POST /query citation, as the backend's CitationOut serialises it: the
+// document and web kinds flattened into one shape. `ordinal` is the n of the
+// [n] markers in the answer, so it can skip numbers. `quote` is the first
+// 280 characters of the passage that matched the question, straight from
+// OCR: text, never HTML.
+export type Citation = {
+  ordinal: number
+  kind: 'document' | 'web'
+  document_id: string | null
+  filename: string | null
+  page_number: number | null
+  quote: string | null
+  url: string | null
+  title: string | null
 }
 
-// What the PDF viewer should bring into view: a page, optionally narrowed to
-// the regions to highlight on it.
-export type ViewerTarget = { page: number; rects?: Rect[] }
+// POST /query result. The citations are the sources the answer actually
+// cites, in order of first use; an answer the corpus cannot support has none.
+export type QueryAnswer = {
+  answer: string
+  citations: Citation[]
+  latency_ms: number
+}
 
 export type Message = {
   id: string
   role: 'user' | 'assistant'
   text: string
-  sources?: SourceReference[]
+  citations?: Citation[]
 }
