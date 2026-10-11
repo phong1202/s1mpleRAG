@@ -790,3 +790,39 @@ def test_a_relaunch_rebuilds_chunks_from_the_parse_checkpoint(seeded_document):
     assert store.get_json(f"staging/{document_id}/chunks.json")["children"]
     assert store.sha256(f"staging/{document_id}/parsed.json") == parsed_before
     assert reload(seeded_document.id).status == "COMPLETED"
+
+
+def test_a_document_still_running_cannot_be_relaunched(seeded_document):
+    """Two chains over one document share its checkpoints: the second would
+    skip on the first one's enriched.json and store old context sentences
+    against new chunks, with nothing to say so."""
+    import pytest
+
+    from worker.pipeline.state import stage_failed
+    from worker.repositories.documents import DocumentBusy
+    from worker.stages import relaunch_from_structure
+
+    launch(str(seeded_document.id))
+    stage_failed(str(seeded_document.id), "ENRICHING", ConnectionError("mid-flight"))
+
+    with pytest.raises(DocumentBusy):
+        relaunch_from_structure(str(seeded_document.id))
+
+
+def test_a_relaunch_starts_with_a_clean_failure_record(seeded_document):
+    """A transient error from the first run must not count against the next:
+    two more and a healthy document would be dead-lettered."""
+    from worker.db import session_scope
+    from worker.stages import relaunch_from_structure
+
+    launch(str(seeded_document.id))
+    with session_scope() as session:
+        from app.models import Document
+
+        row = session.get(Document, seeded_document.id)
+        row.attempts, row.last_error, row.failed_stage = 2, "timed out", "ENRICHING"
+
+    relaunch_from_structure(str(seeded_document.id))
+
+    document = reload(seeded_document.id)
+    assert (document.status, document.attempts, document.last_error) == ("COMPLETED", 0, None)

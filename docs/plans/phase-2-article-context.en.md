@@ -652,3 +652,19 @@ Proposed commit message: `docs(design): describe the learned outline and heading
 - The car question: "18.000.000 đồng đến 20.000.000 đồng", citing page 14, with page 14 first in the context. Before the re-ingest that page was not among the first ten.
 - Baseline: `recall@10` 0.850, `MRR` 0.573 over 20 questions; the per-kind figures are in `docs/retrieval-design.md` §8.7.
 - Two departures from the plan as first written: the title travels in `chunks.json` instead of being read twice from the database (Task 3), and one older test's "starts with" became "contains", because the stored text now opens with the title and heading.
+
+## After the second review (2026-10-11)
+
+The reviewer ran `split_document` over the real data and found mislabelled chunks: Article 18 of decree 168 sat under Article 17 (OCR had glued three headings onto one line), Chapter III of decree 208 was missed, articles with a letter suffix (10a, 98h) were missed, a sentence "Điều 24 của Luật này." was taken for a heading, and a non-legal document with two bold "Table N" captions lost its whole outline. The code in the repository was fixed and **differs from the block in Task 1 above**:
+
+- Lines glued with `****` are split; a heading whose name is bolded separately is still read; a line opening with a bold numbered marker is a heading too.
+- A kind is structure only when it recurs **and** appears at least once as a markdown heading (or the document has no markdown headings at all).
+- A plain line is accepted only as the next item of a series (10 → 11, 10 → 10a, or the first item) and written the way that kind is written (a full stop after the number).
+- The nesting rule became: A is never filed under B when B is a subdivision of A, nor when A only appears after the last B and nothing that belongs in B appears again.
+- An unnumbered markdown heading is a sub-level of the numbered heading that is open.
+
+On the nine legal documents the article series is now unbroken, no number missing (86, 113, 89, 39, 55, 65, 19, 21, 55).
+
+Left unfixed: forms and appendices that are only ever bold ("Mẫu số", "Phụ lục" in decrees 151 and 236) are not recognised as structure and still sit under the final article.
+
+The re-ingest command now locks the document row, refuses a document that is still running, and clears the failure record of the previous run.

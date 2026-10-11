@@ -261,3 +261,107 @@ def test_a_child_carries_the_heading_of_its_parent():
 
     assert chunks["children"]
     assert {c["heading_path"] for c in chunks["children"]} == {"Điều 6. Xe ô tô"}
+
+
+def _outline(*pages: str) -> list[str]:
+    return [path for page in split_document(list(pages)) for path, _ in page]
+
+
+def test_headings_the_ocr_glued_onto_one_line_are_each_read():
+    """`**Mục 3****TÊN MỤC****Điều 18. …**` came out of OCR as one line, and
+    Article 18's chunks were filed under Article 17."""
+    page = (
+        "### Điều 16. A\nx\n\n### Điều 17. Bảo vệ môi trường\ny\n\n"
+        "**Mục 3****VI PHẠM KHÁC****Điều 18. Giấy phép lái xe**\nz\n\n"
+        "### Mục 4. HẾT\n\n### Điều 19. B\nw\n"
+    )
+
+    paths = _outline(page)
+
+    assert any(p.endswith("Điều 18. Giấy phép lái xe") for p in paths)
+    assert not any("Điều 17" in p and "Điều 18" in p for p in paths)
+
+
+def test_a_title_bolded_separately_from_its_marker_is_still_a_heading():
+    page = (
+        "### Chương II\n\n### MỘT\n\n### Điều 5. A\nx\n\n### Điều 6. B\nx\n\n"
+        "### **Chương III** **THUÊ TÀU BAY**\n\n### Điều 7. C\ny\n"
+    )
+
+    assert _outline(page)[-1] == "Chương III THUÊ TÀU BAY > Điều 7. C"
+
+
+def test_a_plain_article_with_a_letter_suffix_continues_the_series():
+    """Amended laws insert 10a after 10 and 98h after 98g."""
+    page = "### Điều 9. A\nx\n\n### Điều 10. B\ny\n\nĐiều 10a. Chen\nz\n\nĐiều 11. C\nw\n"
+
+    assert _outline(page) == ["Điều 9. A", "Điều 10. B", "Điều 10a. Chen", "Điều 11. C"]
+
+
+def test_a_sentence_that_starts_with_the_next_article_number_is_not_a_heading():
+    """ "Điều 24 của Luật này." wrapped onto its own line right after Article 23
+    and became a heading; the context sentences written for it were wrong."""
+    page = (
+        "### Điều 22. A\nx\n\n### Điều 23. B\ntheo quy định tại\nĐiều 24 của Luật này.\n"
+        "Điều 24 Nghị định này có hiệu lực.\n\n### Điều 25. C\ny\n"
+    )
+
+    assert _outline(page) == ["Điều 22. A", "Điều 23. B", "Điều 25. C"]
+
+
+def test_the_first_heading_of_a_kind_may_be_plain_text():
+    page = "Điều 1. Phạm vi\nx\n\n### Điều 2. B\ny\n\n### Điều 3. C\nz\n"
+
+    assert _outline(page)[0] == "Điều 1. Phạm vi"
+
+
+def test_bold_captions_do_not_take_over_a_report_that_has_its_own_headings():
+    """Two bold "Table N" captions made a kind, and every markdown heading of
+    the report stopped being one."""
+    page = (
+        "# Annual Report\n\n## Introduction\nx\n\n**Table 1**\nt\n\n"
+        "## Methods\ny\n\n**Table 2**\nt\n\n## Results\nz\n"
+    )
+
+    assert _outline(page) == [
+        "Annual Report",
+        "Annual Report > Introduction",
+        "Annual Report > Methods",
+        "Annual Report > Results",
+    ]
+
+
+def test_an_unnumbered_heading_stays_a_sub_level_of_the_numbered_one_above_it():
+    page = "# Chapter 1\n\n## Overview\nx\n\n## Details\ny\n\n# Chapter 2\n\n## Scope\nz\n"
+
+    assert _outline(page) == [
+        "Chapter 1",
+        "Chapter 1 > Overview",
+        "Chapter 1 > Details",
+        "Chapter 2",
+        "Chapter 2 > Scope",
+    ]
+
+
+def test_an_appendix_after_the_last_article_is_not_filed_under_it():
+    """Forms after the final article were all filed under "Điều 39. Trách
+    nhiệm thi hành"."""
+    page = (
+        "## Chương I\n\n## CHUNG\n\n### Điều 1. A\nx\n\n### Điều 2. B\nx\n\n"
+        "## Chương II\n\n## THI HÀNH\n\n### Điều 3. C\nx\n\n### Điều 4. Trách nhiệm thi hành\ny\n\n"
+        "### Phụ lục I\nf1\n\n### Phụ lục II\nf2\n"
+    )
+
+    paths = _outline(page)
+
+    assert paths[-2:] == ["Phụ lục I", "Phụ lục II"]
+
+
+def test_sections_only_in_the_last_chapter_still_sit_inside_it():
+    page = (
+        "## Chương I\n\n## CHUNG\n\n### Điều 1. A\nx\n\n### Điều 2. B\nx\n\n"
+        "## Chương II\n\n## CỤ THỂ\n\n### Mục 1. MỘT\n\n### Điều 3. C\nx\n\n"
+        "### Mục 2. HAI\n\n### Điều 4. D\ny\n"
+    )
+
+    assert _outline(page)[-1] == "Chương II. CỤ THỂ > Mục 2. HAI > Điều 4. D"

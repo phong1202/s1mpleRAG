@@ -41,9 +41,13 @@ class QueryService:
             # The request is lost; where it got to need not be. The row is
             # committed here because get_session rolls back on the way out,
             # and a table of successes only cannot say what broke.
-            await self._session.rollback()
-            await _persist_trace(self._session, payload.question, trace, citation_count=0)
-            await self._session.commit()
+            try:
+                await self._session.rollback()
+                await _persist_trace(self._session, payload.question, trace, citation_count=0)
+                await self._session.commit()
+            except Exception:
+                # Never let the bookkeeping replace the error that matters.
+                logger.exception("failed to persist the trace of a failed query")
             raise
 
         await _persist_trace(self._session, payload.question, trace, len(result.citations))

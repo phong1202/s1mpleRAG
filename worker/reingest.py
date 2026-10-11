@@ -16,6 +16,7 @@ from sqlalchemy import select
 from app.models import Document
 from shared.storage import get_store
 from worker.db import session_scope
+from worker.repositories.documents import DocumentBusy
 from worker.stages import relaunch_from_structure
 
 
@@ -33,14 +34,23 @@ def main() -> None:
             ids = [str(row) for row in session.scalars(done)]
 
     store = get_store()
+    failed: list[str] = []
     for document_id in ids:
         key = f"staging/{document_id}/parsed.json"
         backup = args.restore_from / f"{document_id}.parsed.json" if args.restore_from else None
         if not store.exists(key) and backup and backup.exists():
             store.put(key, backup.read_bytes())
             print(f"restored   {document_id}")
-        relaunch_from_structure(document_id)
+        try:
+            relaunch_from_structure(document_id)
+        except (DocumentBusy, FileNotFoundError) as exc:
+            # One document that cannot be relaunched must not strand the rest.
+            failed.append(document_id)
+            print(f"skipped    {document_id}: {exc}")
+            continue
         print(f"relaunched {document_id}")
+    if failed:
+        raise SystemExit(f"{len(failed)} of {len(ids)} document(s) were not relaunched")
 
 
 if __name__ == "__main__":

@@ -18,6 +18,12 @@ class DocumentGone(Exception):
     still queued. Not a failure: there is nothing left to process."""
 
 
+class DocumentBusy(Exception):
+    """The document has a chain in flight. Two chains over one document share
+    its checkpoints, and the second would skip on artifacts the first is
+    still writing."""
+
+
 class DocumentStateRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -27,6 +33,21 @@ class DocumentStateRepository:
         if document is None:
             raise DocumentGone(str(document_id))
         return document
+
+    def reopen(self, document_id: uuid.UUID) -> None:
+        """Takes a finished document back to the start of a run, or refuses.
+
+        The row is locked while its status is read and rewritten, so two
+        relaunches cannot both find it finished. Leaving it QUEUED is what
+        makes the second one refuse. The failure record is cleared: an error
+        from the last run must not count against this one."""
+        document = self.session.get(Document, document_id, with_for_update=True)
+        if document is None:
+            raise DocumentGone(str(document_id))
+        if document.status not in ("COMPLETED", "DEAD_LETTER"):
+            raise DocumentBusy(f"{document_id} is {document.status}: a chain is still running")
+        document.status, document.stage = "QUEUED", None
+        document.attempts, document.failed_stage, document.last_error = 0, None, None
 
     def advance(self, document_id: uuid.UUID, status: str, stage: str | None = None) -> None:
         document = self.get(document_id)

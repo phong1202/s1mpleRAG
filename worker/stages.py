@@ -310,5 +310,10 @@ def relaunch_from_structure(document_id: str) -> None:
     store = get_store()
     if not store.exists(f"staging/{document_id}/parsed.json"):
         raise FileNotFoundError(f"no parse checkpoint for {document_id}: it has to be parsed again")
+    # Raises DocumentBusy unless the last run is over. A second chain would
+    # skip on the first one's enriched.json and store old context sentences
+    # against new chunks, joined by chunk_index, with nothing to say so.
+    with session_scope() as session:
+        DocumentStateRepository(session).reopen(uuid.UUID(document_id))
     store.delete(f"staging/{document_id}/chunks.json")
     chain(structure.s(document_id), enrich.s(), embed.s(), persist.s()).apply_async()

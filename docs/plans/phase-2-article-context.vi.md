@@ -649,3 +649,19 @@ Commit message đề xuất: `docs(design): describe keyword-based structure and
 7. Câu hỏi về ô tô vượt đèn đỏ được trả lời đúng, với trích dẫn chỉ vào trang 14; nếu không, kết quả và trace được ghi lại và báo cáo.
 8. Con số nền của R1 được đo trên corpus mới và ghi vào spec.
 9. Suite xanh; `ruff check .` và `ruff format --check .` sạch.
+
+## Sau lần review thứ hai (2026-10-11)
+
+Reviewer chạy `split_document` trên dữ liệu thật và tìm ra các chỗ gán sai: Điều 18 của NĐ 168 nằm dưới Điều 17 (OCR dán ba tiêu đề vào một dòng), Chương III của NĐ 208 bị sót, các điều có hậu tố chữ (10a, 98h) bị sót, một câu "Điều 24 của Luật này." bị nhận làm tiêu đề, và tài liệu không phải văn bản luật có hai chú thích in đậm "Table N" mất hết dàn ý. Code trong repo đã được sửa và **khác khối code ở Task 1 phía trên**:
+
+- Dòng bị dán `****` được tách ra; tiêu đề có phần tên in đậm riêng vẫn được nhận; dòng mở đầu bằng một mốc đánh số in đậm cũng là tiêu đề.
+- Một loại chỉ là cấu trúc khi nó lặp lại **và** có ít nhất một lần là heading markdown (hoặc tài liệu không có heading markdown nào).
+- Dòng thường chỉ được nhận khi là mục kế tiếp của chuỗi (10 → 11, 10 → 10a, hoặc mục đầu tiên) và viết giống cách loại đó viết (có dấu chấm sau số).
+- Quy tắc lồng nhau đổi thành: A không bao giờ nằm dưới B nếu B là phần chia nhỏ của A, hoặc nếu A chỉ xuất hiện sau B cuối cùng mà không có gì thuộc B xuất hiện lại.
+- Heading markdown không đánh số là cấp con của tiêu đề đánh số đang mở.
+
+Kết quả trên chín văn bản luật: chuỗi số điều liền mạch, không sót số nào (86, 113, 89, 39, 55, 65, 19, 21, 55).
+
+Còn lại, chưa sửa: các mẫu biểu và phụ lục chỉ in đậm ("Mẫu số", "Phụ lục" ở NĐ 151 và NĐ 236) không được nhận là cấu trúc nên vẫn nằm dưới điều cuối cùng.
+
+Lệnh nạp lại giờ khoá hàng tài liệu, từ chối tài liệu còn đang chạy, và xoá bản ghi lỗi của lần chạy trước.

@@ -403,15 +403,22 @@ leaders) as a loop and retries — capped at 2 retries here, against its default
    parser put on a heading is **not** used as its depth: in one OCR'd decree the same kind of line
    ("Điều N.") arrived as h2, h3, h4, bold and plain text, and 29 of its 54 articles were not `#`
    headings at all. Instead, from the document itself and with no list of keywords:
-   - a heading is a markdown heading or a line bold from end to end;
-   - one that reads "words + number" ("Điều 6.", "Chương II", "Article 3") has a *kind*, the words;
-     a kind that recurs is structure, and a plain line is accepted when it is the next number of a
-     known kind;
-   - a heading closes the open heading of its own kind and everything inside it, and kind A is
-     nested under kind B only if somewhere two or more A sit between two consecutive B.
+   - a heading is a markdown heading, a line bold from end to end, or a line that opens with a bold
+     numbered marker;
+   - one that reads "words + number" ("Điều 6.", "Chương II", "Article 3") has a *kind*, the words.
+     A kind is structure when it recurs and appears at least once as a markdown heading (or the
+     document has no markdown headings at all): two bold "Table N" captions are not chapters;
+   - a plain line is accepted only as the very next item of a known series (10 → 11, 10 → 10a), written
+     the way that kind's headings are written ("Điều 24 của Luật này." has no full stop after 24);
+   - a heading closes the open heading of its own kind and everything inside it. Kind A is never
+     filed under kind B when B is a subdivision of A (two or more B sit between consecutive A), nor
+     when A only begins after the last B and nothing that lives inside B appears again;
+   - an unnumbered markdown heading is a sub-level of whichever numbered heading is open.
 
-   A document with no numbered headings falls back to its markdown levels. Known limit: unnumbered
-   headings with noisy levels are still filed by those levels.
+   A document with no numbered headings falls back to its markdown levels. Known limits: forms and
+   appendices that are only ever bold ("Mẫu số 01", "Phụ lục I" in two of the corpus's decrees) are
+   not recognised as structure and stay under the final article; and a document's first chapter
+   heading, if the parser lost it, leaves the articles before the second chapter without a chapter.
 3. **Parent chunks:** 500–1000 tokens, split at the outline's headings first, then by tokens.
 4. **Child chunks:** 100–200 tokens within each parent, carrying `parent_index`, `page_number` and
    the parent's `heading_path`.
