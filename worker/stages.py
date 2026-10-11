@@ -122,6 +122,11 @@ def structure(self, document_id: str) -> str:
             f"No extractable text: no chunk survived from {parsed['page_count']} "
             "page(s) -- blank, or an image OCR could read nothing from",
         )
+    # The title as the documents row has it. S4 embeds it ahead of every
+    # chunk and S5 stores that same text, so both must read one string: it
+    # travels here, beside the chunks, instead of being looked up twice.
+    with session_scope() as session:
+        chunks["title"] = DocumentStateRepository(session).get(uuid.UUID(document_id)).title
     store.put_json(key, chunks)
 
     advance(document_id, "STRUCTURING", stage="STRUCTURING")
@@ -217,7 +222,14 @@ def embed(self, document_id: str) -> str:
         # failing on, not embedding past in silence.
         context = enriched[child["chunk_index"]]["context"]
         # What gets embedded is the contextualized text, NOT the raw content.
-        texts.append(contextualize(context, child["content"]))
+        texts.append(
+            contextualize(
+                context,
+                child["content"],
+                title=chunks.get("title"),
+                heading=child.get("heading_path"),
+            )
+        )
         manifest.append(child["chunk_index"])
 
     partial_key = f"staging/{document_id}/embeddings.partial.npy"
@@ -285,3 +297,18 @@ def persist(self, document_id: str) -> str:
 
 def launch(document_id: str) -> None:
     chain(parse.s(document_id), structure.s(), enrich.s(), embed.s(), persist.s()).apply_async()
+
+
+def relaunch_from_structure(document_id: str) -> None:
+    """Runs S2 to S5 again from the parse checkpoint: for a change to
+    chunking, enrichment or embedding, which OCR has no part in.
+
+    chunks.json goes first, or S2 would take its checkpoint skip and nothing
+    downstream would change."""
+    from shared.storage import get_store
+
+    store = get_store()
+    if not store.exists(f"staging/{document_id}/parsed.json"):
+        raise FileNotFoundError(f"no parse checkpoint for {document_id}: it has to be parsed again")
+    store.delete(f"staging/{document_id}/chunks.json")
+    chain(structure.s(document_id), enrich.s(), embed.s(), persist.s()).apply_async()

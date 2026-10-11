@@ -17,11 +17,17 @@ from worker.steps.chunking import count_tokens
 DIMENSIONS = get_settings().embed_dimensions
 
 
-def contextualize(context: str, content: str) -> str:
+def contextualize(
+    context: str, content: str, title: str | None = None, heading: str | None = None
+) -> str:
     """What gets embedded -- and, in S5, stored as `contextualized`. One
     definition for both, or the stored text could drift away from the text
-    its vector was actually computed from."""
-    return f"{context}\n\n{content}".strip()
+    its vector was actually computed from.
+
+    The document title and the heading path come first. They are what tells
+    apart two provisions that read the same word for word."""
+    where = " > ".join(part for part in (title, heading) if part)
+    return "\n\n".join(part for part in (where, context, content) if part).strip()
 
 
 def vectors_to_npy(vectors: list[list[float]]) -> bytes:

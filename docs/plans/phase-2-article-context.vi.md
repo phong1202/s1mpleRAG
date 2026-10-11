@@ -407,7 +407,7 @@ Câu ngữ cảnh do model viết có thể vẫn bỏ sót. Ghép thẳng tên 
 **Interfaces:**
 - Produces: `contextualize(context: str, content: str, title: str | None = None, heading: str | None = None) -> str`
 
-- [ ] **Step 1: Viết test đỏ**
+- [x] **Step 1: Viết test đỏ**
 
 ```python
 # tests/test_embedding.py — thêm vào cuối. `contextualize` đã được import ở đầu file;
@@ -434,9 +434,9 @@ def test_a_chunk_with_no_title_and_no_heading_is_embedded_as_before():
 noi dung"
 ```
 
-- [ ] **Step 2: Chạy để xác nhận đỏ** — `TypeError: contextualize() got an unexpected keyword argument 'title'`.
+- [x] **Step 2: Chạy để xác nhận đỏ** — `TypeError: contextualize() got an unexpected keyword argument 'title'`.
 
-- [ ] **Step 3: Sửa `contextualize` và nơi gọi nó**
+- [x] **Step 3: Sửa `contextualize` và nơi gọi nó**
 
 ```python
 # worker/steps/embedding.py
@@ -455,15 +455,9 @@ def contextualize(
 ".join(part for part in (where, context, content) if part).strip()
 ```
 
-Tìm mọi nơi gọi:
+S2 ghi `documents.title` vào `chunks.json` một lần (khoá `title`, trong stage `structure`), và cả S4 lẫn S5 đọc `chunks.get("title")` cùng `child.get("heading_path")`. Một nguồn duy nhất, nên văn bản lưu ở `contextualized` không thể lệch khỏi văn bản đã được embed. Hai nơi gọi `contextualize` là `worker/stages.py` (embed) và `worker/steps/persistence.py`.
 
-```bash
-grep -rn "contextualize(" worker/ tests/
-```
-
-Ở mỗi nơi gọi trong `worker/`, truyền thêm `title=` (cột `documents.title`, đọc qua `DocumentStateRepository.get`) và `heading=child.get("heading_path")`. S4 và S5 phải truyền **cùng** hai giá trị đó: văn bản lưu ở `contextualized` và văn bản được embed là một.
-
-- [ ] **Step 4: Chạy test, suite đầy đủ, rồi dừng**
+- [x] **Step 4: Chạy test, suite đầy đủ, rồi dừng**
 
 Commit message đề xuất: `feat(embed): put the document title and heading into the embedded text`
 
@@ -483,7 +477,7 @@ Hai điều code hiện tại quyết định cách làm (đã đọc ngày 2026
 - `structure` bỏ qua nếu `staging/<id>/chunks.json` đã tồn tại, nên lệnh phải xoá file đó trước.
 - Khi một stage tính lại artifact của nó, `invalidate_downstream` xoá artifact của các stage sau; và S5 upsert rồi `delete_leftovers`, nên chunk cũ thừa ra sẽ bị xoá.
 
-- [ ] **Step 1: Viết test đỏ**
+- [x] **Step 1: Viết test đỏ**
 
 ```python
 # tests/test_stage_chain.py — thêm vào cuối. Dùng fixture `seeded_document` và `store`
@@ -508,9 +502,9 @@ def test_a_relaunch_rebuilds_chunks_from_the_parse_checkpoint(seeded_document, s
 
 Trước khi viết test, đọc ba test đầu của `tests/test_stage_chain.py` để dùng đúng cách file đó khởi chạy chain và đúng kiểu giá trị của `seeded_document`; sửa hai dòng đầu của test cho khớp nếu khác.
 
-- [ ] **Step 2: Chạy để xác nhận đỏ** — `ImportError: cannot import name 'relaunch_from_structure'`.
+- [x] **Step 2: Chạy để xác nhận đỏ** — `ImportError: cannot import name 'relaunch_from_structure'`.
 
-- [ ] **Step 3: Viết code**
+- [x] **Step 3: Viết code**
 
 ```python
 # worker/stages.py — ngay dưới launch()
@@ -582,7 +576,7 @@ if __name__ == "__main__":
 
 `session_scope` nằm ở đâu thì import từ đó (`grep -rn "def session_scope" worker/`).
 
-- [ ] **Step 4: Chạy test, suite đầy đủ, rồi dừng**
+- [x] **Step 4: Chạy test, suite đầy đủ, rồi dừng**
 
 Commit message đề xuất: `feat(worker): re-ingest from the parse checkpoint`
 

@@ -748,3 +748,45 @@ def test_enrich_and_embed_report_progress_while_they_run(staged_chunks, monkeypa
         ("EMBEDDING", 0, 60),
     ]
     assert progress.read(document_id) is None
+
+
+def test_the_title_travels_in_the_chunks_so_s4_and_s5_use_the_same_one(seeded_document):
+    """S4 embeds "title > heading" ahead of each chunk and S5 stores that same
+    text. Each reading the title for itself is how the stored text and its
+    vector would come apart; S2 writes it once, beside the chunks."""
+    from sqlalchemy import select
+
+    from app.models import ChildChunk
+    from shared.storage import get_store
+    from worker.db import session_scope
+
+    launch(str(seeded_document.id))
+
+    title = reload(seeded_document.id).title
+    chunks = get_store().get_json(f"staging/{seeded_document.id}/chunks.json")
+    with session_scope() as session:
+        stored = session.scalars(
+            select(ChildChunk.contextualized).where(ChildChunk.document_id == seeded_document.id)
+        ).first()
+    assert title
+    assert chunks["title"] == title
+    assert stored.startswith(title)
+
+
+def test_a_relaunch_rebuilds_chunks_from_the_parse_checkpoint(seeded_document):
+    """Re-ingesting after a chunking fix must not go back through OCR, and
+    must not be skipped by the stale chunks.json of the first run."""
+    from shared.storage import get_store
+    from worker.stages import relaunch_from_structure
+
+    store = get_store()
+    document_id = str(seeded_document.id)
+    launch(document_id)
+    store.put_json(f"staging/{document_id}/chunks.json", {"parents": [], "children": []})
+    parsed_before = store.sha256(f"staging/{document_id}/parsed.json")
+
+    relaunch_from_structure(document_id)
+
+    assert store.get_json(f"staging/{document_id}/chunks.json")["children"]
+    assert store.sha256(f"staging/{document_id}/parsed.json") == parsed_before
+    assert reload(seeded_document.id).status == "COMPLETED"

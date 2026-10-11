@@ -136,7 +136,8 @@ def test_a_regenerated_artifact_forces_everything_downstream_to_follow(
             .order_by(ChildChunk.chunk_index)
         ).all()
     assert rows
-    assert all(ctx.startswith("Revised: ") for ctx, _ in rows)
+    # The context no longer opens the text: the title and heading come first.
+    assert all("Revised: " in ctx for ctx, _ in rows)
     for contextualized, stored in rows:
         expected = StubProvider().embed([contextualized])[0]
         assert np.allclose(np.asarray(stored), expected, atol=1e-6), (
