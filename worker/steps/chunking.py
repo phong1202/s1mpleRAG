@@ -116,6 +116,114 @@ def split_sections(markdown: str, stack: list[str] | None = None) -> list[tuple[
     return [(path, body) for path, body in sections if body]
 
 
+_MARKUP = re.compile(r"^[#\s*_]+|[\s*_]+$")
+_NUMBERED = re.compile(r"^((?:[^\W\d_]+\s+){1,2})(\d+[a-z]?|[IVXLCDM]+)(?=[\s.:)]|$)")
+_TITLE_MAX = 300
+
+
+def _marked(line: str) -> bool:
+    text = line.strip()
+    return bool(_HEADING.match(text)) or (
+        text.startswith("**") and text.endswith("**") and len(text) > 4
+    )
+
+
+def _kind(line: str) -> tuple[str, str, str] | None:
+    """(kind, number, bare title) of a numbered heading line."""
+    bare = _MARKUP.sub("", line)
+    found = _NUMBERED.match(bare)
+    if not found:
+        return None
+    return found.group(1).strip().casefold(), found.group(2), bare[:_TITLE_MAX]
+
+
+def learn(lines: list[str]) -> tuple[set[str], set[tuple[str, str]]]:
+    """The kinds that recur among marked lines, and the pairs (a, b) meaning
+    'a is not a subdivision of b'.
+
+    A kind subdivides another only if somewhere two or more of it sit between
+    one heading of the other and the next: four sections inside one chapter.
+    A chapter never does that to an article -- at most one chapter falls
+    between two consecutive articles -- so a chapter is never filed under one,
+    whatever '#' level the parser gave either."""
+    seen = [k[0] for line in lines if _marked(line) and (k := _kind(line))]
+    kinds = {k for k in seen if seen.count(k) >= 2}
+    seen = [k for k in seen if k in kinds]
+    outside: set[tuple[str, str]] = set()
+    for a in kinds:
+        for b in kinds - {a}:
+            most = run = 0
+            started = False
+            for k in seen:
+                if k == b:
+                    started, run = True, 0
+                elif k == a and started:
+                    run += 1
+                    most = max(most, run)
+            if most < 2:
+                outside.add((a, b))
+    return kinds, outside
+
+
+def split_document(pages: list[str]) -> list[list[tuple[str, str]]]:
+    """Per page, the (heading_path, body) sections."""
+    lines = [line for page in pages for line in page.splitlines()]
+    kinds, outside = learn(lines)
+    if not kinds:
+        # No numbered headings to go by: the markdown levels are all there is.
+        open_headings: list[str] = []
+        return [split_sections(page, open_headings) for page in pages]
+    stack: list[tuple[str, str]] = []  # (kind, title)
+    last_number: dict[str, str] = {}
+    out = []
+    untitled = None
+    for page in pages:
+        sections, buffer = [], []
+        path = " > ".join(t for _, t in stack)
+        for line in page.splitlines():
+            k = _kind(line)
+            marked = _marked(line)
+            opens = bool(k) and k[0] in kinds and (marked or _follows(last_number.get(k[0]), k[1]))
+            if opens:
+                if buffer:
+                    sections.append((path, "\n".join(buffer).strip()))
+                kind, number, title = k
+                if any(kd == kind for kd, _ in stack):
+                    del stack[[kd for kd, _ in stack].index(kind) :]
+                while stack and (kind, stack[-1][0]) in outside:
+                    stack.pop()
+                stack.append((kind, title))
+                last_number[kind] = number
+                untitled = (
+                    len(stack) - 1
+                    if not title[_NUMBERED.match(title).end() :].strip(" .:")
+                    else None
+                )
+                path, buffer = " > ".join(t for _, t in stack), [line]
+                continue
+            if untitled is not None and line.strip():
+                if marked or line.strip().isupper():
+                    kd, t = stack[untitled]
+                    stack[untitled] = (kd, f"{t}. {_MARKUP.sub('', line)}"[:_TITLE_MAX])
+                    path = " > ".join(t for _, t in stack)
+                untitled = None
+            buffer.append(line)
+        if buffer:
+            sections.append((path, "\n".join(buffer).strip()))
+        out.append([(p, b) for p, b in sections if b])
+    return out
+
+
+def _follows(previous: str | None, number: str) -> bool:
+    """A plain line continues a numbered series only as its very next item."""
+    return (
+        bool(previous)
+        and previous.isdigit()
+        and number.isdigit()
+        and int(number) == int(previous) + 1
+    )
+
+
 def detect_language(text: str) -> str:
     """Called once per parent; children inherit it. A 150-token child is
     too little to classify reliably, and Vietnamese prose mixed with
@@ -129,15 +237,13 @@ def chunk_document(parsed: dict) -> dict:
     natural key that keeps S5 idempotent."""
     parents, children = [], []
     parent_index = child_index = 0
-    # One stack for the whole document: an article runs across page breaks.
-    open_headings: list[str] = []
+    # The whole document at once: which headings are structure, and how they
+    # nest, is learned from all of them, and an article runs across page breaks.
+    pages = [(page["page"], sanitize(page["markdown"])) for page in parsed["pages"]]
+    outline = split_document([text for _, text in pages])
 
-    for page in parsed["pages"]:
-        text = sanitize(page["markdown"])
-        if not text:
-            continue
-
-        for heading_path, section in split_sections(text, open_headings):
+    for (page_number, _), sections in zip(pages, outline, strict=True):
+        for heading_path, section in sections:
             for parent_text in _split_by_tokens(section, PARENT_MIN, PARENT_MAX):
                 parent_tokens = count_tokens(parent_text)
                 if parent_tokens < DROP_BELOW:
@@ -148,8 +254,8 @@ def chunk_document(parsed: dict) -> dict:
                         "chunk_index": parent_index,
                         "content": parent_text,
                         "token_count": parent_tokens,
-                        "page_start": page["page"],
-                        "page_end": page["page"],
+                        "page_start": page_number,
+                        "page_end": page_number,
                         "heading_path": heading_path or None,
                         "language": language,
                     }
@@ -165,7 +271,7 @@ def chunk_document(parsed: dict) -> dict:
                             "parent_index": parent_index,
                             "content": child_text,
                             "token_count": child_tokens,
-                            "page_number": page["page"],
+                            "page_number": page_number,
                             "language": language,
                         }
                     )

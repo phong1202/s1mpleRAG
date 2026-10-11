@@ -78,7 +78,7 @@ Tài liệu không có tiêu đề đánh số nào thì chia theo heading markd
 **Interfaces:**
 - Produces: `split_document(pages: list[str]) -> list[list[tuple[str, str]]]`: với mỗi trang, danh sách `(heading_path, body)`. Cần cả tài liệu một lúc, vì loại và thứ bậc được học từ toàn bộ các tiêu đề.
 
-- [ ] **Step 1: Viết test đỏ**
+- [x] **Step 1: Viết test đỏ**
 
 ```python
 # tests/test_chunking.py — thêm vào cuối; thêm `split_document` vào dòng import từ
@@ -164,9 +164,9 @@ def test_a_document_with_no_numbered_headings_still_follows_its_markdown():
     assert _paths("# A\nx\n\n## B\ny\n\n# C\nz\n") == ["A", "A > B", "C"]
 ```
 
-- [ ] **Step 2: Chạy để xác nhận đỏ** — `ImportError: cannot import name 'split_document'`.
+- [x] **Step 2: Chạy để xác nhận đỏ** — `ImportError: cannot import name 'split_document'`.
 
-- [ ] **Step 3: Thêm `split_document` và cho `chunk_document` dùng nó**
+- [x] **Step 3: Thêm `split_document` và cho `chunk_document` dùng nó**
 
 Đặt khối dưới đây ngay sau hàm `split_sections` hiện có. `_HEADING` đã có sẵn trong file.
 
@@ -281,9 +281,9 @@ Trong `chunk_document`, thay vòng lặp theo trang:
 
 Biến `open_headings` của `chunk_document` không còn cần: `split_document` tự giữ trạng thái qua các trang.
 
-- [ ] **Step 4: Chạy test** — PASS: 6 test mới và 11 test có sẵn.
+- [x] **Step 4: Chạy test** — PASS: 6 test mới và 11 test có sẵn.
 
-- [ ] **Step 5: Đối chiếu với dữ liệu thật**
+- [x] **Step 5: Đối chiếu với dữ liệu thật**
 
 ```bash
 uv run python - <<'PY'
@@ -301,7 +301,7 @@ PY
 
 Expected: 87, 109, 89, 38, 53, 65, 19, 21, 55 cho chín văn bản luật, 0 cho file tiếng Nhật. So từng con số với số điều thật của văn bản; văn bản nào lệch từ 2 điều trở lên thì tìm dòng bị sót và báo, đừng nới quy tắc cho khớp.
 
-- [ ] **Step 6: Suite đầy đủ, rồi dừng**
+- [x] **Step 6: Suite đầy đủ, rồi dừng**
 
 Commit message đề xuất: `fix(chunking): build the outline from how headings recur, not from markdown levels`
 

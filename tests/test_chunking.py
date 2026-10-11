@@ -2,6 +2,7 @@ from worker.steps.chunking import (
     chunk_document,
     detect_language,
     sanitize,
+    split_document,
     split_sections,
 )
 
@@ -169,3 +170,82 @@ def test_a_section_running_across_a_page_break_keeps_its_heading_path():
     parents = chunk_document(parsed)["parents"]
 
     assert {p["heading_path"] for p in parents if p["page_start"] == 2} == {"Chuong II > Dieu 19"}
+
+
+def _paths(*pages: str) -> list[str]:
+    return [path for page in split_document(list(pages)) for path, _ in page]
+
+
+def test_a_numbered_heading_counts_whatever_markup_the_parser_gave_it():
+    """One decree, parsed in one run, held the same kind of line as h2, h3, h4,
+    h5, bold and plain text. Only '#' lines were read as headings, so 29 of its
+    54 articles were missed and their chunks inherited the wrong heading."""
+    page = (
+        "##### Điều 5. Mot\nnoi dung 5\n\n"
+        "**Điều 6. Xử phạt người điều khiển xe ô tô**\nnoi dung 6\n\n"
+        "Điều 7. Xử phạt người điều khiển xe mô tô\nnoi dung 7\n"
+    )
+
+    assert _paths(page) == [
+        "Điều 5. Mot",
+        "Điều 6. Xử phạt người điều khiển xe ô tô",
+        "Điều 7. Xử phạt người điều khiển xe mô tô",
+    ]
+
+
+def test_depth_comes_from_how_headings_recur_not_from_the_markdown_level():
+    """`# Điều 2` followed by `## Chương II` used to file the whole chapter
+    under Article 2. A chapter never falls twice between two articles, so it
+    cannot be a subdivision of one."""
+    page = (
+        "# Điều 1. A\nx\n\n# Điều 2. B\nx\n\n"
+        "## Chương II\n\n## HÀNH VI VI PHẠM\n\n"
+        "#### Mục 1. QUY TẮC\ny\n\n**Điều 6. Xe ô tô**\nz\n\n"
+        "#### Mục 2. KHÁC\n\n**Điều 7. C**\nz\n\n"
+        "## Chương III\n\n## THI HÀNH\n\n**Điều 8. D**\nz\n"
+    )
+
+    paths = _paths(page)
+
+    assert "Chương II. HÀNH VI VI PHẠM > Mục 1. QUY TẮC > Điều 6. Xe ô tô" in paths
+    assert paths[-1] == "Chương III. THI HÀNH > Điều 8. D"
+
+
+def test_no_list_of_words_is_involved():
+    """The kinds are whatever the document numbers. Nothing here names them."""
+    page = (
+        "# Part 1\n\n## Article 1. Scope\nx\n\n## Article 2. Terms\ny\n\n"
+        "# Part 2\n\n## Article 3. Fees\nz\n"
+    )
+
+    assert _paths(page) == [
+        "Part 1",
+        "Part 1 > Article 1. Scope",
+        "Part 1 > Article 2. Terms",
+        "Part 2",
+        "Part 2 > Article 3. Fees",
+    ]
+
+
+def test_a_reference_or_a_quoted_article_is_not_a_heading():
+    """ "Điều 24 của Luật này" is a reference, and an amending decree quotes
+    whole articles of the decree it amends. Neither opens a section."""
+    page = (
+        "**Điều 1. Sửa đổi, bổ sung Điều 9**\n"
+        "Điều 24 của Luật này được áp dụng.\n"
+        "“Điều 9. Cơ sở dữ liệu\n"
+        "a) theo quy định tại Điều 6. của Nghị định này\n\n"
+        "**Điều 2. Hiệu lực**\nx\n"
+    )
+
+    assert _paths(page) == ["Điều 1. Sửa đổi, bổ sung Điều 9", "Điều 2. Hiệu lực"]
+
+
+def test_the_open_article_carries_over_a_page_break():
+    first = "**Điều 5. A**\nx\n\n**Điều 6. Xe ô tô**\nkhoan 1\n"
+
+    assert _paths(first, "khoan 9, tiep theo trang truoc\n")[-1] == "Điều 6. Xe ô tô"
+
+
+def test_a_document_with_no_numbered_headings_still_follows_its_markdown():
+    assert _paths("# A\nx\n\n## B\ny\n\n# C\nz\n") == ["A", "A > B", "C"]
