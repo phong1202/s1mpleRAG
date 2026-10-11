@@ -9,6 +9,13 @@ const nextConfig = {
     const api = process.env.API_URL ?? 'http://localhost:8000'
     return [{ source: '/backend/:path*', destination: `${api}/:path*` }]
   },
+  experimental: {
+    // How long the rewrite above waits for the backend, 30 s by default.
+    // /query is an embedding plus a reasoning-model completion in a single
+    // response, and a provider backing off a rate limit can take longer
+    // than that; cut off, it would read as the backend being down.
+    proxyTimeout: 120_000,
+  },
   async headers() {
     return [
       {
