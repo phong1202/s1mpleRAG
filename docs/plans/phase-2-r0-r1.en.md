@@ -540,7 +540,7 @@ Proposed commit message: `feat(db): add the query trace table`
 - Consumes: `QueryTrace`, `Answer.trace`
 - Produces: a `query_traces` row per `POST /query`
 
-- [ ] **Step 0: Move the read path's two fixtures into `tests/conftest.py`**
+- [x] **Step 0: Move the read path's two fixtures into `tests/conftest.py`**
 
 `query_client` and `seeded_corpus` live in `tests/test_query_api.py`, so no other test file can see them. The `client` fixture of `conftest.py` is no substitute: it does not override `get_async_provider`, so `POST /query` reaches an unscripted `AsyncStubProvider`, raises `KeyError`, and the test is red for the wrong reason.
 
@@ -552,7 +552,7 @@ uv run ruff check . && uv run pytest -q tests/test_query_api.py
 
 Expected: clean, 4 tests PASS as before.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_query_trace.py — append. Two imports join the ones at the top of
@@ -569,7 +569,10 @@ async def test_every_query_writes_exactly_one_trace_row(query_client, db_session
 
     assert response.status_code == 200
     assert len(rows) == 1
-    assert [n["node"] for n in rows[0].nodes][:3] == ["rewrite", "plan", "retrieve"]
+    # build_stages records the per-source counts as a node of their own, ahead
+    # of the stage that produced them.
+    recorded = [n["node"] for n in rows[0].nodes]
+    assert recorded[:4] == ["rewrite", "plan", "retrieve_detail", "retrieve"]
     assert rows[0].iterations == 1
 
 
@@ -615,9 +618,9 @@ async def test_a_trace_the_database_rejects_leaves_the_session_usable(
     assert count.scalar_one() == 0
 ```
 
-- [ ] **Step 2: Run them to verify the failure** — the first test: no rows written. The other two pass already, because there is nothing to break yet; they only mean something after Step 3, and the third is the one that goes red if someone turns the savepoint back into a bare `flush()`.
+- [x] **Step 2: Run them to verify the failure** — the first test: no rows written. The other two pass already, because there is nothing to break yet; they only mean something after Step 3, and the third is the one that goes red if someone turns the savepoint back into a bare `flush()`.
 
-- [ ] **Step 3: Wire it in**
+- [x] **Step 3: Wire it in**
 
 ```python
 # app/services/query_service.py — inside QueryService.ask, before returning
@@ -648,8 +651,7 @@ async def _persist_trace(session, question: str, result) -> None:
                     total_ms=result.trace.total_ms,
                     citation_count=len(result.citations),
                     nodes=[
-                        {"node": n.node, "ms": n.ms, "detail": n.detail}
-                        for n in result.trace.nodes
+                        {"node": n.node, "ms": n.ms, "detail": n.detail} for n in result.trace.nodes
                     ],
                 )
             )
@@ -657,9 +659,9 @@ async def _persist_trace(session, question: str, result) -> None:
         logger.exception("failed to persist query trace")
 ```
 
-- [ ] **Step 4: Run the tests** — PASS, 5 tests in this file.
+- [x] **Step 4: Run the tests** — PASS, 5 tests in this file.
 
-- [ ] **Step 5: Full suite, then stop**
+- [x] **Step 5: Full suite, then stop**
 
 Proposed commit message: `feat(api): persist a trace row for every query`
 

@@ -2,44 +2,10 @@
 each test scripts the answer it needs."""
 
 import pytest
-import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
 
-from app.app import create_app
 from app.core.generator import Draft
-from app.utils.database import get_session
-from shared.llm import AsyncStubProvider, get_async_provider
-from tests.helpers import seed_chunks
 
 pytestmark = pytest.mark.asyncio
-
-
-@pytest_asyncio.fixture
-async def query_client(db_session):
-    """A client over the rolled-back session whose LLM is a scripted stub.
-
-    `get_async_provider` is overridden, not monkeypatched: the route declares it
-    with Depends, which is the only reason a test can replace it at all.
-    """
-    provider = AsyncStubProvider(dimensions=1536)
-    app = create_app()
-
-    async def _session():
-        yield db_session
-
-    app.dependency_overrides[get_session] = _session
-    app.dependency_overrides[get_async_provider] = lambda: provider
-
-    transport = ASGITransport(app=app, raise_app_exceptions=False)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac, provider
-
-    app.dependency_overrides.clear()
-
-
-@pytest_asyncio.fixture
-async def seeded_corpus(db_session):
-    return await seed_chunks(db_session)
 
 
 async def test_query_returns_an_answer_with_citations(query_client, seeded_corpus):

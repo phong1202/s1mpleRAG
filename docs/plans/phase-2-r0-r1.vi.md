@@ -540,7 +540,7 @@ Commit message đề xuất: `feat(db): add the query trace table`
 - Consumes: `QueryTrace`, `Answer.trace`
 - Produces: một hàng `query_traces` cho mỗi `POST /query`
 
-- [ ] **Step 0: Đưa hai fixture của đường đọc về `tests/conftest.py`**
+- [x] **Step 0: Đưa hai fixture của đường đọc về `tests/conftest.py`**
 
 `query_client` và `seeded_corpus` hiện nằm trong `tests/test_query_api.py`, nên file test khác không thấy chúng. Fixture `client` của `conftest.py` không dùng thay được: nó không override `get_async_provider`, nên `POST /query` chạy tới một `AsyncStubProvider` chưa được kịch bản hoá, ném `KeyError`, và test đỏ vì lý do sai.
 
@@ -552,7 +552,7 @@ uv run ruff check . && uv run pytest -q tests/test_query_api.py
 
 Expected: sạch, 4 test PASS như trước.
 
-- [ ] **Step 1: Viết test đỏ**
+- [x] **Step 1: Viết test đỏ**
 
 ```python
 # tests/test_query_trace.py — append. Two imports join the ones at the top of
@@ -569,7 +569,10 @@ async def test_every_query_writes_exactly_one_trace_row(query_client, db_session
 
     assert response.status_code == 200
     assert len(rows) == 1
-    assert [n["node"] for n in rows[0].nodes][:3] == ["rewrite", "plan", "retrieve"]
+    # build_stages records the per-source counts as a node of their own, ahead
+    # of the stage that produced them.
+    recorded = [n["node"] for n in rows[0].nodes]
+    assert recorded[:4] == ["rewrite", "plan", "retrieve_detail", "retrieve"]
     assert rows[0].iterations == 1
 
 
@@ -615,9 +618,9 @@ async def test_a_trace_the_database_rejects_leaves_the_session_usable(
     assert count.scalar_one() == 0
 ```
 
-- [ ] **Step 2: Chạy để xác nhận đỏ** — test đầu: không có hàng nào được ghi. Hai test sau xanh ngay vì chưa có gì để hỏng; chúng chỉ có nghĩa sau Step 3, và test thứ ba là thứ sẽ đỏ nếu ai đó đổi savepoint về một `flush()` trần.
+- [x] **Step 2: Chạy để xác nhận đỏ** — test đầu: không có hàng nào được ghi. Hai test sau xanh ngay vì chưa có gì để hỏng; chúng chỉ có nghĩa sau Step 3, và test thứ ba là thứ sẽ đỏ nếu ai đó đổi savepoint về một `flush()` trần.
 
-- [ ] **Step 3: Nối vào service**
+- [x] **Step 3: Nối vào service**
 
 ```python
 # app/services/query_service.py — trong QueryService.ask, trước khi return
@@ -648,8 +651,7 @@ async def _persist_trace(session, question: str, result) -> None:
                     total_ms=result.trace.total_ms,
                     citation_count=len(result.citations),
                     nodes=[
-                        {"node": n.node, "ms": n.ms, "detail": n.detail}
-                        for n in result.trace.nodes
+                        {"node": n.node, "ms": n.ms, "detail": n.detail} for n in result.trace.nodes
                     ],
                 )
             )
@@ -657,9 +659,9 @@ async def _persist_trace(session, question: str, result) -> None:
         logger.exception("failed to persist query trace")
 ```
 
-- [ ] **Step 4: Chạy test** — PASS, 5 test trong file này.
+- [x] **Step 4: Chạy test** — PASS, 5 test trong file này.
 
-- [ ] **Step 5: Suite đầy đủ, rồi dừng**
+- [x] **Step 5: Suite đầy đủ, rồi dừng**
 
 Commit message đề xuất: `feat(api): persist a trace row for every query`
 

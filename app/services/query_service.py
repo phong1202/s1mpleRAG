@@ -1,3 +1,4 @@
+import logging
 import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +9,8 @@ from app.core.deps import build_stages
 from app.core.pipeline import answer as run_pipeline
 from app.schemas.query import CitationOut, QueryRequest, QueryResponse
 from shared.llm import AsyncLLMProvider
+
+logger = logging.getLogger(__name__)
 
 
 class QueryService:
@@ -31,6 +34,8 @@ class QueryService:
             max_iterations=settings.retrieval_max_iterations,
         )
 
+        await _persist_trace(self._session, payload.question, result)
+
         return QueryResponse(
             answer=result.text,
             citations=[_serialise(c) for c in result.citations],
@@ -49,3 +54,28 @@ def _serialise(citation) -> CitationOut:
             quote=citation.quote,
         )
     return CitationOut(ordinal=citation.ordinal, kind="web", url=citation.url, title=citation.title)
+
+
+async def _persist_trace(session, question: str, result) -> None:
+    """Best effort by design: a broken trace table must not take down the
+    feature it exists to observe."""
+    from app.models import QueryTrace
+
+    try:
+        # A savepoint, not a bare flush: a failed INSERT aborts the transaction
+        # it ran in, and the commit that ends the request would fail after it.
+        # Leaving the block flushes; an error rolls back to the savepoint only.
+        async with session.begin_nested():
+            session.add(
+                QueryTrace(
+                    question=question,
+                    iterations=result.trace.iterations,
+                    total_ms=result.trace.total_ms,
+                    citation_count=len(result.citations),
+                    nodes=[
+                        {"node": n.node, "ms": n.ms, "detail": n.detail} for n in result.trace.nodes
+                    ],
+                )
+            )
+    except Exception:
+        logger.exception("failed to persist query trace")
