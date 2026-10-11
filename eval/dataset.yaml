@@ -101,46 +101,48 @@ set_a:
     gold_page: 6
     quote: "3a. Phạt tiền từ 5.000.000 đồng đến 10.000.000 đồng"
 
-  # --- followup: the last turn cannot stand alone; zero until R4 --------------
+  # --- followup: the last turn names no topic of its own; zero until R4 --------
+  # Rewritten 2026-10-11: the first four were found by plain vector search
+  # three times out of four, because their last turn still carried the topic.
   - id: a13
     kind: followup
     turns:
-      - "Bao nhiêu tuổi thì được lái xe gắn máy?"
-      - "Còn muốn lấy bằng hạng D thì sao?"
-    question: "Còn muốn lấy bằng hạng D thì sao?"
-    gold_sha256: "9a20c8e616d444e3abe63c765a225d0797b7079c9a18e5fe7da0fc4f46847dac"
-    gold_page: 49
-    quote: "Người đủ 27 tuổi trở lên được cấp giấy phép lái xe hạng D"
+      - "Đi xe máy không đội mũ bảo hiểm thì bị phạt bao nhiêu?"
+      - "Thế nếu người ngồi sau không đội thì sao?"
+    question: "Thế nếu người ngồi sau không đội thì sao?"
+    gold_sha256: "7bb11b939d162499ab404aa41a940cce05dbf071d9cbae7a8898b00d4b4a48bd"
+    gold_page: 17
+    quote: "người ngồi trên xe không đội"
 
   - id: a14
     kind: followup
     turns:
-      - "Ô tô vượt đèn đỏ bị phạt thế nào?"
-      - "Còn xe máy thì sao?"
-    question: "Còn xe máy thì sao?"
+      - "Lái ô tô khi nồng độ cồn vượt mức cao nhất thì bị phạt bao nhiêu tiền?"
+      - "Có bị giữ bằng không, trong bao lâu?"
+    question: "Có bị giữ bằng không, trong bao lâu?"
     gold_sha256: "7bb11b939d162499ab404aa41a940cce05dbf071d9cbae7a8898b00d4b4a48bd"
-    gold_page: 20
-    quote: "c) Không chấp hành hiệu lệnh của đèn tín hiệu giao thông"
+    gold_page: 15
+    quote: "bị tước quyền sử dụng giấy phép lái xe từ 22 tháng đến 24 tháng"
 
   - id: a15
     kind: followup
     turns:
-      - "Hãng hàng không thương mại cần vốn tối thiểu bao nhiêu?"
-      - "Còn doanh nghiệp bay chuyên dùng thì sao?"
-    question: "Còn doanh nghiệp bay chuyên dùng thì sao?"
-    gold_sha256: "11b283cf54f551c6bcdbc832fd5e29c1a38544fb731b8a40b103477963c4ce89"
-    gold_page: 15
-    quote: "vận tải hàng không chuyên dùng là 10 tỷ đồng Việt Nam"
+      - "Tàu thuyền chạy trên sông cần điều kiện gì để được hoạt động?"
+      - "Thế có phải đăng ký không?"
+    question: "Thế có phải đăng ký không?"
+    gold_sha256: "270534d1af44f4c1da3ea8c8c49410f7b12b8bbc97b4c5eccd65ec32cb7efa98"
+    gold_page: 18
+    quote: "Phương tiện có nguồn gốc hợp pháp, đạt tiêu chuẩn chất lượng"
 
   - id: a16
     kind: followup
     turns:
-      - "Phương tiện thủy nội địa cần điều kiện gì để hoạt động?"
-      - "Thế nếu không bố trí đủ người trên đó thì có bị cấm không?"
-    question: "Thế nếu không bố trí đủ người trên đó thì có bị cấm không?"
-    gold_sha256: "270534d1af44f4c1da3ea8c8c49410f7b12b8bbc97b4c5eccd65ec32cb7efa98"
-    gold_page: 7
-    quote: "Bố trí thuyền viên không đủ định biên theo quy định khi đưa phương tiện vào hoạt động"
+      - "Doanh nghiệp bay chuyên dùng cần vốn tối thiểu bao nhiêu?"
+      - "Nếu không giữ được mức đó thì sao?"
+    question: "Nếu không giữ được mức đó thì sao?"
+    gold_sha256: "11b283cf54f551c6bcdbc832fd5e29c1a38544fb731b8a40b103477963c4ce89"
+    gold_page: 17
+    quote: "Không duy trì vốn tối thiểu trong thời gian 02 năm liên tục"
 
   # --- summarize: gold is the page carrying the scope article; zero until R5 --
   - id: a17
