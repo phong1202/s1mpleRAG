@@ -11,7 +11,9 @@ import json
 import math
 import random
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypeVar
+
+from pydantic import BaseModel
 
 from app.config import get_settings
 from app.exceptions import AppException, ErrorCode
@@ -97,11 +99,17 @@ class OpenAIProvider:
     def enrich(self, chunks: list[dict]) -> list[EnrichedChunk]:
         prompt = (
             "For each chunk, write ONE sentence of context situating it, in the "
-            "chunk's own language, and choose exactly one category."
+            "chunk's own language, and choose exactly one category. "
+            "Each chunk comes with its heading: the chapter, section and article "
+            "it sits under. When the chunk itself does not say what or whom it "
+            "applies to and the heading does, the sentence must say so."
         )
         # Only what the task reads: every other field of a chunk would be
         # tokens paid for and ignored.
-        sent = [{"id": c["id"], "content": c["content"]} for c in chunks]
+        sent = [
+            {"id": c["id"], "heading": c.get("heading_path") or "", "content": c["content"]}
+            for c in chunks
+        ]
         response = _translating_errors(
             self._client.chat.completions.create,
             model=self._chat_model,
@@ -227,3 +235,109 @@ def _parse_enriched(content: str | None) -> list[EnrichedChunk]:
 
 def get_provider() -> LLMProvider:
     return OpenAIProvider() if get_settings().llm_provider == "openai" else StubProvider()
+
+
+# --- read path ---------------------------------------------------------------
+# Added beside the synchronous half above, never replacing it: the worker
+# imports LLMProvider, StubProvider and OpenAIProvider, and Phase 1's tests pin
+# their behaviour. `_unit_vector_from` is reused rather than redefined.
+
+T = TypeVar("T", bound=BaseModel)
+
+
+class AsyncLLMProvider(Protocol):
+    """The read path's provider. Async because it runs inside FastAPI, and
+    schema-driven because every decision node returns a typed verdict rather
+    than prose."""
+
+    async def complete(self, messages: list[dict], schema: type[T]) -> T: ...
+    async def embed_query(self, text: str) -> list[float]: ...
+
+
+class AsyncStubProvider:
+    """Deterministic, offline, scripted per schema type. This is what makes the
+    whole R0-R8 ladder testable with no API key."""
+
+    def __init__(
+        self,
+        responses: dict[type, list] | None = None,
+        dimensions: int = 1536,
+    ) -> None:
+        self._responses = {k: list(v) for k, v in (responses or {}).items()}
+        self._dimensions = dimensions
+        self.calls: list[tuple[type, list[dict]]] = []
+
+    async def complete(self, messages: list[dict], schema: type[T]) -> T:
+        self.calls.append((schema, messages))
+        # KeyError is deliberate: an unscripted schema must fail loudly rather
+        # than hand back a default a test would silently pass against.
+        queue = self._responses[schema]
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    async def embed_query(self, text: str) -> list[float]:
+        return _unit_vector_from(text, self._dimensions)
+
+    def script(self, schema: type[T], *responses: T) -> None:
+        """Queue responses for a schema after construction.
+
+        The constructor copies its `responses` mapping, so a caller that builds
+        the provider before it knows what the provider must return -- a FastAPI
+        dependency override, for one -- has no other way in.
+        """
+        self._responses[schema] = list(responses)
+
+
+# Generous for one answer: a real question took under 7 s end to end.
+_READ_TIMEOUT_S = 30
+
+
+class AsyncOpenAIProvider:
+    def __init__(self) -> None:
+        from openai import AsyncOpenAI
+
+        settings = get_settings()
+        if not settings.openai_api_key:
+            raise RuntimeError("LLM_PROVIDER=openai but OPENAI_API_KEY is not set")
+        # The SDK's own limits are a 600 s wait and two retries. A request
+        # holds a database connection while it waits on the provider, so those
+        # limits would let one slow provider drain the pool.
+        self._client = AsyncOpenAI(
+            api_key=settings.openai_api_key, timeout=_READ_TIMEOUT_S, max_retries=1
+        )
+        self._chat_model = settings.openai_chat_model
+        self._reasoning_effort = settings.openai_reasoning_effort
+        self._embed_model = settings.openai_embed_model
+        self._dimensions = settings.embed_dimensions
+
+    async def complete(self, messages: list[dict], schema: type[T]) -> T:
+        # Structured outputs, strict -- the choice enrich() made above. JSON
+        # mode never showed the model the schema, and the API refuses it
+        # unless a message happens to say "json".
+        response = await self._client.chat.completions.parse(
+            model=self._chat_model,
+            reasoning_effort=self._reasoning_effort,
+            response_format=schema,
+            messages=messages,
+        )
+        parsed = response.choices[0].message.parsed
+        if parsed is None:
+            # A refusal. A reply cut off mid-object never gets here: parse()
+            # raises on that itself.
+            raise RuntimeError(f"the model returned no {schema.__name__}")
+        return parsed
+
+    async def embed_query(self, text: str) -> list[float]:
+        response = await self._client.embeddings.create(
+            model=self._embed_model, input=[text], dimensions=self._dimensions
+        )
+        vector = response.data[0].embedding
+        # L2-normalise: vector_ip_ops treats inner product as cosine, and the
+        # index returns wrong neighbours, with no error, if this is skipped.
+        norm = math.sqrt(sum(x * x for x in vector)) or 1.0
+        return [x / norm for x in vector]
+
+
+def get_async_provider() -> AsyncLLMProvider:
+    if get_settings().llm_provider == "openai":
+        return AsyncOpenAIProvider()
+    return AsyncStubProvider(dimensions=get_settings().embed_dimensions)

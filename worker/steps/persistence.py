@@ -58,7 +58,14 @@ def _child_rows(
                 "parent_id": parent_ids[child["parent_index"]],
                 "chunk_index": child["chunk_index"],
                 "content": child["content"],
-                "contextualized": contextualize(meta["context"], child["content"]),
+                # The same four arguments as S4, or the stored text is not
+                # the text the vector was computed from.
+                "contextualized": contextualize(
+                    meta["context"],
+                    child["content"],
+                    title=chunks.get("title"),
+                    heading=child.get("heading_path"),
+                ),
                 "page_number": child["page_number"],
                 "token_count": child["token_count"],
                 "embedding": vector,

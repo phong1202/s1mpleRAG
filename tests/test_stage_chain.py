@@ -748,3 +748,144 @@ def test_enrich_and_embed_report_progress_while_they_run(staged_chunks, monkeypa
         ("EMBEDDING", 0, 60),
     ]
     assert progress.read(document_id) is None
+
+
+def test_the_title_travels_in_the_chunks_so_s4_and_s5_use_the_same_one(seeded_document):
+    """S4 embeds "title > heading" ahead of each chunk and S5 stores that same
+    text. Each reading the title for itself is how the stored text and its
+    vector would come apart; S2 writes it once, beside the chunks."""
+    from sqlalchemy import select
+
+    from app.models import ChildChunk
+    from shared.storage import get_store
+    from worker.db import session_scope
+
+    launch(str(seeded_document.id))
+
+    title = reload(seeded_document.id).title
+    chunks = get_store().get_json(f"staging/{seeded_document.id}/chunks.json")
+    with session_scope() as session:
+        stored = session.scalars(
+            select(ChildChunk.contextualized).where(ChildChunk.document_id == seeded_document.id)
+        ).first()
+    assert title
+    assert chunks["title"] == title
+    assert stored.startswith(title)
+
+
+def test_a_relaunch_rebuilds_chunks_from_the_parse_checkpoint(seeded_document):
+    """Re-ingesting after a chunking fix must not go back through OCR, and
+    must not be skipped by the stale chunks.json of the first run."""
+    from shared.storage import get_store
+    from worker.stages import relaunch_from_structure
+
+    store = get_store()
+    document_id = str(seeded_document.id)
+    launch(document_id)
+    store.put_json(f"staging/{document_id}/chunks.json", {"parents": [], "children": []})
+    parsed_before = store.sha256(f"staging/{document_id}/parsed.json")
+
+    relaunch_from_structure(document_id)
+
+    assert store.get_json(f"staging/{document_id}/chunks.json")["children"]
+    assert store.sha256(f"staging/{document_id}/parsed.json") == parsed_before
+    assert reload(seeded_document.id).status == "COMPLETED"
+
+
+def test_a_document_still_running_cannot_be_relaunched(seeded_document):
+    """Two chains over one document share its checkpoints: the second would
+    skip on the first one's enriched.json and store old context sentences
+    against new chunks, with nothing to say so."""
+    import pytest
+
+    from worker.pipeline.state import stage_failed
+    from worker.repositories.documents import DocumentBusy
+    from worker.stages import relaunch_from_structure
+
+    launch(str(seeded_document.id))
+    stage_failed(str(seeded_document.id), "ENRICHING", ConnectionError("mid-flight"))
+
+    with pytest.raises(DocumentBusy):
+        relaunch_from_structure(str(seeded_document.id))
+
+
+def test_a_relaunch_starts_with_a_clean_failure_record(seeded_document):
+    """A transient error from the first run must not count against the next:
+    two more and a healthy document would be dead-lettered."""
+    from worker.db import session_scope
+    from worker.stages import relaunch_from_structure
+
+    launch(str(seeded_document.id))
+    with session_scope() as session:
+        from app.models import Document
+
+        row = session.get(Document, seeded_document.id)
+        row.attempts, row.last_error, row.failed_stage = 2, "timed out", "ENRICHING"
+
+    relaunch_from_structure(str(seeded_document.id))
+
+    document = reload(seeded_document.id)
+    assert (document.status, document.attempts, document.last_error) == ("COMPLETED", 0, None)
+
+
+def test_a_relaunch_that_cannot_be_published_leaves_the_document_as_it_was(
+    seeded_document, monkeypatch
+):
+    """The document was marked QUEUED and committed before the chain was
+    published. With the broker down nothing ran, and every later relaunch was
+    refused: 'a chain is still running'."""
+    import pytest
+
+    import worker.stages as stages
+
+    launch(str(seeded_document.id))
+
+    class Unpublishable:
+        def apply_async(self):
+            raise ConnectionError("broker down")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(stages, "chain", lambda *tasks: Unpublishable())
+        with pytest.raises(ConnectionError):
+            stages.relaunch_from_structure(str(seeded_document.id))
+
+    assert reload(seeded_document.id).status == "COMPLETED"
+    stages.relaunch_from_structure(str(seeded_document.id))
+    assert reload(seeded_document.id).status == "COMPLETED"
+
+
+def test_a_document_stuck_mid_stage_can_be_relaunched_on_purpose(seeded_document):
+    """A task lost by the broker leaves its document in a running status for
+    good. Re-ingestion exists for that case too, but only when asked for."""
+    from worker.pipeline.state import stage_failed
+    from worker.stages import relaunch_from_structure
+
+    launch(str(seeded_document.id))
+    stage_failed(str(seeded_document.id), "ENRICHING", ConnectionError("lost"))
+
+    relaunch_from_structure(str(seeded_document.id), force=True)
+
+    assert reload(seeded_document.id).status == "COMPLETED"
+
+
+def test_reingest_goes_on_after_a_document_that_fails(monkeypatch):
+    """One document whose row is gone, or a broker error on one publish, ended
+    the whole run before the documents after it were reached."""
+    import pytest
+
+    import worker.reingest as reingest
+
+    seen = []
+
+    def relaunch(document_id, force=False):
+        seen.append(document_id)
+        if document_id == "first":
+            raise RuntimeError("row is gone")
+
+    monkeypatch.setattr(reingest, "relaunch_from_structure", relaunch)
+    monkeypatch.setattr("sys.argv", ["reingest", "first", "second"])
+
+    with pytest.raises(SystemExit, match="1 of 2"):
+        reingest.main()
+
+    assert seen == ["first", "second"]

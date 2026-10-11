@@ -1,0 +1,217 @@
+# Anchored to (sha256, page): survives every re-chunk. Never anchor to a chunk id.
+#
+# DRAFT, awaiting human review (plan Task 12, Step 8). `python -m eval.run
+# --check-labels` proves each quote sits on its gold page; it cannot prove the
+# page answers the question. Once reviewed, this set is frozen (spec §8.4).
+#
+# Documents, by the first characters of their sha256:
+#   522db5de  luat-duong-bo_vbhn-49-2026.pdf
+#   9a20c8e6  luat-trat-tu-an-toan-giao-thong-duong-bo_vbhn-55-2026.pdf
+#   270534d1  luat-giao-thong-duong-thuy-noi-dia_vbhn-56-2026.pdf
+#   6ec65838  nd-151-2024_huong-dan-luat-trat-tu-atgt-duong-bo.pdf
+#   7bb11b93  nd-168-2024_xu-phat-vi-pham-giao-thong-duong-bo.pdf
+#   7b898097  nd-236-2026_sua-doi-nd-151-2024.pdf
+#   f132e2e9  nd-238-2026_sua-doi-nd-168-2024.pdf
+#   4ca1c076  nd-80-2026_xu-phat-hang-hai-duong-thuy.pdf
+#   11b283cf  nd-208-2026_van-tai-hang-khong.pdf
+set_a:
+  # --- baseline: ordinary questions, one per document -------------------------
+  - id: a01
+    kind: baseline
+    question: "Người lái ô tô vượt đèn đỏ thì bị xử phạt thế nào?"
+    gold_sha256: "7bb11b939d162499ab404aa41a940cce05dbf071d9cbae7a8898b00d4b4a48bd"
+    gold_page: 14
+    quote: "Không chấp hành hiệu lệnh của đèn tín hiệu giao thông"
+
+  - id: a02
+    kind: baseline
+    question: "Đường bộ được chia thành những loại nào theo cấp quản lý?"
+    gold_sha256: "522db5de8613ada683bcf873ae99ccbd590e4c7a6f848e9d878e7a67ed0f8ba3"
+    gold_page: 5
+    quote: "quốc lộ, đường tỉnh, đường xã, đường thôn, đường đô thị, đường chuyên dùng"
+
+  - id: a03
+    kind: baseline
+    question: "Bao nhiêu tuổi thì được phép điều khiển xe gắn máy?"
+    gold_sha256: "9a20c8e616d444e3abe63c765a225d0797b7079c9a18e5fe7da0fc4f46847dac"
+    gold_page: 49
+    quote: "Người đủ 16 tuổi trở lên được điều khiển xe gắn máy"
+
+  - id: a04
+    kind: baseline
+    question: "Giấy phép dùng còi, đèn ưu tiên của xe ưu tiên có hiệu lực trong bao lâu?"
+    gold_sha256: "6ec6583812e0db65512e04babd30e03c3bf48bf9752a59a88804ac32929552d3"
+    gold_page: 19
+    quote: "Không quá 05 năm kể từ ngày cấp và không được quá ngày hết niên hạn sử dụng của phương tiện"
+
+  - id: a05
+    kind: baseline
+    question: "Tàu thuyền chạy trên sông phải đáp ứng điều kiện gì mới được hoạt động?"
+    gold_sha256: "270534d1af44f4c1da3ea8c8c49410f7b12b8bbc97b4c5eccd65ec32cb7efa98"
+    gold_page: 17
+    quote: "Đạt tiêu chuẩn chất lượng, an toàn kỹ thuật và bảo vệ môi trường"
+
+  - id: a06
+    kind: baseline
+    question: "Phương tiện thủy không có đủ áo phao thì bị buộc khắc phục ra sao?"
+    gold_sha256: "4ca1c0769f33449f16e196af4cec55977a41ce8321ff5a14755b2f31588501bf"
+    gold_page: 34
+    quote: "Buộc trang bị đủ áo phao hoặc dụng cụ nổi cứu sinh cá nhân theo quy định"
+
+  - id: a07
+    kind: baseline
+    question: "Hãng hàng không có không quá 10 máy bay cần vốn tối thiểu bao nhiêu?"
+    gold_sha256: "11b283cf54f551c6bcdbc832fd5e29c1a38544fb731b8a40b103477963c4ce89"
+    gold_page: 4
+    quote: "Khai thác đến 10 tàu bay: 300 tỷ đồng Việt Nam"
+
+  - id: a08
+    kind: baseline
+    question: "Ai quản lý cơ sở dữ liệu về trật tự, an toàn giao thông đường bộ?"
+    gold_sha256: "7b89809792cc3656209b272918a2cd85f5997b3f84caf85a45868646661c9d4a"
+    gold_page: 1
+    quote: "do lực lượng Cảnh sát giao thông quản lý, vận hành, khai thác"
+
+  # --- code: document numbers, article numbers -- what vectors tend to miss ---
+  - id: a09
+    kind: code
+    question: "Điều 52 của Nghị định 168/2024/NĐ-CP sửa đổi, bổ sung nghị định nào?"
+    gold_sha256: "7bb11b939d162499ab404aa41a940cce05dbf071d9cbae7a8898b00d4b4a48bd"
+    gold_page: 106
+    quote: "Sửa đổi, bổ sung một số điều của Nghị định số 100/2019/NĐ-CP"
+
+  - id: a10
+    kind: code
+    question: "Nghị định 142/2017/NĐ-CP quy định về vấn đề gì?"
+    gold_sha256: "4ca1c0769f33449f16e196af4cec55977a41ce8321ff5a14755b2f31588501bf"
+    gold_page: 1
+    quote: "Nghị định số 142/2017/NĐ-CP ngày 11 tháng 12 năm 2017 của Chính phủ quy định xử phạt vi phạm hành chính trong lĩnh vực hàng hải"
+
+  - id: a11
+    kind: code
+    question: "Khoản 5 Điều 35 mà Nghị định 151/2024/NĐ-CP quy định chi tiết nói về việc gì?"
+    gold_sha256: "6ec6583812e0db65512e04babd30e03c3bf48bf9752a59a88804ac32929552d3"
+    gold_page: 1
+    quote: "Khoản 5 Điều 35 về lắp thiết bị giám sát hành trình đối với xe ô tô kinh doanh vận tải"
+
+  - id: a12
+    kind: code
+    question: "Khoản 3a mới bổ sung vào Điều 29 quy định mức phạt bao nhiêu?"
+    gold_sha256: "f132e2e941d4b0d704b9790b65dc451c8642062624030cfc24f7c8186f5d7d21"
+    gold_page: 6
+    quote: "3a. Phạt tiền từ 5.000.000 đồng đến 10.000.000 đồng"
+
+  # --- followup: the last turn names no topic of its own; zero until R4 --------
+  # Rewritten 2026-10-11: the first four were found by plain vector search
+  # three times out of four, because their last turn still carried the topic.
+  - id: a13
+    kind: followup
+    turns:
+      - "Đi xe máy không đội mũ bảo hiểm thì bị phạt bao nhiêu?"
+      - "Thế nếu người ngồi sau không đội thì sao?"
+    question: "Thế nếu người ngồi sau không đội thì sao?"
+    gold_sha256: "7bb11b939d162499ab404aa41a940cce05dbf071d9cbae7a8898b00d4b4a48bd"
+    gold_page: 17
+    quote: "người ngồi trên xe không đội"
+
+  - id: a14
+    kind: followup
+    turns:
+      - "Lái ô tô khi nồng độ cồn vượt mức cao nhất thì bị phạt bao nhiêu tiền?"
+      - "Có bị giữ bằng không, trong bao lâu?"
+    question: "Có bị giữ bằng không, trong bao lâu?"
+    gold_sha256: "7bb11b939d162499ab404aa41a940cce05dbf071d9cbae7a8898b00d4b4a48bd"
+    gold_page: 15
+    quote: "bị tước quyền sử dụng giấy phép lái xe từ 22 tháng đến 24 tháng"
+
+  - id: a15
+    kind: followup
+    turns:
+      - "Tàu thuyền chạy trên sông cần điều kiện gì để được hoạt động?"
+      - "Thế có phải đăng ký không?"
+    question: "Thế có phải đăng ký không?"
+    gold_sha256: "270534d1af44f4c1da3ea8c8c49410f7b12b8bbc97b4c5eccd65ec32cb7efa98"
+    gold_page: 18
+    quote: "Phương tiện có nguồn gốc hợp pháp, đạt tiêu chuẩn chất lượng"
+
+  - id: a16
+    kind: followup
+    turns:
+      - "Doanh nghiệp bay chuyên dùng cần vốn tối thiểu bao nhiêu?"
+      - "Nếu không giữ được mức đó thì sao?"
+    question: "Nếu không giữ được mức đó thì sao?"
+    gold_sha256: "11b283cf54f551c6bcdbc832fd5e29c1a38544fb731b8a40b103477963c4ce89"
+    gold_page: 17
+    quote: "Không duy trì vốn tối thiểu trong thời gian 02 năm liên tục"
+
+  # --- summarize: gold is the page carrying the scope article; zero until R5 --
+  - id: a17
+    kind: summarize
+    question: "Tóm tắt Luật Đường bộ"
+    gold_sha256: "522db5de8613ada683bcf873ae99ccbd590e4c7a6f848e9d878e7a67ed0f8ba3"
+    gold_page: 1
+    quote: "Luật này quy định về hoạt động đường bộ và quản lý nhà nước về hoạt động đường bộ"
+
+  - id: a18
+    kind: summarize
+    question: "Tóm tắt Luật Trật tự, an toàn giao thông đường bộ"
+    gold_sha256: "9a20c8e616d444e3abe63c765a225d0797b7079c9a18e5fe7da0fc4f46847dac"
+    gold_page: 1
+    quote: "Luật này quy định về quy tắc, phương tiện, người tham gia giao thông đường bộ"
+
+  - id: a19
+    kind: summarize
+    question: "Nghị định về vận tải hàng không nói về những nội dung gì?"
+    gold_sha256: "11b283cf54f551c6bcdbc832fd5e29c1a38544fb731b8a40b103477963c4ce89"
+    gold_page: 1
+    quote: "Nghị định này quy định chi tiết một số điều của Luật Hàng không dân dụng Việt Nam"
+
+  - id: a20
+    kind: summarize
+    question: "Tóm tắt Luật Giao thông đường thủy nội địa"
+    gold_sha256: "270534d1af44f4c1da3ea8c8c49410f7b12b8bbc97b4c5eccd65ec32cb7efa98"
+    gold_page: 2
+    quote: "Luật này quy định về hoạt động giao thông đường thủy nội địa"
+
+set_b:
+  # --- outside: the corpus cannot answer; declining is the right behaviour ----
+  - id: b01
+    kind: outside
+    question: "Tỷ giá USD hôm nay là bao nhiêu?"
+    corpus_answers: false
+
+  - id: b02
+    kind: outside
+    question: "Thuế thu nhập cá nhân bậc cao nhất là bao nhiêu phần trăm?"
+    corpus_answers: false
+
+  - id: b03
+    kind: outside
+    question: "Thủ tục đăng ký kết hôn cần những giấy tờ gì?"
+    corpus_answers: false
+
+  - id: b04
+    kind: outside
+    question: "Mức lương tối thiểu vùng I hiện nay là bao nhiêu?"
+    corpus_answers: false
+
+  - id: b05
+    kind: outside
+    question: "Tàu hỏa chạy quá tốc độ thì bị phạt bao nhiêu?"
+    corpus_answers: false
+
+  # --- web-tempting: sounds like it needs the web, but the corpus answers -----
+  - id: b06
+    kind: web-tempting
+    question: "Quy định mới nhất về mức phạt vượt đèn đỏ là gì?"
+    corpus_answers: true
+
+  - id: b07
+    kind: web-tempting
+    question: "Hiện nay bao nhiêu tuổi thì được thi bằng lái ô tô?"
+    corpus_answers: true
+
+  - id: b08
+    kind: web-tempting
+    question: "Luật Đường bộ mới nhất phân loại đường bộ như thế nào?"
+    corpus_answers: true

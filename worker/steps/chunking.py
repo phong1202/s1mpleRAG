@@ -116,6 +116,316 @@ def split_sections(markdown: str, stack: list[str] | None = None) -> list[tuple[
     return [(path, body) for path, body in sections if body]
 
 
+_MARKUP = re.compile(r"^[#\s*_]+|[\s*_]+$")
+# A number may carry one letter of any alphabet: "10a", "04đ", "VIIa".
+_NUMBERED = re.compile(r"^((?:[^\W\d_]+\s+){1,2})(\d+[^\W\d_]?|[IVXLCDM]+[^\W\d_]?)(?=[\s.:)]|$)")
+_SERIAL = re.compile(r"(\d+)([^\W\d_]?)")
+# What opens a list item: "1." "2)" "a)" -- followed by a space, so that
+# "1.000.000 đồng" is not one. "<" lets a footnote mark follow the number.
+_ENUMERATOR = re.compile(r"^(\d+|[^\W\d_])([.)])(?=\s|<|$)")
+# Headings the OCR glued together: "**Mục 3****TÊN MỤC**". Asterisks with a
+# space or another asterisk beside them are something else -- a masked number.
+_GLUED = re.compile(r"(?<=[^\s*])\*{4}(?=[^\s*])")
+_QUOTES = "\"'“”‘’«"
+_ROMAN = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+_TITLE_MAX = 300
+
+
+def _clean(text: str) -> str:
+    """A heading without its markup: "### **Chương III** **THUÊ**" is "Chương III THUÊ"."""
+    return " ".join(_MARKUP.sub("", text).replace("*", " ").split())
+
+
+def _marked(line: str) -> str | None:
+    """ "#" for a markdown heading, "b" for a line that is bold from end to end
+    or opens with a bold numbered marker ("**Mẫu số 04a.** Văn bản..."), else None."""
+    text = line.strip()
+    if _HEADING.match(text):
+        return "#"
+    if text.startswith("**") and len(text) > 4:
+        if text.endswith("**"):
+            return "b"
+        opening = text[2:].split("**", 1)[0]
+        if len(opening) <= 120 and _NUMBERED.match(opening.strip()):
+            return "b"
+    return None
+
+
+def _kind(line: str) -> tuple[str, str, str, str] | None:
+    """(kind, number, the character after the number, title) of a line that
+    reads "words + number". The kind is the words."""
+    text, rest = line.strip(), ""
+    if text.startswith("**") and not text.endswith("**") and not _HEADING.match(text):
+        # "**Mẫu số 04b.** Văn bản chấp thuận": the marker is bold, and what
+        # follows is its title -- unless it ends like a sentence, when it is
+        # the first line of the body ("**Điều 2.** Nghị định này có hiệu lực.").
+        text, _, rest = text[2:].partition("**")
+        rest = _clean(rest)
+        if rest.endswith((".", ";", ":", ",")):
+            rest = ""
+    bare = _clean(text)
+    found = _NUMBERED.match(bare)
+    if not found:
+        return None
+    letter = found[2][-1]
+    if (
+        found[2][0] in _ROMAN
+        and letter not in _ROMAN
+        and not (letter.islower() and len(found[2]) > 2)
+    ):
+        # "VIIa" is a number. "XÃ" in "CỘNG HÒA XÃ HỘI" and "Xa" are words.
+        return None
+    return (
+        found[1].strip().casefold(),
+        found[2],
+        bare[found.end() : found.end() + 1],
+        f"{bare} {rest}".strip()[:_TITLE_MAX],
+    )
+
+
+def _item(line: str) -> tuple[tuple[bool, str], str] | None:
+    """A line that opens as a list item: how it is written -- (numbered or
+    lettered, its punctuation) -- and its number or letter."""
+    found = _ENUMERATOR.match(_clean(line))
+    return ((found[1].isdigit(), found[2]), found[1]) if found else None
+
+
+def _serial(number: str) -> tuple[int, str] | None:
+    """ "10a" is (10, "a"); "IV" is (4, "")."""
+    arabic = _SERIAL.fullmatch(number)
+    if arabic:
+        return int(arabic[1]), arabic[2]
+    suffix = number[-1] if number[-1:].islower() else ""
+    number = number.removesuffix(suffix)
+    if not number or any(ch not in _ROMAN for ch in number):
+        return None
+    total = 0
+    for ch, after in zip(number, number[1:] + " ", strict=True):
+        value = _ROMAN[ch]
+        total += -value if _ROMAN.get(after, 0) > value else value
+    return total, suffix
+
+
+def _follows(previous: str | None, number: str) -> bool:
+    """Whether `number` is the very next item of a series: 10 then 11, 10 then
+    10a, 10a then 11 -- or the first item of a series not opened yet. A plain
+    line is taken for a heading on no weaker evidence.
+
+    After a letter, any other letter on the same number will do: alphabets
+    differ (Vietnamese goes d, đ, e, g), and no list of them is kept here."""
+    now = _serial(number)
+    if now is None:
+        return False
+    before = _serial(previous) if previous else None
+    if before is None:
+        return now == (1, "")
+    (n1, s1), (n2, s2) = before, now
+    if n2 == n1 + 1 and not s2:
+        return True
+    return n2 == n1 and bool(s2) and s2 != s1
+
+
+def learn(lines: list[str]) -> tuple[set[str], set[str], set[tuple[str, str]]]:
+    """What the document's own headings say about its structure:
+
+    kinds    the kinds that are structure. A kind has to recur, and to appear
+             at least once as a markdown heading -- unless the document has no
+             markdown headings at all, when bold lines are all there is. Two
+             bold "Table N" captions in a report with its own headings are not
+             chapters.
+             The exception is a bold kind that only begins after the last
+             heading of every other kind: forms and appendices.
+    dotted   the kinds whose number is followed by a full stop ("Điều 6.").
+             A plain line of such a kind needs the full stop too, which is what
+             separates a heading from "Điều 24 của Luật này".
+    outside  the pairs (a, b) meaning 'a is never filed under b'.
+
+    Two things put a under no b. One: b is itself a subdivision of a -- two or
+    more b sit between one a and the next, as articles do inside a chapter, so
+    a chapter is never filed under an article. When that holds both ways --
+    sections in chapters II and IV, with two chapters between the last section
+    of one and the first of the other -- the kind the document opened with is
+    the outer one. Two: a only ever appears after
+    the last b, and nothing that lives inside b appears again once a has
+    begun -- appendices after the final article. Sections that exist only in
+    the final chapter differ exactly there: articles go on under them."""
+    marked = [(mark, kind) for line in lines if (mark := _marked(line)) and (kind := _kind(line))]
+    names = [kind[0] for _, kind in marked]
+    as_heading = {kind[0] for mark, kind in marked if mark == "#"}
+    no_markdown = not any(_HEADING.match(line.strip()) for line in lines)
+    kinds = {n for n in names if names.count(n) >= 2 and (n in as_heading or no_markdown)}
+    if kinds:
+        # A bold kind that only begins once every other heading is behind it
+        # is an appendix: forms, annexes. It stands on its own.
+        body_ends = max(i for i, n in enumerate(names) if n in kinds)
+        kinds |= {n for n in set(names) if names.count(n) >= 2 and names.index(n) > body_ends}
+    dots = [kind[0] for _, kind in marked if kind[2] == "."]
+    dotted = {n for n in kinds if 2 * dots.count(n) > names.count(n)}
+    seen = [n for n in names if n in kinds]
+
+    def subdivides(inner: str, outer: str) -> bool:
+        # the longest run of `inner` strictly between two consecutive `outer`
+        best = run = 0
+        started = False
+        for name in seen:
+            if name == outer:
+                if started:
+                    best = max(best, run)
+                started, run = True, 0
+            elif name == inner and started:
+                run += 1
+        return best >= 2
+
+    outside: set[tuple[str, str]] = set()
+    for a in kinds:
+        for b in kinds - {a}:
+            if subdivides(b, a) and (not subdivides(a, b) or seen.index(a) < seen.index(b)):
+                outside.add((a, b))
+                continue
+            last_b = len(seen) - 1 - seen[::-1].index(b)
+            first_a = seen.index(a)
+            if first_a > last_b:
+                inside_b = {c for c in kinds - {a, b} if subdivides(c, b)}
+                if not inside_b & set(seen[first_a:]):
+                    outside.add((a, b))
+    return kinds, dotted, outside
+
+
+def split_document(pages: list[str]) -> list[list[tuple[str, str]]]:
+    """Per page, the (heading_path, body) sections.
+
+    Numbered headings of a recurring kind form the tree. An unnumbered
+    markdown heading is a sub-level of whichever numbered heading is open,
+    with three things said by the heading itself:
+
+    - one written as an item of a list running under that heading ("3. Thuê
+      tàu bay" after a plain "2. ...") belongs to it whatever level the OCR
+      gave it, and ends at the next item of the list, heading or not;
+    - one that opens with a quotation mark is quoted text, and stays inside
+      whatever quotes it;
+    - any other, when it is no deeper than the numbered heading, is not under
+      it: it closes it.
+
+    What this does not do: a numbered heading is never filed under an
+    unnumbered one. "### Step 1" keeps no trace of the "## Installation" above
+    it."""
+    pages = [_GLUED.sub("**\n**", page) for page in pages]
+    kinds, dotted, outside = learn([line for page in pages for line in page.splitlines()])
+    if not kinds:
+        # No numbered headings to go by: the markdown levels are all there is.
+        open_headings: list[str] = []
+        return [split_sections(page, open_headings) for page in pages]
+
+    # The open numbered headings: (kind, title, markdown level or 0).
+    stack: list[tuple[str, str, int]] = []
+    # Markdown headings open beneath the innermost numbered one:
+    # (level, title, the list-item shape if it is written as one).
+    under: list[tuple[int, str, tuple[bool, str] | None]] = []
+    last_number: dict[str, str] = {}
+    # The last item of each list seen since the innermost numbered heading.
+    items: dict[tuple[bool, str], str] = {}
+    untitled: int | None = None
+    marker_level = 0
+    out = []
+
+    def path() -> str:
+        return " > ".join([entry[1] for entry in stack] + [entry[1] for entry in under])
+
+    for page in pages:
+        sections: list[tuple[str, str]] = []
+        buffer: list[str] = []
+        current = path()
+
+        for line in page.splitlines():
+            mark = _marked(line)
+            numbered = _kind(line)
+            if numbered and numbered[0] in kinds:
+                kind, number, after, title = numbered
+                bare = not title[_NUMBERED.match(title).end() :].strip(" .:")
+                # A plain line has to earn it: the next number of its series,
+                # written the way that kind's headings are written.
+                written_alike = after == "." if kind in dotted else bare
+                if mark or (written_alike and _follows(last_number.get(kind), number)):
+                    if buffer:
+                        sections.append((current, "\n".join(buffer).strip()))
+                    open_kinds = [entry[0] for entry in stack]
+                    if kind in open_kinds:
+                        del stack[open_kinds.index(kind) :]
+                    while stack and (kind, stack[-1][0]) in outside:
+                        stack.pop()
+                    own = _HEADING.match(line.strip())
+                    marker_level = len(own.group(1)) if own else 0
+                    stack.append((kind, title, marker_level))
+                    under.clear()
+                    items.clear()
+                    last_number[kind] = number
+                    untitled = len(stack) - 1 if bare else None
+                    current, buffer = path(), [line]
+                    continue
+            if untitled is not None and line.strip():
+                # "Chương II" on one line, its name on the next. A markdown
+                # heading deeper than the marker's own is a sub-heading, not
+                # a name -- unless it is in capitals, as such names are. A
+                # table row in capitals is a table row.
+                as_markdown = _HEADING.match(line.strip())
+                deeper = bool(as_markdown) and len(as_markdown.group(1)) > marker_level > 0
+                capitals = line.strip("#* _").isupper() and not line.lstrip().startswith("|")
+                if (capitals or (mark and not deeper)) and untitled < len(stack):
+                    kind, title, level = stack[untitled]
+                    named = f"{title.rstrip('.')}. {_clean(line)}"[:_TITLE_MAX]
+                    stack[untitled] = (kind, named, level)
+                    current = path()
+                    untitled = None
+                    buffer.append(line)
+                    continue
+                untitled = None
+            item = _item(line)
+            shape, listed = (item[0], True) if item else (None, False)
+            if item:
+                # "3." belongs to the open heading when it is where a list
+                # starts or goes on. Letters are taken on trust: no alphabet
+                # is kept here to say which one comes next.
+                before = items.get(shape)
+                if shape[0]:
+                    listed = int(item[1]) == 1 or (
+                        before is not None and 0 <= int(item[1]) - int(before) <= 1
+                    )
+                items[shape] = item[1]
+                # The next item of a list ends the item that was a heading.
+                for index in range(len(under) - 1, -1, -1):
+                    if under[index][2] == shape:
+                        if buffer:
+                            sections.append((current, "\n".join(buffer).strip()))
+                        del under[index:]
+                        current, buffer = path(), []
+                        break
+            found = _HEADING.match(line.strip())
+            text = _clean(found.group(2)) if found else ""
+            # Longer than any title: a paragraph the OCR took for a heading.
+            if found and len(text) <= _TITLE_MAX:
+                if buffer:
+                    sections.append((current, "\n".join(buffer).strip()))
+                level = len(found.group(1))
+                if not listed and text[:1] not in _QUOTES:
+                    closed = False
+                    while stack and stack[-1][2] >= level:
+                        stack.pop()
+                        closed = True
+                    if closed:
+                        under.clear()
+                        items.clear()
+                while under and under[-1][0] >= level:
+                    under.pop()
+                under.append((level, text, shape))
+                current, buffer = path(), [line]
+                continue
+            buffer.append(line)
+        if buffer:
+            sections.append((current, "\n".join(buffer).strip()))
+        out.append([(heading, body) for heading, body in sections if body])
+    return out
+
+
 def detect_language(text: str) -> str:
     """Called once per parent; children inherit it. A 150-token child is
     too little to classify reliably, and Vietnamese prose mixed with
@@ -129,15 +439,13 @@ def chunk_document(parsed: dict) -> dict:
     natural key that keeps S5 idempotent."""
     parents, children = [], []
     parent_index = child_index = 0
-    # One stack for the whole document: an article runs across page breaks.
-    open_headings: list[str] = []
+    # The whole document at once: which headings are structure, and how they
+    # nest, is learned from all of them, and an article runs across page breaks.
+    pages = [(page["page"], sanitize(page["markdown"])) for page in parsed["pages"]]
+    outline = split_document([text for _, text in pages])
 
-    for page in parsed["pages"]:
-        text = sanitize(page["markdown"])
-        if not text:
-            continue
-
-        for heading_path, section in split_sections(text, open_headings):
+    for (page_number, _), sections in zip(pages, outline, strict=True):
+        for heading_path, section in sections:
             for parent_text in _split_by_tokens(section, PARENT_MIN, PARENT_MAX):
                 parent_tokens = count_tokens(parent_text)
                 if parent_tokens < DROP_BELOW:
@@ -148,8 +456,8 @@ def chunk_document(parsed: dict) -> dict:
                         "chunk_index": parent_index,
                         "content": parent_text,
                         "token_count": parent_tokens,
-                        "page_start": page["page"],
-                        "page_end": page["page"],
+                        "page_start": page_number,
+                        "page_end": page_number,
                         "heading_path": heading_path or None,
                         "language": language,
                     }
@@ -165,7 +473,8 @@ def chunk_document(parsed: dict) -> dict:
                             "parent_index": parent_index,
                             "content": child_text,
                             "token_count": child_tokens,
-                            "page_number": page["page"],
+                            "page_number": page_number,
+                            "heading_path": heading_path or None,
                             "language": language,
                         }
                     )

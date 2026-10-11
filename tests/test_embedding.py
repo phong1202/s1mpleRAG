@@ -175,3 +175,23 @@ def test_embed_reports_its_progress_batch_by_batch():
     )
 
     assert reported == [(0, 25), (10, 25), (20, 25), (25, 25)]
+
+
+def test_the_embedded_text_opens_with_the_document_and_the_heading():
+    """Three articles of one decree share a clause word for word. What tells
+    their vectors apart has to be in the text that is embedded."""
+    text = contextualize(
+        "Mức phạt 18 đến 20 triệu.",
+        "b) Không chấp hành hiệu lệnh của đèn tín hiệu giao thông;",
+        title="Nghị định 168/2024/NĐ-CP",
+        heading="Điều 6. Xử phạt người điều khiển xe ô tô",
+    )
+
+    assert text.splitlines()[0] == (
+        "Nghị định 168/2024/NĐ-CP > Điều 6. Xử phạt người điều khiển xe ô tô"
+    )
+    assert text.endswith("b) Không chấp hành hiệu lệnh của đèn tín hiệu giao thông;")
+
+
+def test_a_chunk_with_no_title_and_no_heading_is_embedded_as_before():
+    assert contextualize("ctx", "noi dung") == "ctx\n\nnoi dung"

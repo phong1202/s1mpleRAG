@@ -399,10 +399,48 @@ leaders) as a loop and retries — capped at 2 retries here, against its default
 
 1. **Sanitize:** repair broken table pipes, collapse blank runs, strip repeated headers/footers.
    **Fenced code blocks are skipped entirely** — pipe-repair regex corrupts them.
-2. **Parent chunks:** 500–1000 tokens, split on markdown headings first, then paragraphs.
-3. **Child chunks:** 100–200 tokens within each parent, carrying `parent_index` and `page_number`.
-4. **Drop empties:** chunks under 20 tokens, or pure boilerplate — *before* anything bills per token.
-5. Assign deterministic `chunk_index` in document order. This is what makes S5 idempotent.
+2. **Outline:** the document's headings give every chunk a `heading_path`. The markdown level a
+   parser put on a heading is **not** used as its depth: in one OCR'd decree the same kind of line
+   ("Điều N.") arrived as h2, h3, h4, bold and plain text, and 29 of its 54 articles were not `#`
+   headings at all. Instead, from the document itself and with no list of keywords:
+   - a heading is a markdown heading, a line bold from end to end, or a line that opens with a bold
+     numbered marker;
+   - one that reads "words + number" ("Điều 6.", "Chương II", "Article 3") has a *kind*, the words.
+     A kind is structure when it recurs and appears at least once as a markdown heading (or the
+     document has no markdown headings at all): two bold "Table N" captions are not chapters;
+   - a plain line is accepted only as the very next item of a known series (10 → 11, 10 → 10a), written
+     the way that kind's headings are written ("Điều 24 của Luật này." has no full stop after 24);
+   - a heading closes the open heading of its own kind and everything inside it. Kind A is never
+     filed under kind B when B is a subdivision of A (two or more B sit between consecutive A), nor
+     when A only begins after the last B and nothing that lives inside B appears again. When two
+     kinds each look like a subdivision of the other, the one the document opened with is the outer;
+   - a number may end in one letter of any alphabet ("10a", "04đ", "VIIa");
+   - an unnumbered markdown heading is a sub-level of whichever numbered heading is open, unless it
+     is no deeper than that heading, when it closes it. Two exceptions, both read off the heading
+     itself: one written as an item of a list running under the numbered heading ("3. …" after a
+     plain "2. …") belongs to it whatever level the OCR gave it, and ends at the next item of that
+     list; one that opens with a quotation mark is quoted text and stays inside.
+
+   A document with no numbered headings falls back to its markdown levels. A bold kind that only begins
+   after the last heading of every other kind is an appendix (forms, annexes) and stands on its own.
+   Known limits:
+   - an appendix with no numbered heading stays under the final article (two in the corpus), and a
+     numbered appendix that is marked as a heading only once is filed under the form before it;
+   - a document's first chapter heading, if the parser lost it, leaves the articles before the second
+     chapter without a chapter;
+   - a numbered heading is never filed under an unnumbered one: "### Step 1" keeps no trace of the
+     "## Installation" above it;
+   - the appendix rule cannot tell forms from two bold "Table N" captions inside a document's last
+     numbered section: those captions become top-level headings;
+   - a numbered heading the parser marked with `#` is accepted without checking its number, so an
+     article quoted in a footnote as a heading is taken for one (two chunks in the corpus);
+   - lines inside a fenced code block are read like any other: a `# comment` is a heading.
+3. **Parent chunks:** 500–1000 tokens, split at the outline's headings first, then by tokens.
+4. **Child chunks:** 100–200 tokens within each parent, carrying `parent_index`, `page_number` and
+   the parent's `heading_path`.
+5. **Drop empties:** chunks under 20 tokens, or pure boilerplate — *before* anything bills per token.
+6. Assign deterministic `chunk_index` in document order. This is what makes S5 idempotent.
+7. Write the document's title into `chunks.json`, once, for S4 and S5 to read (see S4).
 
 Pure CPU, no network, no external calls. The one stage where a full re-run costs milliseconds.
 
@@ -417,6 +455,10 @@ Pure CPU, no network, no external calls. The one stage where a full re-run costs
 Two LLM concerns, one stage, because they share a quota and a failure mode.
 
 **Hard metadata** — filename, page number, created_at. Free, no LLM.
+
+Each chunk is sent with its `heading_path`, and the context sentence must say what or whom the
+chunk applies to when only the heading does. A clause in the middle of an article rarely names its
+subject; written from the chunk alone, the sentence could not either.
 
 **Soft metadata + context** — batched `gpt-6-luna` calls, **20 child chunks per request**, using
 structured output keyed by chunk id:
@@ -444,7 +486,12 @@ retrieval slightly; a dead-lettered document helps nobody.
 
 **In:** `enriched.json`  **Out:** `staging/{doc_id}/embeddings.npy` + manifest
 
-1. Batch **100 texts per request** to `text-embedding-3-large`, `dimensions=1536`.
+1. Batch **100 texts per request** to `text-embedding-3-large`, `dimensions=1536`. The text embedded
+   for a chunk is `title > heading_path`, then the S3 context sentence, then the content — and S5
+   stores exactly that text as `contextualized`. The first line is what separates two provisions
+   that read the same word for word (a fine for cars and the same clause for motorbikes).
+   The keyword index does not share this yet: `child_chunks.tsv` is generated from `content` alone,
+   so a keyword search still cannot see an article's title. That belongs to the R2 plan.
 2. **L2-normalize every vector.** Non-negotiable — `vector_ip_ops` assumes it.
 3. Assert returned count == input count; assert every vector is 1536-dim and finite.
 4. Write `.npy` (float32) plus a JSON manifest mapping row index → `chunk_index`.
@@ -834,10 +881,13 @@ The system splits cleanly at the write/read boundary, and the two phases ship in
 Everything in §§3–9, 11–14 of this document. Ends with real embeddings in `parent_chunks` and
 `child_chunks`, verified by a similarity query.
 
-### Phase 2 — Retrieval (deferred)
+### Phase 2 — Retrieval
 
-Everything in §10: `app/core/` (`retriever.py`, `context_builder.py`, `generator.py`),
-`POST /query`, `query_controller.py`, `query_service.py`, and the `DISTINCT ON` retrieval SQL.
+Everything in §10: `app/core/`, `POST /query`, `query_controller.py`, `query_service.py`, and the
+retrieval SQL. Its design has since grown into a document of its own,
+[`retrieval-design.md`](retrieval-design.md), which supersedes §10 where the two differ; the first
+stage (R0, basic RAG) is built on the `phase-2` branch, and the plan is
+[`plans/phase-2-r0-r1.en.md`](plans/phase-2-r0-r1.en.md).
 
 **Nothing from Phase 2 is stubbed during Phase 1** — no empty `app/core/` directory, no placeholder
 router. It arrives whole, or not at all.

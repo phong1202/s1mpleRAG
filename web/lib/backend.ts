@@ -1,4 +1,4 @@
-import type { DocumentSummary } from '@/lib/types'
+import type { DocumentSummary, QueryAnswer } from '@/lib/types'
 
 // Every backend call goes through the `/backend/*` rewrite in next.config.mjs,
 // so the browser never needs the API's address or a CORS grant from it. The
@@ -12,6 +12,10 @@ const BASE = '/backend'
 export const MAX_FILE_MB = 50
 export const ACCEPT = '.pdf'
 
+// Mirrors QueryRequest.question on the backend (app/schemas/query.py), which
+// is again the one that enforces it.
+export const MAX_QUESTION_CHARS = 2000
+
 export type ErrorKey =
   | 'unsupported_type'
   | 'file_too_large'
@@ -20,13 +24,17 @@ export type ErrorKey =
   | 'storage_rejected'
   | 'storage_unavailable'
   | 'document_not_found'
+  | 'question_invalid'
+  | 'query_failed'
 
 // `key` picks a translated message when there is one; `message` is the
-// backend's own text, shown when there is not.
+// backend's own text, shown when there is not. `requestId` is the backend's
+// X-Request-ID, the handle for finding the failure in its logs.
 export class BackendError extends Error {
   constructor(
     readonly key: ErrorKey | null,
     message: string,
+    readonly requestId: string | null = null,
   ) {
     super(message)
   }
@@ -51,7 +59,22 @@ const BYTES_KEY_BY_STATUS: Record<number, ErrorKey> = {
   503: 'backend_unavailable',
 }
 
-async function call<T>(path: string, init?: RequestInit): Promise<T> {
+function documentKey(status: number): ErrorKey | null {
+  return KEY_BY_STATUS[status] ?? null
+}
+
+// Anything /query refuses that is not the question's own fault is one
+// failure to the user: the backend does not tell a provider error from a
+// quota or a rate limit either.
+function queryKey(status: number): ErrorKey {
+  return status === 422 ? 'question_invalid' : 'query_failed'
+}
+
+async function call<T>(
+  path: string,
+  init?: RequestInit,
+  keyFor: (status: number) => ErrorKey | null = documentKey,
+): Promise<T> {
   let res: Response
   try {
     res = await fetch(`${BASE}${path}`, init)
@@ -65,7 +88,9 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   // 500, not the envelope -- that is the only case the parse fails.
   const body = (await res.json().catch(() => null)) as Envelope<T> | null
   if (!body) throw new BackendError('backend_unavailable', `HTTP ${res.status}`)
-  if (!res.ok) throw new BackendError(KEY_BY_STATUS[res.status] ?? null, body.message)
+  if (!res.ok) {
+    throw new BackendError(keyFor(res.status), body.message, res.headers.get('X-Request-ID'))
+  }
   return body.data as T
 }
 
@@ -86,6 +111,12 @@ export async function fetchDocuments(path: string): Promise<DocumentSummary[]> {
 
 export function deleteDocument(id: string) {
   return call<null>(`/documents/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+// One question, one answer: no streaming, and no history sent along -- the
+// backend answers every question on its own.
+export function askQuestion(question: string, signal?: AbortSignal) {
+  return call<QueryAnswer>('/query', { ...json('POST', { question }), signal }, queryKey)
 }
 
 // The PDF's bytes, for the in-page viewer. Relayed by this app's own
