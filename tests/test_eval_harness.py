@@ -148,3 +148,19 @@ def test_scores_are_broken_down_by_kind_of_question():
     rows = [("baseline", 1.0, 1.0), ("baseline", 0.0, 0.0), ("followup", 1.0, 0.5)]
 
     assert by_kind(rows) == {"baseline": (2, 0.5, 0.5), "followup": (1, 1.0, 0.5)}
+
+
+def test_the_result_names_the_stages_that_were_on():
+    from types import SimpleNamespace
+
+    from eval.run import stages_line
+
+    settings = SimpleNamespace(
+        retrieval_bm25_enabled=True,
+        retrieval_rerank_enabled=False,
+        retrieval_intent_enabled=False,
+        retrieval_router_enabled=False,
+        retrieval_reflect_enabled=False,
+    )
+
+    assert stages_line(settings).split()[1:3] == ["bm25=on", "rerank=off"]

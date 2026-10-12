@@ -5,7 +5,7 @@ import pytest
 
 from app.core.contracts import Filters
 from app.repositories.chunk_repository import ChunkRepository
-from tests.helpers import seed_chunks, unit_vector
+from tests.helpers import seed_chunks, seed_texts, unit_vector
 
 pytestmark = pytest.mark.asyncio
 
@@ -124,3 +124,88 @@ async def test_a_document_filter_returns_only_that_documents_chunks(db_session):
 
     assert len(hits) == 12
     assert {hit.document_id for hit in hits} == {wanted.id}
+
+
+def _keywords(session, query: str, over_fetch: int = 10, filters: Filters | None = None):
+    return ChunkRepository(session).keyword_search(
+        query=query, over_fetch=over_fetch, filters=filters or Filters()
+    )
+
+
+async def test_keyword_search_finds_the_chunk_that_quotes_a_code(db_session):
+    """What vectors miss. An embedding files `04/SS-HĐĐT` under "some form
+    code", next to every other form code and near nothing in particular."""
+    await seed_texts(
+        db_session,
+        [
+            "Mẫu số 01/TB-ĐKĐT dùng để thông báo tiếp nhận đăng ký.",
+            "Mẫu số 04/SS-HĐĐT dùng để thông báo hóa đơn điện tử có sai sót.",
+            "Hóa đơn điện tử được lập theo quy định của pháp luật.",
+        ],
+    )
+
+    hits = await _keywords(db_session, "04/SS-HĐĐT")
+
+    assert "04/SS-HĐĐT" in hits[0].child_content
+
+
+async def test_a_question_matches_without_every_word_being_present(db_session):
+    """websearch_to_tsquery joins the words with AND, and a question asked in
+    ordinary words never has all of them in one chunk: on the real corpus 19
+    of the 20 eval questions came back empty."""
+    await seed_texts(
+        db_session,
+        [
+            "Không chấp hành hiệu lệnh của đèn tín hiệu giao thông.",
+            "Điều khiển xe chạy quá tốc độ quy định.",
+        ],
+    )
+
+    hits = await _keywords(db_session, "Người lái ô tô vượt đèn đỏ thì bị xử phạt thế nào?")
+
+    assert [hit.page_number for hit in hits] == [1]
+
+
+async def test_a_question_with_no_searchable_word_finds_nothing(db_session):
+    await seed_texts(db_session, ["Hóa đơn điện tử."])
+
+    assert await _keywords(db_session, "?!...") == []
+
+
+async def test_english_chunks_are_matched_through_english_stemming(db_session):
+    """The tsv of an English chunk is stemmed. A query built with the plain
+    config would look for "vehicle" in an index that holds "vehicl"."""
+    await seed_texts(db_session, ["Inspectors examine the vehicles every year."], language="en")
+
+    hits = await _keywords(db_session, "vehicle examination")
+
+    assert len(hits) == 1
+
+
+async def test_keyword_search_honours_the_document_filter(db_session):
+    first = await seed_texts(db_session, ["hóa đơn điện tử"])
+    await seed_texts(db_session, ["hóa đơn giấy"])
+
+    hits = await _keywords(db_session, "hóa đơn", filters=Filters(document_id=first.id))
+
+    assert [hit.document_id for hit in hits] == [first.id]
+
+
+async def test_keyword_hits_come_best_first_and_stop_at_over_fetch(db_session):
+    await seed_texts(db_session, ["thuế suất", "thuế giá trị gia tăng", "thuế", "phí và lệ phí"])
+
+    hits = await _keywords(db_session, "thuế", over_fetch=2)
+
+    assert len(hits) == 2
+    assert hits[0].score >= hits[1].score
+
+
+async def test_a_code_is_found_only_when_it_is_written_in_full(db_session):
+    """A known limit, pinned so that it is changed on purpose. Postgres reads
+    `04/SS-HĐĐT` as a file path that ends at the first non-ASCII letter and
+    indexes `04/ss-h` and `đđt`; a question that quotes only `SS-HĐĐT` asks
+    for `ss` and `hđđt`, which are not there."""
+    await seed_texts(db_session, ["Mẫu số 04/SS-HĐĐT dùng để thông báo sai sót."])
+
+    assert len(await _keywords(db_session, "04/SS-HĐĐT")) == 1
+    assert await _keywords(db_session, "SS-HĐĐT") == []

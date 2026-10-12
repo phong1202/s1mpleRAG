@@ -1,8 +1,6 @@
 """Builds the stage set from the flags. This is the only place that knows
 which rung of the ladder the deployment is standing on."""
 
-import asyncio
-
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -10,21 +8,25 @@ from app.core.contracts import DocRef
 from app.core.generator import generate as _generate
 from app.core.parent_expander import expand_parents
 from app.core.pipeline import Stages
+from app.core.retrievers.bm25 import BM25Retriever
 from app.core.retrievers.vector import VectorRetriever
-from app.core.stages import noops
+from app.core.stages import fusion, noops
 from app.repositories.chunk_repository import ChunkRepository
 from shared.llm import AsyncLLMProvider
 
 
 def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Settings) -> Stages:
+    hybrid = settings.retrieval_bm25_enabled
     retrievers = [VectorRetriever(session, provider)]
-    # R2 appends BM25Retriever here, R5 BrowseRetriever, R8 WebRetriever.
+    if hybrid:
+        retrievers.append(BM25Retriever(session))
+    # R5 appends BrowseRetriever here, R8 WebRetriever.
 
     async def retrieve(plan, trace):
-        # NOTE for R2: these retrievers share one AsyncSession, and gathering
-        # two that both query the database raises "another operation is in
-        # progress". R0 has a single retriever, so the gather is safe today.
-        results = await asyncio.gather(*(r.search(plan) for r in retrievers))
+        # One after the other, not gathered: the retrievers share one
+        # AsyncSession, and a connection cannot run two statements at once.
+        # The keyword query takes about 10 ms; there is nothing to win.
+        results = [await r.search(plan) for r in retrievers]
         per_source = {r.source: len(x) for r, x in zip(retrievers, results, strict=True)}
         trace.record("retrieve_detail", ms=0, per_source=per_source)
         return [candidate for group in results for candidate in group]
@@ -62,7 +64,10 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
         rewrite=noops.rewrite,
         plan=noops.plan,
         retrieve=retrieve,
-        fuse=noops.fuse,
+        # With one source there is nothing to fuse, and the no-op keeps R1's
+        # scores and order to the last digit: the flag is also the switch the
+        # eval flips to compare the two.
+        fuse=fusion.fuse if hybrid else noops.fuse,
         expand=expand,
         build_context=build_context,
         gate=noops.gate,

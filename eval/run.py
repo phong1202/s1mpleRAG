@@ -115,6 +115,21 @@ def by_kind(rows: list[tuple[str, float, float]]) -> dict[str, tuple[int, float,
     }
 
 
+def stages_line(settings) -> str:
+    """Which rung of the ladder was measured. A recall figure recorded without
+    it cannot be compared with the next one."""
+    flags = {
+        "bm25": settings.retrieval_bm25_enabled,
+        "rerank": settings.retrieval_rerank_enabled,
+        "intent": settings.retrieval_intent_enabled,
+        "router": settings.retrieval_router_enabled,
+        "reflect": settings.retrieval_reflect_enabled,
+    }
+    return "stages           " + " ".join(
+        f"{name}={'on' if enabled else 'off'}" for name, enabled in flags.items()
+    )
+
+
 def _as_query(question: LabelledQuestion):
     """The question as a user would have sent it: the last turn, with the
     turns before it as history. Until R4 reads the history, a follow-up is
@@ -213,6 +228,7 @@ async def _main(full: bool) -> None:
             )
 
     n = len(recalls)
+    print(stages_line(settings))
     print(f"n                {n}")
     print(f"recall@{top_k:<10} {sum(recalls) / n:.3f}")
     print(f"MRR              {sum(ranks) / n:.3f}")

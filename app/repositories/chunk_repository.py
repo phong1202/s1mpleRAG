@@ -1,4 +1,4 @@
-"""R0 retrieval. Read-only: this module never writes.
+"""Retrieval SQL. Read-only: this module never writes.
 
 `search` returns CHILDREN, not parents. The collapse to parents is a separate
 step (app/core/parent_expander.py) that runs after fusion and reranking,
@@ -46,6 +46,48 @@ JOIN   documents d ON d.id = c.document_id
 ORDER  BY c.distance
 """)
 
+# Keyword search, and what Postgres does not give: it has no BM25. ts_rank
+# counts term frequency with no IDF, so a word found in most of the corpus
+# weighs as much as a code found in three chunks. That is tolerable because
+# the fusion reads this list's order, never its scores.
+#
+# The question's words are joined with OR. websearch_to_tsquery joins them
+# with AND, and a question asked in ordinary words never has every one of them
+# in one chunk: measured on the real corpus, 19 of 20 eval questions came back
+# empty that way, and 15 of 20 found their page in the top ten this way.
+#
+# The words come from to_tsvector, so they are normalised exactly as the index
+# was. `tsv` is built with the english config for English chunks and simple
+# for the rest, hence two queries, each matched against the rows built its
+# way. The two OR branches are spelled out so the GIN index serves both.
+#
+# A question with no word in it makes string_agg return NULL: nothing
+# matches, no error. The trailing c.id keeps equal scores in one order.
+_KEYWORD = text("""
+WITH q AS (
+  SELECT (SELECT string_agg(quote_literal(lex), ' | ')::tsquery
+          FROM   unnest(tsvector_to_array(to_tsvector('simple', :q))) AS lex) AS plain,
+         (SELECT string_agg(quote_literal(lex), ' | ')::tsquery
+          FROM   unnest(tsvector_to_array(to_tsvector('english', :q))) AS lex) AS english
+), candidates AS (
+  SELECT c.id, c.parent_id, c.document_id, c.page_number, c.content,
+         -- 1: divide by 1 + log(length), or long chunks win on length alone
+         ts_rank(c.tsv, CASE WHEN c.language = 'en' THEN q.english ELSE q.plain END, 1) AS score
+  FROM   child_chunks c, q
+  WHERE  ((c.language = 'en' AND c.tsv @@ q.english)
+       OR (c.language IS DISTINCT FROM 'en' AND c.tsv @@ q.plain))
+    AND  (CAST(:category AS text) IS NULL OR c.category = CAST(:category AS text))
+    AND  (CAST(:document_id AS uuid) IS NULL OR c.document_id = CAST(:document_id AS uuid))
+  ORDER  BY score DESC, c.id
+  LIMIT  :over_fetch
+)
+SELECT c.id AS child_id, c.parent_id, c.document_id, c.page_number,
+       c.content AS child_content, c.score, d.filename
+FROM   candidates c
+JOIN   documents d ON d.id = c.document_id
+ORDER  BY c.score DESC, c.id
+""")
+
 _PARENTS = text("""
 SELECT id, content, heading_path FROM parent_chunks WHERE id = ANY(CAST(:ids AS uuid[]))
 """)
@@ -59,6 +101,17 @@ class ChildHit:
     page_number: int
     child_content: str
     distance: float
+    filename: str
+
+
+@dataclass(frozen=True)
+class KeywordHit:
+    child_id: uuid.UUID
+    parent_id: uuid.UUID
+    document_id: uuid.UUID
+    page_number: int
+    child_content: str
+    score: float
     filename: str
 
 
@@ -103,6 +156,20 @@ class ChunkRepository:
             },
         )
         return [ChildHit(**row) for row in rows.mappings()]
+
+    async def keyword_search(
+        self, query: str, over_fetch: int, filters: Filters
+    ) -> list[KeywordHit]:
+        rows = await self._session.execute(
+            _KEYWORD,
+            {
+                "q": query,
+                "category": filters.category,
+                "document_id": filters.document_id,
+                "over_fetch": over_fetch,
+            },
+        )
+        return [KeywordHit(**row) for row in rows.mappings()]
 
     async def fetch_parents(self, parent_ids: list[uuid.UUID]) -> dict[uuid.UUID, ParentText]:
         """One statement for the whole set. Fetching per parent inside the
