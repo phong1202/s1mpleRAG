@@ -77,7 +77,7 @@ Cheap deterministic wins first, then LLM decision points in order of increasing 
 |---|---|---|---|---|
 | **R0** | Basic RAG | §10 as written, plus all eight seams | — | Runs end to end |
 | **R1** | Eval + trace | 28 labelled items (§8.4), `query_traces`, `eval.py` | code | **Is the measuring stick** |
-| **R2** | Hybrid search | BM25 beside vectors, RRF, bilingual sub-queries | code | `recall@10` |
+| **R2** | Hybrid search | Keyword search beside vectors, RRF. Bilingual sub-queries moved to R4: they are written by the rewriter (§6.1), an LLM call | code | `recall@10` |
 | **R3** | Reranking | Cross-encoder over the fused candidates | model | `MRR` |
 | **R4** | Intent + rewrite | Multi-turn, standalone questions, intent routing | **LLM** | `recall@10` on follow-ups |
 | **R5** | Tool routing | Router + document-browsing tool | **LLM** | Strategy distribution + browse accuracy |
@@ -238,14 +238,22 @@ other form code and near nothing in particular.
 ### 5.2 Keyword search — and what Postgres actually gives you
 
 ```sql
--- child_chunks.tsv is a GENERATED column (Phase 1, Task 8b)
-SELECT id, parent_id, ts_rank_cd(tsv, query) AS score
-FROM   child_chunks,
-       websearch_to_tsquery(
-           CASE WHEN :language = 'en' THEN 'english'::regconfig
-                ELSE 'simple'::regconfig END, :q) AS query
-WHERE  tsv @@ query
-ORDER  BY score DESC
+-- child_chunks.tsv is a GENERATED column (Phase 1, Task 8b; rebuilt by a0454bfe1fe8)
+WITH words AS (
+  SELECT translate(:q, '/-', '  ') AS text
+), q AS (
+  SELECT (SELECT string_agg(quote_literal(lex), ' | ')::tsquery
+          FROM   unnest(tsvector_to_array(to_tsvector('simple', words.text))) AS lex) AS plain,
+         (SELECT string_agg(quote_literal(lex), ' | ')::tsquery
+          FROM   unnest(tsvector_to_array(to_tsvector('english', words.text))) AS lex) AS english
+  FROM   words
+)
+SELECT c.id, c.parent_id,
+       ts_rank(c.tsv, CASE WHEN c.language = 'en' THEN q.english ELSE q.plain END, 1) AS score
+FROM   child_chunks c, q
+WHERE  (c.language = 'en' AND c.tsv @@ q.english)
+    OR (c.language IS DISTINCT FROM 'en' AND c.tsv @@ q.plain)
+ORDER  BY score DESC, c.id
 LIMIT  :over_fetch;
 ```
 
@@ -257,15 +265,49 @@ This is tolerable here for one specific reason: **RRF reads rank, not score.** A
 still orders reasonably contributes correctly to the fusion. Were the scores being summed, the
 missing IDF would be disqualifying.
 
-`ts_rank_cd` (cover density) over plain `ts_rank` is a deliberate choice for the Vietnamese half of
-the corpus. Vietnamese compounds tokenize into separate lexemes — `hóa đơn` becomes `hóa` + `đơn` —
-so a chunk containing `hóa` and `đơn` forty words apart matches as well as one containing the actual
-phrase. Cover density scores adjacency, which recovers most of that loss for free. It is not a
-Vietnamese dictionary, but it is the difference between usable and noisy.
+**The words of the question are joined with OR.** The first draft of this section used
+`websearch_to_tsquery`, which joins them with AND. Nobody's question has all of its words in one
+chunk: "thì bị xử phạt thế nào" is not in the decree. Measured before R2 was built, keyword search
+alone against the labels of §8.4, on the real corpus (2,982 chunks, gold page within the first ten):
 
-If `recall@10` on Vietnamese exact-match questions is still poor after R2, the escalation is
-`pg_search` (ParadeDB) for real BM25, which costs a custom Postgres image. Do not pay that before the
-eval set says it is needed.
+| Query and ranking | Found | MRR | Questions with no result |
+|---|---|---|---|
+| `websearch_to_tsquery` (AND) + `ts_rank_cd` | 0 / 20 | 0.000 | 19 |
+| OR + `ts_rank_cd` | 9 / 20 | 0.119 | 0 |
+| OR + `ts_rank` | 12 / 20 | 0.334 | 0 |
+| **OR + `ts_rank(…, 1)`**, divided by log length | **15 / 20** | **0.397** | 0 |
+| the same, with title and heading path added to the searched text | 13 / 20 | 0.301 | 0 |
+
+Three things in that table overturn what this section used to say:
+
+- AND is unusable for questions asked in sentences.
+- **`ts_rank` beats `ts_rank_cd`** on this corpus. The argument for cover density (Vietnamese
+  compounds split into syllables, so adjacency should matter) did not survive measurement.
+- Adding the article's title to the keyword index does not help, so the index stays on `content`.
+
+Twenty questions are enough to reject a variant that returns nothing. They are not enough to tune
+on, and nothing here was tuned further.
+
+**What the tokenizer does to codes.** Postgres' parser reads `04/SS-HĐĐT` as a file path that ends at
+the first non-ASCII letter and indexes `04/ss-h` and `đđt`; `168/2024/NĐ-CP` becomes `168/2024/n`,
+`đ-cp`, `đ`, `cp`. A question that wrote the code in full was tokenized the same way and matched; one
+that wrote part of it ("nghị định 168", "SS-HĐĐT") did not. Migration `a0454bfe1fe8` rebuilds `tsv`
+over `translate(content, '/-', '  ')`, and the query applies the same `translate` to the question:
+the code is indexed as `168`, `2024`, `nđ`, `cp`, and any part of it matches. The two expressions
+must change together.
+
+The price is noise. `2024` and `cp` are in a great many chunks, and with no IDF they count as much as
+`168`: of the first ten results for "168/2024", four quote that decree. The eval set cannot weigh the
+trade, because all four of its code questions quote their code in full: keyword search alone scores
+15 / 20 before and after. The change was made for the questions the set does not contain.
+
+The query matches about 70% of the corpus, since any shared word is a match, and ranks all of it:
+7–13 ms at 3,000 chunks, growing linearly. Japanese and Chinese text is not searchable this way at
+all: the `simple` config splits on whitespace.
+
+If `recall@10` on exact-match questions is still poor after R2, the escalation is `pg_search`
+(ParadeDB) for real BM25, which costs a custom Postgres image. Do not pay that before the eval set
+says it is needed.
 
 ### 5.3 Fusion — RRF
 
@@ -645,42 +687,54 @@ stage that might need it.
 **No stage merges without a before/after number from the eval set.** Including when the number says
 the stage did not help — that is a result too, and a reason to delete the node rather than carry it.
 
-### 8.7 The R1 baseline
+### 8.7 Results so far
 
-Measured 2026-10-11 with `python -m eval.run` (retrieval-only), R0 as built: vector search alone, every
-stage flag off.
+Measured 2026-10-11 with `python -m eval.run` (retrieval-only), both rows on the same corpus, one
+after the other.
 
-| Kind | n | `recall@10` | `MRR` |
-|---|---|---|---|
-| **all** | **20** | **0.750** | **0.517** |
-| baseline | 8 | 0.875 | 0.708 |
-| code | 4 | 1.000 | 0.569 |
-| followup | 4 | 0.250 | 0.250 |
-| summarize | 4 | 0.750 | 0.348 |
+| Stage | Kind | n | `recall@10` | `MRR` |
+|---|---|---|---|---|
+| **R1** — vectors alone, every flag off | **all** | **20** | **0.700** | **0.463** |
+| | baseline | 8 | 0.750 | 0.688 |
+| | code | 4 | 0.750 | 0.425 |
+| | followup | 4 | 0.250 | 0.125 |
+| | summarize | 4 | 1.000 | 0.392 |
+| **R2** — `RETRIEVAL_BM25_ENABLED=true` | **all** | **20** | **0.750** | **0.542** |
+| | baseline | 8 | 0.875 | 0.625 |
+| | code | 4 | 1.000 | 0.750 |
+| | followup | 4 | 0.250 | 0.250 |
+| | summarize | 4 | 0.750 | 0.458 |
 
-Missed: `a08`, `a13`, `a14`, `a16`, `a20`.
+Missed at R1: `a06`, `a08`, `a10`, `a13`, `a14`, `a16`. Missed at R2: `a08`, `a13`, `a14`, `a16`, `a18`.
 
-Corpus: 10 documents, 2,982 child chunks, ingested with the outline learned from each document and
-with the title and heading path in the embedded text. Embedding: `text-embedding-3-large`, 1536
+The R2 row was measured twice, before and after the keyword index was rebuilt to split codes (§5.2):
+the same figures and the same misses both times.
+
+Corpus: 10 documents, 2,986 child chunks, ingested with the outline as corrected after the third
+review, title and heading path in the embedded text. Embedding: `text-embedding-3-large`, 1536
 dimensions. All 20 labels machine-checked as reachable.
-
-**The stored corpus is one outline fix behind the code.** A third review, after this measurement,
-found about 260 chunks with a wrong heading path (sections that had lost their chapter in two
-documents, clauses filed under the clause before them) and the outline was corrected. The database
-still holds the chunks as they were measured. The numbers above are the baseline for that corpus;
-after the next re-ingest they have to be measured again before anything is compared with them.
 
 How to read it:
 
+- **R2 does what it was built for, and little else.** The code questions go from three of four to
+  four of four and their MRR from 0.425 to 0.750. Overall the gain is one question: two found that
+  were missed (`a06`, `a10`), one lost (`a18`).
+- **Keyword search alone found more than the fusion kept.** On its own it ranked `a08` fifth and
+  `a13` sixth (§5.2); both are still missed after fusion. A chunk only one source votes for, at rank
+  five or worse, is beaten by the first four of each list and by everything both lists agree on, and
+  the cut to ten comes straight after. Recall beyond that is what the reranker of R3 is for: it
+  chooses from the whole fused set, not from its first ten.
+- **One question is inside the noise of a re-ingest.** The previous corpus, chunked before the third
+  review, gave 0.750 / 0.517 at R1 with a different set of misses (`a08`, `a13`, `a14`, `a16`,
+  `a20`). Between the two, 4 chunks were added, about 260 heading paths changed, and every context
+  sentence was written again by the model, which does not write the same sentence twice. So the two
+  rows above are comparable with each other, and neither is comparable with a figure from another
+  ingest. A difference of one question in twenty proves nothing; the per-kind rows say where to look.
 - **Follow-ups score 0.250, as §8.4 intends.** Their last turn names no topic ("Thế nếu người ngồi sau
-  không đội thì sao?"), so a search on that turn alone finds the right page once in four. This is the
-  row R4 has to move.
-- **"Summarise X" scores 0.750, which is not what §8.4 intends.** Its gold is the page stating the
-  document's scope, and with the title in every embedded text plain vector search finds that page. One
-  gold page cannot measure a summary; R5 needs a measure of its own (how much of the document's
-  outline the context covers). The four questions are kept as they are until then.
-- An earlier run the same day gave 0.850 / 0.573. It used four easier follow-ups and an outline that
-  mislabelled some articles; it is not comparable and is not the baseline.
+  không đội thì sao?"). This is the row R4 has to move.
+- **"Summarise X" is not measured by this set.** Its gold is the page stating the document's scope,
+  and with the title in every embedded text plain vector search finds that page. R5 needs a measure
+  of its own (how much of the document's outline the context covers).
 - The set is approved for use but small: one question is 5 points of recall overall and 25 within a
   kind of four.
 

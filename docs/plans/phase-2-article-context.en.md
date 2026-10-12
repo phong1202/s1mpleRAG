@@ -687,4 +687,4 @@ Checked on the 10 real documents from their parse checkpoints: 2,986 child chunk
 
 Not fixed, recorded in `docs/system-design.md` §6: unnumbered appendices; a numbered appendix marked as a heading only once (7 chunks of decree 151); an article quoted in a footnote as a heading (2 chunks); a numbered heading is never filed under an unnumbered one; two bold "Table N" captions in the last numbered section are taken for appendices; lines inside a code block.
 
-**The database does not have these fixes.** The stored corpus was chunked by the code before the third review. It needs one more re-ingest (OpenAI calls), and then the baseline has to be measured again.
+The corpus has been re-ingested with this code (10/10 COMPLETED, 2,986 child chunks). The baseline measured again on it: `recall@10` 0.700, `MRR` 0.463 (spec §8.7). The earlier 0.750 / 0.517 belongs to the previous corpus and is not comparable with the new figure.

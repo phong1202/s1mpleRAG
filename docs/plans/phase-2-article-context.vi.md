@@ -684,4 +684,4 @@ Kiểm trên 10 tài liệu thật bằng checkpoint parse: 2.986 chunk con, chu
 
 Chưa sửa, đã ghi vào `docs/system-design.md` §6: phụ lục không đánh số; phụ lục đánh số chỉ được đánh dấu heading một lần (7 chunk của NĐ 151); điều được trích trong chú thích dưới dạng heading (2 chunk); tiêu đề đánh số không bao giờ nằm dưới tiêu đề không đánh số; hai chú thích in đậm "Table N" trong mục đánh số cuối cùng bị coi là phụ lục; dòng trong khối code.
 
-**CSDL chưa có lượt sửa này.** Corpus đang lưu được chia bằng code trước lần review thứ ba. Cần nạp lại một lần nữa (gọi OpenAI) rồi đo lại con số nền.
+Corpus đã được nạp lại bằng code này (10/10 COMPLETED, 2.986 chunk con). Con số nền đo lại trên corpus mới: `recall@10` 0,700, `MRR` 0,463 (spec §8.7). Con số 0,750 / 0,517 trước đó là của corpus cũ và không so được với số mới.

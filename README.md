@@ -353,7 +353,8 @@ variables are required; the rest fall back to defaults in `app/config.py`.
 | `RETRIEVAL_TOP_K`, `RETRIEVAL_OVER_FETCH`, `RETRIEVAL_EF_SEARCH` | `10`, `50`, `100` | `RETRIEVAL_EF_SEARCH` must be at least twice `RETRIEVAL_OVER_FETCH`. |
 | `RETRIEVAL_RRF_K`, `RETRIEVAL_RERANK_KEEP`, `CONTEXT_TOKEN_BUDGET` | `60`, `10`, `8000` | |
 | `RETRIEVAL_MAX_ITERATIONS` | `1` | How many times the read path may loop. |
-| `RETRIEVAL_BM25_ENABLED`, `RETRIEVAL_RERANK_ENABLED`, `RETRIEVAL_INTENT_ENABLED`, `RETRIEVAL_ROUTER_ENABLED`, `RETRIEVAL_REFLECT_ENABLED`, `WEB_SEARCH_ENABLED` | all `false` | Stage flags for retrieval stages that are not built yet. |
+| `RETRIEVAL_BM25_ENABLED` | `false` | Hybrid search (R2): keyword search beside the vectors, fused by reciprocal rank. Built; off until its effect on the eval set is recorded. |
+| `RETRIEVAL_RERANK_ENABLED`, `RETRIEVAL_INTENT_ENABLED`, `RETRIEVAL_ROUTER_ENABLED`, `RETRIEVAL_REFLECT_ENABLED`, `WEB_SEARCH_ENABLED` | all `false` | Stage flags for retrieval stages that are not built yet. |
 
 Addresses in `.env` are as seen **from the host**. `docker-compose.yml` reads
 the same file and overrides them with service names for the containers.
