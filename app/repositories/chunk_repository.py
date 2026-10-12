@@ -61,14 +61,21 @@ ORDER  BY c.distance
 # for the rest, hence two queries, each matched against the rows built its
 # way. The two OR branches are spelled out so the GIN index serves both.
 #
+# "/" and "-" become spaces on both sides, in the generated column and here.
+# Left alone, Postgres' parser reads "168/2024/NĐ-CP" as a file path cut at
+# the first non-ASCII letter, and only the code written in full would match.
+#
 # A question with no word in it makes string_agg return NULL: nothing
 # matches, no error. The trailing c.id keeps equal scores in one order.
 _KEYWORD = text("""
-WITH q AS (
+WITH words AS (
+  SELECT translate(:q, '/-', '  ') AS text
+), q AS (
   SELECT (SELECT string_agg(quote_literal(lex), ' | ')::tsquery
-          FROM   unnest(tsvector_to_array(to_tsvector('simple', :q))) AS lex) AS plain,
+          FROM   unnest(tsvector_to_array(to_tsvector('simple', words.text))) AS lex) AS plain,
          (SELECT string_agg(quote_literal(lex), ' | ')::tsquery
-          FROM   unnest(tsvector_to_array(to_tsvector('english', :q))) AS lex) AS english
+          FROM   unnest(tsvector_to_array(to_tsvector('english', words.text))) AS lex) AS english
+  FROM   words
 ), candidates AS (
   SELECT c.id, c.parent_id, c.document_id, c.page_number, c.content,
          -- 1: divide by 1 + log(length), or long chunks win on length alone

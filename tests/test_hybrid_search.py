@@ -23,9 +23,13 @@ async def _trace_of(client, db_session, question: str) -> dict:
     return {node["node"]: node["detail"] for node in row.nodes}
 
 
-async def test_with_the_flag_off_only_vectors_are_searched(query_client, db_session, seeded_corpus):
+async def test_with_the_flag_off_only_vectors_are_searched(
+    query_client, db_session, seeded_corpus, monkeypatch
+):
     """Off means R1 exactly. A before/after comparison is worth nothing if
     "before" quietly changed too."""
+    # Set, not assumed: a developer's .env may have the flag on.
+    monkeypatch.setattr(get_settings(), "retrieval_bm25_enabled", False)
     client, provider = query_client
     provider.script(Draft, Draft(answer="Theo tai lieu [1]."))
 

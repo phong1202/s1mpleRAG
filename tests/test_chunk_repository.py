@@ -200,12 +200,23 @@ async def test_keyword_hits_come_best_first_and_stop_at_over_fetch(db_session):
     assert hits[0].score >= hits[1].score
 
 
-async def test_a_code_is_found_only_when_it_is_written_in_full(db_session):
-    """A known limit, pinned so that it is changed on purpose. Postgres reads
-    `04/SS-HĐĐT` as a file path that ends at the first non-ASCII letter and
-    indexes `04/ss-h` and `đđt`; a question that quotes only `SS-HĐĐT` asks
-    for `ss` and `hđđt`, which are not there."""
-    await seed_texts(db_session, ["Mẫu số 04/SS-HĐĐT dùng để thông báo sai sót."])
+async def test_a_code_is_found_from_any_part_of_it(db_session):
+    """Postgres reads `168/2024/NĐ-CP` as a file path that ends at the first
+    non-ASCII letter and indexed `168/2024/n`, `đ-cp`, `đ`, `cp`: a question
+    saying "nghị định 168" asked for `168`, which was not there. The index
+    and the question are both split on "/" and "-" now."""
+    await seed_texts(
+        db_session,
+        [
+            "Căn cứ Nghị định số 168/2024/NĐ-CP của Chính phủ.",
+            "Mẫu số 04/SS-HĐĐT dùng để thông báo sai sót.",
+        ],
+    )
 
-    assert len(await _keywords(db_session, "04/SS-HĐĐT")) == 1
-    assert await _keywords(db_session, "SS-HĐĐT") == []
+    by_number = await _keywords(db_session, "168")
+    by_suffix = await _keywords(db_session, "SS-HĐĐT")
+    in_full = await _keywords(db_session, "04/SS-HĐĐT")
+
+    assert [hit.page_number for hit in by_number] == [1]
+    assert [hit.page_number for hit in by_suffix] == [2]
+    assert [hit.page_number for hit in in_full] == [2]
