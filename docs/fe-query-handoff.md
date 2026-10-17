@@ -35,8 +35,9 @@ FE gọi qua rewrite sẵn có `/backend/*` (`web/next.config.mjs`), tức `POST
 | `question` | string, 1 → 2000 ký tự | Bắt buộc. Chuỗi toàn khoảng trắng bị từ chối. |
 | `category` | string, tuỳ chọn | Lọc theo nhóm nội dung. FE chưa cần dùng. |
 | `document_id` | UUID, tuỳ chọn | Chỉ tìm trong một tài liệu. Dùng được cho "hỏi về tài liệu đang mở". |
+| `conversation_id` | UUID, tuỳ chọn | Có từ R4. Lấy từ response của câu trước để hỏi tiếp trong cùng cuộc trò chuyện. Không gửi thì backend mở cuộc trò chuyện mới. Gửi một id không tồn tại thì nhận 404. Xem mục 12. |
 
-Không có trường lịch sử hội thoại. Xem mục 5.
+FE không gửi lịch sử: backend tự lưu các lượt hỏi đáp theo `conversation_id`.
 
 **Response 200**
 
@@ -136,7 +137,7 @@ Hai điểm khác cần quyết khi lên plan:
 
 ## 5. Ngoài phạm vi
 
-- **Hội thoại nhiều lượt.** Backend xử lý mỗi câu hỏi độc lập, không nhớ lượt trước; việc đó thuộc bậc R4. FE vẫn hiển thị lịch sử trên màn hình được, nhưng không nên gợi ý rằng trợ lý nhớ ngữ cảnh, và không gửi lịch sử lên.
+- ~~**Hội thoại nhiều lượt.**~~ Có từ R4: xem mục 12.
 - **Streaming.** Trạng thái `streaming` của hook hiện không có gì để dùng: từ lúc gửi tới lúc có response là `submitted`.
 - **Highlight vùng trong PDF.** Format `locations` đã chốt ở `docs/system-design.md` §5.3, nhưng backend chưa sinh ra và sẽ cần nạp lại corpus. Trình xem đã nhận `rects`; cứ để nguyên, chỉ truyền `page`.
 - **Xác thực.** Chưa endpoint nào có.
@@ -202,3 +203,33 @@ không gọi OpenAI, cách xử lý [n] trong câu trả lời, và mọi thứ 
 Lưu plan vào docs/plans/, trình mình duyệt trước khi làm. Không tự commit, push
 hay merge. Không gọi backend thật khi chưa hỏi mình.
 ```
+
+## 12. Cập nhật R4: hội thoại nhiều lượt
+
+Backend giờ nhớ cuộc trò chuyện, và viết lại câu hỏi nối tiếp ("Thế nếu người ngồi sau không đội thì sao?") thành câu đứng độc lập trước khi tìm kiếm. Việc của FE chỉ là giữ và gửi lại một id.
+
+**Contract thêm (chỉ thêm, không đổi trường cũ):**
+
+| Ở đâu | Trường | Ghi chú |
+| --- | --- | --- |
+| request | `conversation_id` (UUID, tuỳ chọn) | Id nhận được ở câu trả lời trước. |
+| response `data` | `conversation_id` (UUID, luôn có) | Id của cuộc trò chuyện chứa câu này. Câu đầu tiên không gửi id thì đây là id mới. |
+
+**FE cần làm:**
+
+1. Lưu `conversation_id` của response đầu tiên vào state của khung chat, và gửi nó kèm mọi câu hỏi sau.
+2. Nút hoặc thao tác "cuộc trò chuyện mới": bỏ id đi; câu kế tiếp sẽ mở cuộc trò chuyện mới.
+3. Response 404 khi gửi id (ví dụ id cũ còn trong state sau khi CSDL bị làm lại): bỏ id, gửi lại câu đó như câu mở đầu, không báo lỗi cho người dùng.
+4. Câu hỏi lỗi (500, hết thời gian) không được backend ghi vào lịch sử. FE có thể cho hỏi lại bình thường với cùng id.
+5. Có thể bỏ ghi chú "trợ lý không nhớ ngữ cảnh" nếu FE đang hiển thị.
+
+**Hành vi người dùng sẽ thấy:**
+
+- Câu xã giao như "cảm ơn", "xin chào": câu trả lời ngắn, không có nguồn trích dẫn. Đó là đúng: backend không tìm kiếm cho những câu này.
+- Mỗi câu hỏi chậm hơn khoảng một lần gọi model (thời gian cụ thể sẽ ghi ở `docs/retrieval-design.md` §8.7 sau khi đo).
+
+**Mock:** route mock (`QUERY_MOCK=1`) nên trả thêm `conversation_id` (một UUID cố định là đủ), để FE thử được luồng gửi lại id mà không tốn tiền.
+
+**Prompt mở đầu cho session FE:**
+
+> Đọc `docs/fe-query-handoff.md`, mục 12. Backend `POST /query` giờ nhận và trả `conversation_id`. Hãy cập nhật `web/` để giữ `conversation_id` trong state của khung chat, gửi lại ở mọi câu sau, bỏ nó khi bắt đầu cuộc trò chuyện mới, và khi nhận 404 thì bỏ id rồi gửi lại câu đó như câu mở đầu. Cập nhật mock để trả `conversation_id`. Chỉ sửa trong `web/`; không commit nếu chưa được bảo.

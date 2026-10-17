@@ -894,7 +894,9 @@ fused by reciprocal rank, is built behind `RETRIEVAL_BM25_ENABLED` (off by defau
 [`plans/phase-2-r2.vi.md`](plans/phase-2-r2.vi.md). R3, reranking the fused candidates, is built behind
 `RETRIEVAL_RERANK_ENABLED`: the default reranker is the `reranker` container, a CPU cross-encoder, and
 any server speaking Cohere's `/rerank` can replace it by configuration; its plan is
-[`plans/phase-3-r3.vi.md`](plans/phase-3-r3.vi.md).
+[`plans/phase-3-r3.vi.md`](plans/phase-3-r3.vi.md). R4 keeps conversations server-side (`conversations`, `messages`) and,
+behind `RETRIEVAL_INTENT_ENABLED`, rewrites each question into a standalone one before it is
+searched; its plan is [`plans/phase-3-r4.vi.md`](plans/phase-3-r4.vi.md).
 
 **Nothing from Phase 2 is stubbed during Phase 1** — no empty `app/core/` directory, no placeholder
 router. It arrives whole, or not at all.

@@ -471,6 +471,12 @@ the other language. `text-embedding-3-small` aligns Vietnamese and English weakl
 question under-retrieves English chunks that answer it. Searching both and letting RRF fuse costs a
 prompt line; changing the embedding model costs a dimension change and a full re-ingest.
 
+> **Built at R4 (2026-10-17).** The rewriter returns `intent`, `standalone` and `sub_queries`, at
+> reasoning effort `none`, reading the last six turns the server keeps in `conversations` and
+> `messages`. Only `CHITCHAT` changes what happens: retrieval is skipped and the reply cites nothing.
+> The other intents are recorded in the trace for R5 and R7. Filters still come from the client, and
+> bilingual sub-queries are not built: the eval set has no cross-lingual question to justify them.
+
 > **Premise changed (2026-10-10).** Phase 1 shipped with `text-embedding-3-large`, not `-small`.
 > The weakness this paragraph argues from was `-small`'s. Before R4 is built, measure cross-lingual
 > recall on the eval set: bilingual expansion stays only if it still earns its prompt line.
@@ -756,9 +762,14 @@ after the other.
 | | code | 4 | 1.000 | 0.613 |
 | | followup | 4 | 0.500 | 0.250 |
 | | summarize | 4 | 1.000 | 0.656 |
+| **R4** — `RETRIEVAL_INTENT_ENABLED=true`, on top of R3 | **all** | **20** | **0.900** | **0.580** |
+| | baseline | 8 | 0.875 | 0.698 |
+| | code | 4 | 1.000 | 0.613 |
+| | followup | 4 | 0.750 | 0.237 |
+| | summarize | 4 | 1.000 | 0.656 |
 
 Missed at R1: `a06`, `a08`, `a10`, `a13`, `a14`, `a16`. Missed at R2: `a08`, `a13`, `a14`, `a16`, `a18`.
-Missed at R3: `a01`, `a14`, `a16`. R3 was measured on 2026-10-17 with the same corpus and the same
+Missed at R3: `a01`, `a14`, `a16`. Missed at R4: `a01`, `a15`. R3 was measured on 2026-10-17 with the same corpus and the same
 question vectors as R2 (`--embed-cache`), so the two rows differ only by the reranker.
 
 The R2 row was measured twice, before and after the keyword index was rebuilt to split codes (§5.2):
@@ -778,6 +789,16 @@ How to read it:
   five or worse, is beaten by the first four of each list and by everything both lists agree on, and
   the cut to ten comes straight after. Recall beyond that is what the reranker of R3 is for: it
   chooses from the whole fused set, not from its first ten.
+- **R4 rewrote all four follow-ups correctly** ("Thế nếu người ngồi sau không đội thì sao?" became
+  "Đi xe máy, người ngồi sau không đội mũ bảo hiểm thì bị phạt bao nhiêu?") and left all sixteen other
+  questions word for word. Follow-up recall went from 0.500 to 0.750 and every other kind is unchanged.
+  The one follow-up still missed, `a15`, retrieves page 17 instead of its gold page 18; page 17 also
+  says a vessel must hold a registration certificate, so the miss is at least partly the label's.
+  Follow-up MRR stayed low (0.237): the right page arrives, but not first.
+- **R4 costs one model call per question**: median 1.3 s, at most 1.8 s, with the rewriter at reasoning
+  effort `none`. At `low`, the default for the rest of the pipeline, it gave the same rewrites and the
+  same recall in 1.9 s (at most 3.3 s), and took four of the five outside questions in Set B for
+  `SEARCH_CORPUS` instead of `OUT_OF_SCOPE`; at `none` it found four of the five.
 - **R3 moved recall as well as MRR**, against what §8.2 predicted ("Recall will *not* move when
   reranking is enabled"). That held for a reranker choosing among the same ten; this one chooses ten
   out of the fifty RRF hands it (`RETRIEVAL_RERANK_CANDIDATES`), and brought in `a08`, `a13` and `a18`
