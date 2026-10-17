@@ -901,7 +901,10 @@ searched; its plan is [`plans/phase-3-r4.vi.md`](plans/phase-3-r4.vi.md). R5, be
 (`parent_chunks.heading_path`) instead of a search; its plan is
 [`plans/phase-3-r5.vi.md`](plans/phase-3-r5.vi.md). R6, a sufficiency gate that may search again up to
 `RETRIEVAL_MAX_ITERATIONS` rounds, is built and ships at one round: it found no gain on the eval set;
-its plan is [`plans/phase-3-r6.vi.md`](plans/phase-3-r6.vi.md).
+its plan is [`plans/phase-3-r6.vi.md`](plans/phase-3-r6.vi.md). Conversations belong to a user
+(`users`, a seeded admin that every request is until login exists, `AUTH_MODE=auto_admin`) and can be
+listed, reopened with their citations, and deleted; see
+[`plans/phase-3-conversations.vi.md`](plans/phase-3-conversations.vi.md).
 
 **Nothing from Phase 2 is stubbed during Phase 1** — no empty `app/core/` directory, no placeholder
 router. It arrives whole, or not at all.

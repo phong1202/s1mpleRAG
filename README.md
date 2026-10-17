@@ -198,7 +198,11 @@ in a bug report.
 | GET | `/documents/{id}/status` | One document's status, metadata and progress; 404 if absent. |
 | GET | `/documents/{id}/file-url` | A short-lived URL (300 seconds) for the PDF viewer to fetch the file. |
 | DELETE | `/documents/{id}` | 200 with `data: null`; 404 if absent. |
-| POST | `/query` | An answer with citations, and the `conversation_id` to send with the next question. |
+| POST | `/query` | An answer with citations, and the `conversation_id` to send with the next question; 404 for a conversation that is not the caller's. |
+| GET | `/me` | The current user. Always the seeded admin until login exists. |
+| GET | `/conversations` | The user's conversations, most recently updated first, with title and message count; paginated. |
+| GET | `/conversations/{id}` | One conversation with every message, oldest first; answers keep their citations. 404 if absent or not the user's. |
+| DELETE | `/conversations/{id}` | 200 with `data: null`; its traces stay, unlinked. 404 if absent or not the user's. |
 
 Interactive documentation is at `/docs` on the running API.
 
@@ -421,7 +425,7 @@ the service name and the internal port rather than the host mapping.
 - **Retrieval stops at R6.** Hybrid search, reranking, query rewriting,
   routing and the sufficiency loop are built behind settings that ship off;
   reflection and web search are designed, not built.
+- **No authentication.** `AUTH_MODE=auto_admin`, the only mode, treats every
+  request as the seeded admin, and `GET /conversations` lists every
+  conversation. Do not expose the API beyond this machine until login exists.
 - **No streaming.** An answer arrives whole.
-- **The frontend does not send `conversation_id` back yet** (handed over in
-  `docs/fe-query-handoff.md` §12), so every question in the chat starts a new
-  conversation until it does.
