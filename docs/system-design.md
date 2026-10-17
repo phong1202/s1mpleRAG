@@ -891,7 +891,10 @@ retrieval SQL. Its design has since grown into a document of its own,
 stage (R0, basic RAG) is built on the `phase-2` branch, and the plan is
 [`plans/phase-2-r0-r1.en.md`](plans/phase-2-r0-r1.en.md). R2, keyword search beside the vectors
 fused by reciprocal rank, is built behind `RETRIEVAL_BM25_ENABLED` (off by default); its plan is
-[`plans/phase-2-r2.vi.md`](plans/phase-2-r2.vi.md).
+[`plans/phase-2-r2.vi.md`](plans/phase-2-r2.vi.md). R3, reranking the fused candidates, is built behind
+`RETRIEVAL_RERANK_ENABLED`: the default reranker is the `reranker` container, a CPU cross-encoder, and
+any server speaking Cohere's `/rerank` can replace it by configuration; its plan is
+[`plans/phase-3-r3.vi.md`](plans/phase-3-r3.vi.md).
 
 **Nothing from Phase 2 is stubbed during Phase 1** — no empty `app/core/` directory, no placeholder
 router. It arrives whole, or not at all.

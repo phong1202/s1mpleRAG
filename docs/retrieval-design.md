@@ -47,7 +47,7 @@ Settled. If the implementation disagrees with a row here, the implementation is 
 | 4 | Seams | Built at **R0**, filled later | Five no-op stages exist from day one; upgrading is replacing a function, never restructuring |
 | 5 | Fusion | **RRF over rank**, `k = 60` | Cosine ∈ [0,1] and `ts_rank` unbounded cannot be summed |
 | 6 | Keyword search | Postgres `ts_rank_cd`, config by `language` | Not true BM25 — no IDF — but RRF reads rank, not score. See §5.2 |
-| 7 | Reranker | `bge-reranker-v2-m3`, self-hosted | Multilingual; own container, same pattern as `chandra`; no third API vendor |
+| 7 | Reranker | **`mmarco-mMiniLMv2-L12` (int8) in a CPU container**, behind a client for any server speaking Cohere's `/rerank` (revised at R3) | `bge-reranker-v2-m3` on the CPU takes 10.5 s for 50 pairs (3.8 s quantised to int8), and the GPU is chandra's while it runs. The model is a setting: measured candidates in §5.4 |
 | 8 | Cross-lingual recall | **Bilingual sub-queries at node ①** | A prompt line instead of a new embedding model and a full re-ingest |
 | 9 | Conversation state | Server-side `conversations` / `messages` | Auditable, and the trace needs somewhere to hang |
 | 10 | Loop bound | `MAX_ITERATIONS = 3`, hard | Out of budget still answers, never errors |
@@ -346,9 +346,56 @@ That accuracy costs one model call per pair, so it cannot run over the corpus:
 Hence the ordering: **narrow cheaply, then score expensively.** A reranker placed before hybrid
 search is polishing a candidate set that is still missing rows.
 
-`bge-reranker-v2-m3` runs in its own container at concurrency 1, models loaded at startup — the same
-shape as `chandra`, the OCR server. **A timeout or error skips reranking and keeps the RRF order**, logged. Never a
-failed request.
+**Where it runs — revised at R3.** The first draft put `bge-reranker-v2-m3` in its own GPU container,
+the same shape as `chandra`. Two measurements ended that: on the CPU it takes 10.5 s for 50 pairs, and
+the GPU is chandra's while it runs (about 15.6 of 16 GB). The read path now has one client that
+speaks the Cohere shape of `/rerank` — `{model, query, documents, top_n}` in,
+`results[{index, relevance_score}]` out — and three settings choose who answers it:
+
+| Server | `RERANKER_URL` | Key |
+|---|---|---|
+| `reranker`, this repository's CPU container (default) | `http://reranker:8200` inside compose | none |
+| OpenRouter, Cohere, or vLLM serving a model | the provider's base URL | `RERANKER_API_KEY` |
+
+The container loads any cross-encoder through sentence-transformers, chosen when the image is built
+(`RERANKER_LOCAL_*`); left unset, `RERANKER_MODEL` lets it score with that model, and a request naming
+another one is refused. The trace records which model reranked, or why reranking fell back, and the
+eval refuses to print figures when any question fell back: a dead container or a wrong URL would
+otherwise print R2 figures under an R3 label.
+
+The container scores one request at a time and lets two wait; a request past that is refused at
+once with 503, so its caller keeps the fused order without waiting out its timeout. Measured with 30
+requests at once: 3 answered within 2.4 s, 27 refused within 0.24 s, and the next request after the
+burst took 0.66 s.
+
+Measured on the eval set before the choice was made: each question's top 50 keyword candidates,
+reranked, gold page position scored (MRR 0.399 without a reranker). Same machine (Ryzen 5 7500F,
+RTX 5060 Ti):
+
+| Model | Runs on | Found in top 10 | Gold at rank 1 | MRR | 50 pairs |
+|---|---|---|---|---|---|
+| `Qwen3-Reranker-4B` | GPU, vLLM | 17 / 20 | 15 | **0.800** | 1.35 s, ~9 GB VRAM |
+| `PhoRanker` (Vietnamese only) | CPU | 16 / 20 | 12 | 0.655 | 4.0 s |
+| `gte-multilingual-reranker-base` | CPU | 16 / 20 | 12 | 0.649 | 4.8 s |
+| `Qwen3-Reranker-0.6B` | GPU / CPU | 17 / 20 | 10 | 0.625 | 0.66 s / 36 s |
+| `bge-reranker-v2-m3` | GPU | 17 / 20 | 9 | 0.607 | 0.19 s |
+| `bge-reranker-v2-m3`, int8 | CPU | 17 / 20 | 9 | 0.614 | 3.8 s |
+| `mmarco-mMiniLMv2-L12` (int8 ONNX) | CPU | 17 / 20 | 8 | 0.557 | **0.8 s** |
+| the same, in the `reranker` container, over HTTP | CPU | 17 / 20 | — | 0.539 | 0.62 s |
+
+The default is `mmarco-mMiniLMv2-L12`: the only one fast enough on the CPU for a chat, and well short
+of the first row. `Qwen3-Reranker-4B` is listed on OpenRouter, whose `/rerank` takes this shape;
+DeepInfra also hosts it, but its API takes a different shape and would need its own client.
+
+**Chosen on 2026-10-17: `mmarco-mMiniLMv2-L12`, int8, in the CPU container.** It needs no GPU, no key
+and no third vendor, and it moved `recall@10` from 0.750 to 0.850 and MRR from 0.542 to 0.583 on the
+eval set (§8.7). A hosted `Qwen3-Reranker-4B` stays one change of settings away if its quality is
+worth a vendor.
+
+**Any failure skips reranking and keeps the RRF order** -- an error, a malformed answer, a non-finite
+score, or the deadline `RERANKER_TIMEOUT_S` for the whole call -- logged and recorded in the trace.
+Never a failed request. The request's database transaction ends before the reranker is called, as it
+does before the model.
 
 ### 5.5 Parent expansion
 
@@ -704,8 +751,15 @@ after the other.
 | | code | 4 | 1.000 | 0.750 |
 | | followup | 4 | 0.250 | 0.250 |
 | | summarize | 4 | 0.750 | 0.458 |
+| **R3** — `RETRIEVAL_RERANK_ENABLED=true`, CPU reranker `mmarco-mMiniLMv2-L12` (int8) | **all** | **20** | **0.850** | **0.583** |
+| | baseline | 8 | 0.875 | 0.698 |
+| | code | 4 | 1.000 | 0.613 |
+| | followup | 4 | 0.500 | 0.250 |
+| | summarize | 4 | 1.000 | 0.656 |
 
 Missed at R1: `a06`, `a08`, `a10`, `a13`, `a14`, `a16`. Missed at R2: `a08`, `a13`, `a14`, `a16`, `a18`.
+Missed at R3: `a01`, `a14`, `a16`. R3 was measured on 2026-10-17 with the same corpus and the same
+question vectors as R2 (`--embed-cache`), so the two rows differ only by the reranker.
 
 The R2 row was measured twice, before and after the keyword index was rebuilt to split codes (§5.2):
 the same figures and the same misses both times.
@@ -724,6 +778,12 @@ How to read it:
   five or worse, is beaten by the first four of each list and by everything both lists agree on, and
   the cut to ten comes straight after. Recall beyond that is what the reranker of R3 is for: it
   chooses from the whole fused set, not from its first ten.
+- **R3 moved recall as well as MRR**, against what §8.2 predicted ("Recall will *not* move when
+  reranking is enabled"). That held for a reranker choosing among the same ten; this one chooses ten
+  out of the fifty RRF hands it (`RETRIEVAL_RERANK_CANDIDATES`), and brought in `a08`, `a13` and `a18`
+  from beyond the fused top ten. It lost `a01`, and the code questions' MRR fell from 0.750 to 0.613:
+  a small model reads "Điều 52 của Nghị định 168/2024/NĐ-CP" less exactly than the keyword match did.
+  The model is the smallest measured in §5.4; a stronger one is a change of settings.
 - **One question is inside the noise of a re-ingest.** The previous corpus, chunked before the third
   review, gave 0.750 / 0.517 at R1 with a different set of misses (`a08`, `a13`, `a14`, `a16`,
   `a20`). Between the two, 4 chunks were added, about 260 heading paths changed, and every context
@@ -771,7 +831,7 @@ app/services/query_service.py          ★ R0 — orchestrates app/core/
 app/repositories/chunk_repository.py   ★ R0 — read-only retrieval SQL
 
 shared/llm.py                    MODIFY — add an async Protocol beside the sync one
-reranker_service/                ★ R3 — own container, same shape as the chandra service in docker-compose.yml
+reranker_service/                ★ R3 — CPU cross-encoder behind Cohere's /rerank, its own container
 eval/
 ├── dataset.yaml                 ★ R1 — the labelled pairs
 └── run.py                       ★ R1 — retrieval-only by default, --full for generation
@@ -810,11 +870,13 @@ RETRIEVAL_OVER_FETCH=50               # per source, before fusion
 RETRIEVAL_EF_SEARCH=100               # MUST be >= 2 x OVER_FETCH
 RETRIEVAL_RRF_K=60
 RETRIEVAL_RERANK_KEEP=10
+RETRIEVAL_RERANK_CANDIDATES=50        # how deep the fused list goes to the reranker
 CONTEXT_TOKEN_BUDGET=8000
 
 # --- services ---
-RERANKER_URL=http://reranker:8200
-RERANKER_TIMEOUT_S=10                 # on timeout: keep RRF order, log
+# RERANKER_URL, RERANKER_MODEL, RERANKER_API_KEY: unset for the CPU container (http://reranker:8200
+# in compose, http://localhost:8200 on the host); set all three for a hosted reranker
+RERANKER_TIMEOUT_S=5                  # on timeout: keep RRF order, log
 TAVILY_API_KEY=
 RL_TAVILY_RPM=60                      # fifth bucket, same Redis limiter
 ```

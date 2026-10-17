@@ -307,6 +307,30 @@ It calls the LLM provider for every chunk again. A document that is still being 
 and reported; `--force` relaunches one anyway, for a document stuck in a running status because its
 task was lost. The old chunks stay searchable until the new ones replace them.
 
+## Reranking
+
+R3 sends the fused candidates to a reranker and keeps the ten it ranks highest. The default reranker
+is the `reranker` container: a small multilingual cross-encoder on the CPU, built into the image, no
+GPU and no key needed.
+
+```bash
+docker compose build reranker            # model chosen by RERANKER_LOCAL_* in .env
+docker compose up -d --no-deps reranker
+curl localhost:8200/health
+```
+
+Then set `RETRIEVAL_RERANK_ENABLED=true`. To use a hosted model instead, point the API elsewhere; no
+code changes:
+
+```bash
+RERANKER_URL=https://openrouter.ai/api/v1
+RERANKER_MODEL=qwen/qwen3-reranker-4b
+RERANKER_API_KEY=sk-or-...
+```
+
+The models measured for this, and why the CPU one is the default, are in
+`docs/retrieval-design.md` §5.4.
+
 ## Evaluation
 
 `eval/dataset.yaml` holds a fixed set of labelled questions, anchored to
@@ -317,6 +341,9 @@ uv run python -m eval.run --check-labels   # every quote sits on its gold page; 
 uv run python -m eval.run                  # recall@10 and MRR
 uv run python -m eval.run --full           # adds citation accuracy and mean iterations
 ```
+
+`--embed-cache data/eval-embeddings.json` keeps the question embeddings between runs: only the
+first run pays for them.
 
 The last two need `LLM_PROVIDER=openai` and an ingested corpus: the corpus is
 embedded by the real model, and a stub query vector measured against it is
@@ -351,10 +378,12 @@ variables are required; the rest fall back to defaults in `app/config.py`.
 | `ENRICH_BATCH_SIZE`, `EMBED_BATCH_SIZE` | `20`, `100` | Chunks per provider call. |
 | `RL_CHAT_RPM`, `RL_CHAT_TPM`, `RL_EMBED_RPM`, `RL_EMBED_TPM` | `500`, `200000`, `3000`, `1000000` | The workers' rate limits against the provider. |
 | `RETRIEVAL_TOP_K`, `RETRIEVAL_OVER_FETCH`, `RETRIEVAL_EF_SEARCH` | `10`, `50`, `100` | `RETRIEVAL_EF_SEARCH` must be at least twice `RETRIEVAL_OVER_FETCH`. |
-| `RETRIEVAL_RRF_K`, `RETRIEVAL_RERANK_KEEP`, `CONTEXT_TOKEN_BUDGET` | `60`, `10`, `8000` | |
+| `RETRIEVAL_RRF_K`, `RETRIEVAL_RERANK_KEEP`, `RETRIEVAL_RERANK_CANDIDATES`, `CONTEXT_TOKEN_BUDGET` | `60`, `10`, `50`, `8000` | |
 | `RETRIEVAL_MAX_ITERATIONS` | `1` | How many times the read path may loop. |
-| `RETRIEVAL_BM25_ENABLED` | `false` | Hybrid search (R2): keyword search beside the vectors, fused by reciprocal rank. Built; off until its effect on the eval set is recorded. |
-| `RETRIEVAL_RERANK_ENABLED`, `RETRIEVAL_INTENT_ENABLED`, `RETRIEVAL_ROUTER_ENABLED`, `RETRIEVAL_REFLECT_ENABLED`, `WEB_SEARCH_ENABLED` | all `false` | Stage flags for retrieval stages that are not built yet. |
+| `RETRIEVAL_BM25_ENABLED` | `false` | Hybrid search (R2): keyword search beside the vectors, fused by reciprocal rank. |
+| `RETRIEVAL_RERANK_ENABLED` | `false` | Reranking (R3): a cross-encoder reorders the fused candidates. Needs a reranker server; see below. |
+| `RERANKER_URL`, `RERANKER_MODEL`, `RERANKER_API_KEY`, `RERANKER_TIMEOUT_S` | unset, unset, unset, `5` | Any server speaking Cohere's `/rerank`. Leave the first three unset for the CPU container: the URL becomes `http://reranker:8200` in compose and `http://localhost:8200` on the host, and the container uses the model it was built with. On any failure, or past the timeout, the fused order is kept. |
+| `RETRIEVAL_INTENT_ENABLED`, `RETRIEVAL_ROUTER_ENABLED`, `RETRIEVAL_REFLECT_ENABLED`, `WEB_SEARCH_ENABLED` | all `false` | Stage flags for retrieval stages that are not built yet. |
 
 Addresses in `.env` are as seen **from the host**. `docker-compose.yml` reads
 the same file and overrides them with service names for the containers.
