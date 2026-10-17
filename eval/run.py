@@ -1,10 +1,8 @@
 """Retrieval-only by default: recall@10 and MRR need no chat call, only one
 embedding per question, so the metric you check after every tuning change costs
-next to nothing. `--full` runs the whole pipeline and adds citation accuracy
-and mean iterations.
-
-Set B (fabrication, the decision to go outside the corpus) is not scored yet:
-both need a judge of the answer's text, which arrives with R7.
+next to nothing. `--full` also answers every question of both sets and has a
+judge read each answer twice, as drafted and as reflection (R7) left it:
+fabrication rate, Set B's decline-or-answer decisions, citation accuracy.
 """
 
 import argparse
@@ -253,7 +251,9 @@ def _as_query(question: LabelledQuestion):
     searched as its bare last turn -- and scores zero, which is the point."""
     from app.core.contracts import Query, Turn
 
-    earlier = tuple(Turn(role="user", text=turn) for turn in question.turns[:-1])
+    # Set B's questions are single turns.
+    turns = getattr(question, "turns", ())
+    earlier = tuple(Turn(role="user", text=turn) for turn in turns[:-1])
     return Query(text=question.question, history=earlier)
 
 
@@ -282,6 +282,81 @@ async def retrieved(stages, question: LabelledQuestion, trace=None, max_iteratio
     return await gather(_as_query(question), stages, max_iterations, trace)
 
 
+@dataclass(frozen=True)
+class Checked:
+    """One answer, judged as drafted and as reflection left it."""
+
+    id: str
+    kind: str
+    draft: object
+    final: object
+    before: object
+    after: object
+    dropped: tuple[str, ...]
+
+
+def dropped_by_reflection(trace) -> tuple[str, ...]:
+    for node in trace.nodes:
+        if node.node == "reflect_detail" and node.detail.get("asked_model"):
+            unmatched = node.detail["unmatched"]
+            return tuple(s for s in node.detail["unsupported"] if s not in unmatched)
+    return ()
+
+
+async def answer_and_judge(stages, provider, question, gathered, trace) -> Checked:
+    """One draft, judged before and after the check: two drafts would differ
+    by more than the check does."""
+    from app.core.pipeline import respond
+    from eval.judge import judge
+
+    draft, final = await respond(gathered, stages, trace)
+    asked = gathered.asked.text
+    before = await judge(provider, asked, draft.text, gathered.context)
+    after = (
+        before
+        if final.text == draft.text
+        else await judge(provider, asked, final.text, gathered.context)
+    )
+    return Checked(
+        question.id,
+        question.kind,
+        draft,
+        final,
+        before,
+        after,
+        dropped_by_reflection(trace) if final.text != draft.text else (),
+    )
+
+
+def cited_right(citations, question: LabelledQuestion, sha_by_id: dict) -> float:
+    return float(
+        any(
+            getattr(c, "page_number", None) == question.gold_page
+            and sha_by_id.get(getattr(c, "document_id", None)) == question.gold_sha256
+            for c in citations
+        )
+    )
+
+
+_CACHED_MS = 50
+
+
+def timed(trace, node: str) -> list[int]:
+    """A node's times, without the calls the cache answered: those return in
+    a millisecond or two and would pull the median to nothing. No model call
+    has taken under a few hundred."""
+    return [n.ms for n in trace.nodes if n.node == node and n.ms > _CACHED_MS]
+
+
+def print_timing(name: str, ms: list[int], ran: bool) -> None:
+    if not ran:
+        return
+    if not ms:
+        print(f"{name:<16} answered from the cache: time not measured")
+        return
+    print(f"{name:<16} median {statistics.median(ms):.0f} ms, max {max(ms)} ms")
+
+
 async def _check_labels() -> None:
     from app.utils.database import AsyncSessionLocal
 
@@ -300,7 +375,6 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
     from app.config import get_settings
     from app.core.contracts import Trace
     from app.core.deps import build_stages
-    from app.core.pipeline import answer as run_pipeline
     from app.models import Document
     from app.utils.database import AsyncSessionLocal
     from shared.llm import get_async_provider
@@ -325,8 +399,8 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
     ranks: list[float] = []
     scored: list[tuple[str, float, float]] = []
     missed: list[str] = []
-    cited_right_page: list[float] = []
-    iterations: list[int] = []
+    checked: dict[str, list[Checked]] = {"A": [], "B": []}
+    reflect_ms: list[int] = []
     rerank_models: set[str] = set()
     rerank_fallbacks: list[str] = []
     intents: dict[str, collections.Counter] = {
@@ -372,7 +446,7 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
                 context_recalls.append(recall_at_k(held, gold, len(held)))
                 context_ranks.append(reciprocal_rank(held, gold))
                 rounds.append(gathered.iterations)
-                gate_ms += [n.ms for n in trace.nodes if n.node == "gate"]
+                gate_ms += timed(trace, "gate")
                 for node in trace.nodes:
                     if node.node == "gate_detail" and not node.detail["sufficient"]:
                         short.append(
@@ -383,7 +457,7 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
                     strategies["A"][strategy] += 1
                 intent = intent_of(trace)
                 if intent:
-                    rewrite_ms += [n.ms for n in trace.nodes if n.node == "rewrite"]
+                    rewrite_ms += timed(trace, "rewrite")
                     intents["A"][intent] += 1
                     if intent == "CHITCHAT":
                         chitchat_in_a.append(question.id)
@@ -409,35 +483,35 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
                 if not full:
                     continue
 
-                result = await run_pipeline(
-                    _as_query(question),
-                    stages,
-                    max_iterations=settings.retrieval_max_iterations,
+                checked["A"].append(
+                    await answer_and_judge(stages, provider, question, gathered, trace)
                 )
-                iterations.append(result.trace.iterations)
-                cited_right_page.append(
-                    float(
-                        any(
-                            getattr(c, "page_number", None) == question.gold_page
-                            and sha_by_id.get(getattr(c, "document_id", None))
-                            == question.gold_sha256
-                            for c in result.citations
-                        )
+                reflect_ms += timed(trace, "reflect")
+
+            for question in dataset.set_b:
+                # Without --full, only what the rewriter and the router make
+                # of it: Set B is scored on the answer.
+                trace = Trace()
+                if full:
+                    gathered = await retrieved(
+                        stages, question, trace, settings.retrieval_max_iterations
                     )
-                )
-
-            if settings.retrieval_intent_enabled:
-                # Set B is not scored yet (it needs a judge, R7), but what the
-                # rewriter makes of it is already worth seeing.
-                from app.core.contracts import Query
-
-                for question in dataset.set_b:
-                    trace = Trace()
-                    rewritten = await stages.rewrite(Query(text=question.question), trace)
+                    checked["B"].append(
+                        await answer_and_judge(stages, provider, question, gathered, trace)
+                    )
+                    reflect_ms += timed(trace, "reflect")
+                    _, fallback = rerank_outcome(trace)
+                    if fallback:
+                        rerank_fallbacks.append(f"{question.id}: {fallback}")
+                elif settings.retrieval_intent_enabled:
+                    rewritten = await stages.rewrite(_as_query(question), trace)
                     await stages.plan(rewritten, trace)
+                else:
+                    continue
+                if settings.retrieval_intent_enabled:
                     intents["B"][intent_of(trace) or "none"] += 1
-                    if strategy := strategy_of(trace):
-                        strategies["B"][strategy] += 1
+                if strategy := strategy_of(trace):
+                    strategies["B"][strategy] += 1
 
     finally:
         # Also when a question fails mid-run: what was paid for is kept.
@@ -464,11 +538,7 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
         if counter:
             shown = ", ".join(f"{intent} {count}" for intent, count in counter.most_common())
             print(f"intents, set {name}   {shown}")
-    if rewrite_ms and completions is not None and completions.paid == 0:
-        print("rewrite          answered from the cache: time not measured")
-    elif rewrite_ms:
-        median = statistics.median(rewrite_ms)
-        print(f"rewrite          median {median:.0f} ms, max {max(rewrite_ms)} ms")
+    print_timing("rewrite", rewrite_ms, settings.retrieval_intent_enabled)
     for name, counter in strategies.items():
         if counter:
             shown = ", ".join(f"{s} {count}" for s, count in counter.most_common())
@@ -486,8 +556,7 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
         f"context          recall {sum(context_recalls) / n:.3f}  MRR {sum(context_ranks) / n:.3f}"
         f"  (all rounds; mean rounds {sum(rounds) / n:.2f})"
     )
-    if gate_ms and (completions is None or completions.paid):
-        print(f"gate             median {statistics.median(gate_ms):.0f} ms, max {max(gate_ms)} ms")
+    print_timing("gate", gate_ms, settings.retrieval_max_iterations > 1)
     for line in short:
         print(f"  not enough     {line}")
     if coverage:
@@ -499,8 +568,36 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
         wrong = [qid for qid, ok in browsed.items() if not ok]
         print(f"browsed          {right}/{len(browsed)} on the right document {wrong or ''}")
     if full:
-        print(f"citation acc.    {sum(cited_right_page) / len(cited_right_page):.3f}")
-        print(f"mean iterations  {sum(iterations) / len(iterations):.2f}")
+        _print_checked(checked, dataset, sha_by_id, reflect_ms)
+
+
+def _print_checked(checked, dataset, sha_by_id, reflect_ms) -> None:
+    from eval.judge import decided_right, fabrication_rate, unconfirmed
+
+    for name, rows in checked.items():
+        before = fabrication_rate([c.before for c in rows])
+        after = fabrication_rate([c.after for c in rows])
+        print(f"fabrication, {name}   before {before:.3f}  after {after:.3f}  (n={len(rows)})")
+    rows_b = checked["B"]
+    for label, judged in (("before", "before"), ("after", "after")):
+        wrong = [c for c in rows_b if not decided_right(c.kind, getattr(c, judged))]
+        shown = ", ".join(f"{c.id} ({c.kind})" for c in wrong) or "-"
+        print(f"set B, {label:<9} {len(rows_b) - len(wrong)}/{len(rows_b)} right; wrong: {shown}")
+    labelled = {q.id: q for q in dataset.set_a}
+    for label in ("draft", "final"):
+        right = [
+            cited_right(getattr(c, label).citations, labelled[c.id], sha_by_id)
+            for c in checked["A"]
+        ]
+        print(f"citation acc.    {label:<6} {sum(right) / len(right):.3f}")
+    print_timing("reflect", reflect_ms, bool(checked["A"]))
+    for c in checked["A"] + checked["B"]:
+        doubtful = unconfirmed(list(c.dropped), c.before)
+        for sentence in c.dropped:
+            verdict = "judge did not flag it" if sentence in doubtful else "judge agreed"
+            print(f"  dropped        {c.id}: {sentence!r} ({verdict})")
+        for sentence in c.after.unsupported:
+            print(f"  still unsupp.  {c.id}: {sentence!r}")
 
 
 async def _run(

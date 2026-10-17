@@ -370,3 +370,153 @@ async def test_outline_coverage_counts_the_chapters_the_context_reaches(db_sessi
     reached = await outline_coverage(db_session, document.id, [parents[0], parents[1], parents[3]])
 
     assert reached == pytest.approx(2 / 3)
+
+
+def test_fabrication_is_the_share_of_answers_with_any_unsupported_claim():
+    from eval.judge import Judgement, fabrication_rate
+
+    judged = [
+        Judgement(declined=False, unsupported=[]),
+        Judgement(declined=False, unsupported=["Tạm giữ xe 7 ngày."]),
+        Judgement(declined=True, unsupported=[]),
+        Judgement(declined=False, unsupported=["a", "b"]),
+    ]
+
+    assert fabrication_rate(judged) == 0.5
+
+
+def test_set_b_is_right_when_outside_questions_are_declined_and_the_rest_answered():
+    from eval.judge import Judgement, decided_right
+
+    declined, answered = (
+        Judgement(declined=True, unsupported=[]),
+        Judgement(declined=False, unsupported=[]),
+    )
+
+    assert decided_right("outside", declined) and not decided_right("outside", answered)
+    assert decided_right("web-tempting", answered) and not decided_right("web-tempting", declined)
+
+
+def test_a_dropped_sentence_the_judge_did_not_flag_is_reported_as_a_possible_overdrop():
+    """The check and the judge are the same model on different prompts.
+    Where they disagree is where a person has to read."""
+    from eval.judge import Judgement, unconfirmed
+
+    judged = Judgement(declined=False, unsupported=["Tạm giữ xe  7 ngày [2]."])
+
+    assert unconfirmed(["Tạm giữ xe 7 ngày [2].", "Trừ 4 điểm [1]."], judged) == ["Trừ 4 điểm [1]."]
+
+
+def test_the_judge_reads_the_question_the_sources_and_the_answer():
+    import uuid
+
+    from app.core.contracts import Context, DocRef, Passage
+    from eval.judge import build_messages
+
+    context = Context(
+        passages=(
+            Passage(
+                ordinal=1,
+                text="Phạt tiền 4 triệu đồng.",
+                ref=DocRef(uuid.UUID(int=1), uuid.UUID(int=2), uuid.UUID(int=3), 5, "nd.pdf"),
+            ),
+        )
+    )
+
+    messages = build_messages("Phạt bao nhiêu?", "Phạt 4 triệu.", context)
+    system, user = (m["content"] for m in messages)
+
+    assert "declined" in system and "unsupported" in system
+    assert "Phạt bao nhiêu?" in user and "Phạt 4 triệu." in user
+    assert "Phạt tiền 4 triệu đồng." in user
+
+
+@pytest.mark.asyncio
+async def test_an_answer_is_judged_as_drafted_and_again_only_if_the_check_changed_it():
+    from app.core.contracts import Answer, Query, Trace
+    from app.core.pipeline import gather
+    from eval.judge import Judgement
+    from eval.run import answer_and_judge
+    from shared.llm import AsyncStubProvider
+    from tests.test_pipeline import _stages
+
+    async def generate(query, context, trace):
+        return "Phạt 4 triệu [1]. Tạm giữ xe [1].", ()
+
+    async def reflect(query, answer, context, trace):
+        trace.record(
+            "reflect_detail", ms=0, asked_model=True, unsupported=["Tạm giữ xe [1]."], unmatched=[]
+        )
+        return Answer(text="Phạt 4 triệu [1].", citations=(), trace=trace)
+
+    async def keep(query, answer, context, trace):
+        return answer
+
+    question = LabelledQuestion(
+        id="a1", kind="baseline", question="q", gold_sha256="a" * 64, gold_page=1, quote="x"
+    )
+    provider = AsyncStubProvider()
+    provider.script(
+        Judgement,
+        Judgement(declined=False, unsupported=["Tạm giữ xe [1]."]),
+        Judgement(declined=False, unsupported=[]),
+    )
+    stages = _stages(generate=generate, reflect=reflect)
+    trace = Trace()
+    gathered = await gather(Query(text="q"), stages, 1, trace)
+
+    checked = await answer_and_judge(stages, provider, question, gathered, trace)
+
+    assert (checked.before.unsupported, checked.after.unsupported) == (["Tạm giữ xe [1]."], [])
+    assert checked.dropped == ("Tạm giữ xe [1].",)
+
+    unchanged = _stages(generate=generate, reflect=keep)
+    calls = len(provider.calls)
+    await answer_and_judge(unchanged, provider, question, gathered, Trace())
+    assert len(provider.calls) == calls + 1
+
+
+def test_a_call_the_cache_answered_is_not_timed(capsys):
+    from app.core.contracts import Trace
+    from eval.run import print_timing, timed
+
+    trace = Trace()
+    trace.record("reflect", ms=0)
+    trace.record("reflect", ms=2)
+    trace.record("reflect", ms=1400)
+
+    assert timed(trace, "reflect") == [1400]
+    print_timing("rewrite", [], ran=True)
+    print_timing("gate", [], ran=False)
+    assert (
+        capsys.readouterr().out == "rewrite          answered from the cache: time not measured\n"
+    )
+
+
+def test_a_fabrication_is_planted_at_the_end_of_the_first_paragraph():
+    from eval.inject import plant
+
+    assert (
+        plant("Một [1]. Hai [2].\n\nBa [3].", "Bịa [1].") == "Một [1]. Hai [2]. Bịa [1].\n\nBa [3]."
+    )
+    assert plant("Một [1].", "Bịa [1].") == "Một [1]. Bịa [1]."
+
+
+def test_a_planted_sentence_is_caught_only_if_reflection_dropped_it():
+    """The rest of what it dropped was right before the plant: collateral."""
+    from eval.inject import outcome
+
+    planted = "Phạt từ 600.000 đồng đến 800.000 đồng. [4]"
+
+    assert outcome(planted, ["Phạt từ 600.000 đồng đến 800.000 đồng [4]."]) == (True, [])
+    assert outcome(planted, ["Trừ 4 điểm. [2]"]) == (False, ["Trừ 4 điểm. [2]"])
+
+
+def test_every_planted_sentence_belongs_to_a_set_a_question():
+    from eval.inject import load_injections
+
+    planted = load_injections("eval/injections.yaml")
+    ids = {q.id for q in load_dataset("eval/dataset.yaml").set_a}
+
+    assert len(planted) == 20 and {p.id for p in planted} <= ids
+    assert {p.kind for p in planted} == {"bracket", "number", "invented"}
