@@ -899,7 +899,9 @@ behind `RETRIEVAL_INTENT_ENABLED`, rewrites each question into a standalone one 
 searched; its plan is [`plans/phase-3-r4.vi.md`](plans/phase-3-r4.vi.md). R5, behind
 `RETRIEVAL_ROUTER_ENABLED`, answers a question about a whole document from that document's outline
 (`parent_chunks.heading_path`) instead of a search; its plan is
-[`plans/phase-3-r5.vi.md`](plans/phase-3-r5.vi.md).
+[`plans/phase-3-r5.vi.md`](plans/phase-3-r5.vi.md). R6, a sufficiency gate that may search again up to
+`RETRIEVAL_MAX_ITERATIONS` rounds, is built and ships at one round: it found no gain on the eval set;
+its plan is [`plans/phase-3-r6.vi.md`](plans/phase-3-r6.vi.md).
 
 **Nothing from Phase 2 is stubbed during Phase 1** — no empty `app/core/` directory, no placeholder
 router. It arrives whole, or not at all.

@@ -542,6 +542,13 @@ Loop semantics, all three easy to get wrong:
 Out of iterations, the pipeline **answers anyway**, with a note that the documents may not cover the
 question fully. It never returns an error for failing to find enough.
 
+> **Built at R6 (2026-10-17), and shipped at one round.** The gate runs when
+> `RETRIEVAL_MAX_ITERATIONS` is above 1, at reasoning effort `GATE_REASONING_EFFORT` (`none`); it
+> answers "sufficient" without a call for small talk and summaries, whose second search could add
+> nothing. The answer is always to the user's question, never to the gate's last search; each round
+> after the first may add `CONTEXT_ROUND_EXTRA` tokens to the budget. On the eval set it was
+> calibrated (1.15–1.20 rounds) but found no page the first round had missed (§8.7).
+
 **Health metric: mean iterations must sit in 1.2–1.6.** At 3.0 the gate is never satisfied and costs
 triple for nothing. At exactly 1.0 it is indistinguishable from its no-op.
 
@@ -783,7 +790,18 @@ after the other.
 | | summarize | 4 | 1.000 | 0.875 |
 
 Missed at R1: `a06`, `a08`, `a10`, `a13`, `a14`, `a16`. Missed at R2: `a08`, `a13`, `a14`, `a16`, `a18`.
-Missed at R3: `a01`, `a14`, `a16`. Missed at R4: `a01`, `a15`. Missed at R5: `a01`, `a15`. R3 was measured on 2026-10-17 with the same corpus and the same
+Missed at R3: `a01`, `a14`, `a16`. Missed at R4: `a01`, `a15`. Missed at R5: `a01`, `a15`.
+
+**R6, measured at the final context** (the pages the model is given, after every round), against R5
+measured the same way, both on 2026-10-17:
+
+| Setup | Context recall | Context MRR | Mean rounds | Gate time |
+|---|---|---|---|---|
+| R5 (one round) | 0.900 | 0.635 | 1.00 | — |
+| R6, gate at reasoning effort `none` | 0.900 | 0.635 | 1.20 | median 1.2 s, at most 3.4 s |
+| R6, gate at `low` | 0.900 | 0.635 | 1.15 | median 1.3 s, at most 5.2 s |
+| R5 with the reranker off | 0.850 | 0.598 | 1.00 | — |
+| R6 with the reranker off, gate at `low` | 0.850 | 0.598 | 1.20 | median 1.3 s | R3 was measured on 2026-10-17 with the same corpus and the same
 question vectors as R2 (`--embed-cache`), so the two rows differ only by the reranker.
 
 The R2 row was measured twice, before and after the keyword index was rebuilt to split codes (§5.2):
@@ -803,6 +821,20 @@ How to read it:
   five or worse, is beaten by the first four of each list and by everything both lists agree on, and
   the cut to ten comes straight after. Recall beyond that is what the reranker of R3 is for: it
   chooses from the whole fused set, not from its first ten.
+- **R6 changed nothing on this set, and the table says why.** The gate is calibrated: 1.15–1.20
+  rounds on average, inside the healthy 1.2–1.6 of §8.2 or just under it, and it calls "not enough"
+  only where something is missing: `a01` (the fine for a car running a red light), `a14` (how long the
+  licence is withdrawn), `a13`, `a11`. But the searches it writes do not bring the missing page up.
+  For `a01` the page is lost to the CPU reranker from R3 on, and every refined search goes through
+  the same reranker; with the reranker off, `a14`'s refined search ("Thời hạn tước quyền sử dụng
+  giấy phép lái xe …") still does not find page 15, because those words are in nearly every article
+  of the decree. Two faults were found and fixed on the way: the answer was given to the gate's last
+  search instead of the user's question, and the first round filled 7,712 of 8,000 tokens, leaving
+  later rounds no room (each round after the first now adds `CONTEXT_ROUND_EXTRA`, 3,000 tokens).
+  What would move these questions is retrieval -- a stronger reranker -- not more rounds of the same
+  one. `RETRIEVAL_MAX_ITERATIONS` stays 1 by default: the gate costs every question a model call
+  (about 1.2 s) for no measured gain here. When it does run out of rounds, the answer now says what
+  the documents may not cover.
 - **R5 is measured by the share of the document's outline that reached the context**, not by recall:
   one gold page cannot measure a summary (§8.4). For the four summary questions it went from 0.440 at
   R4 -- the ten passages most like the question cover two to four of a law's six to nine chapters --
