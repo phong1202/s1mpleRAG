@@ -7,6 +7,8 @@ class QueryRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     category: str | None = None
     document_id: uuid.UUID | None = None
+    # From the previous answer. Absent, the question starts a conversation.
+    conversation_id: uuid.UUID | None = None
 
     @field_validator("question")
     @classmethod
@@ -37,3 +39,5 @@ class QueryResponse(BaseModel):
     answer: str
     citations: list[CitationOut]
     latency_ms: int
+    # Send it back with the next question to continue this conversation.
+    conversation_id: uuid.UUID
