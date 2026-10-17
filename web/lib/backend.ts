@@ -1,4 +1,10 @@
-import type { DocumentSummary, QueryAnswer } from '@/lib/types'
+import type {
+  ConversationDetail,
+  ConversationSummary,
+  CurrentUser,
+  DocumentSummary,
+  QueryAnswer,
+} from '@/lib/types'
 
 // Every backend call goes through the `/backend/*` rewrite in next.config.mjs,
 // so the browser never needs the API's address or a CORS grant from it. The
@@ -26,6 +32,8 @@ export type ErrorKey =
   | 'document_not_found'
   | 'question_invalid'
   | 'query_failed'
+  | 'conversation_not_found'
+  | 'conversation_unavailable'
 
 // `key` picks a translated message when there is one; `message` is the
 // backend's own text, shown when there is not. `requestId` is the backend's
@@ -42,7 +50,7 @@ export class BackendError extends Error {
 
 type Envelope<T> = { code: number; message: string; data: T | null }
 
-type Paginated<T> = { items: T[]; total: number; limit: number; offset: number }
+export type Paginated<T> = { items: T[]; total: number; limit: number; offset: number }
 
 type UploadTarget = { upload_url: string; object_key: string; expires_in: number }
 
@@ -65,9 +73,18 @@ function documentKey(status: number): ErrorKey | null {
 
 // Anything /query refuses that is not the question's own fault is one
 // failure to the user: the backend does not tell a provider error from a
-// quota or a rate limit either.
+// quota or a rate limit either. A 404 is the conversation id it no longer
+// has, which the chat recovers from without telling anyone.
 function queryKey(status: number): ErrorKey {
-  return status === 422 ? 'question_invalid' : 'query_failed'
+  if (status === 422) return 'question_invalid'
+  if (status === 404) return 'conversation_not_found'
+  return 'query_failed'
+}
+
+// Reading or deleting a conversation: a 404 means it is gone (deleted, or
+// the database was reset), which the chat handles without an error.
+function conversationKey(status: number): ErrorKey {
+  return status === 404 ? 'conversation_not_found' : 'conversation_unavailable'
 }
 
 async function call<T>(
@@ -113,10 +130,36 @@ export function deleteDocument(id: string) {
   return call<null>(`/documents/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
-// One question, one answer: no streaming, and no history sent along -- the
-// backend answers every question on its own.
-export function askQuestion(question: string, signal?: AbortSignal) {
-  return call<QueryAnswer>('/query', { ...json('POST', { question }), signal }, queryKey)
+// One question, one answer, no streaming. The history is the backend's: the
+// conversation id, from the previous answer, is what ties a follow-up to the
+// questions before it. Without one the question opens a conversation.
+export function askQuestion(question: string, conversationId: string | null, signal?: AbortSignal) {
+  const payload = conversationId ? { question, conversation_id: conversationId } : { question }
+  return call<QueryAnswer>('/query', { ...json('POST', payload), signal }, queryKey)
+}
+
+export const ME_KEY = '/me'
+
+export function fetchMe(path: string) {
+  return call<CurrentUser>(path)
+}
+
+export const CONVERSATIONS_PAGE = 20
+
+export function conversationsKey(page: number) {
+  return `/conversations?limit=${CONVERSATIONS_PAGE}&offset=${page * CONVERSATIONS_PAGE}`
+}
+
+export function fetchConversations(path: string) {
+  return call<Paginated<ConversationSummary>>(path, undefined, conversationKey)
+}
+
+export function fetchConversation(id: string, signal?: AbortSignal) {
+  return call<ConversationDetail>(`/conversations/${encodeURIComponent(id)}`, { signal }, conversationKey)
+}
+
+export function deleteConversation(id: string) {
+  return call<null>(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }, conversationKey)
 }
 
 // The PDF's bytes, for the in-page viewer. Relayed by this app's own

@@ -73,11 +73,14 @@ export type Citation = {
 }
 
 // POST /query result. The citations are the sources the answer actually
-// cites, in order of first use; an answer the corpus cannot support has none.
+// cites, in order of first use; an answer the corpus cannot support, or a
+// reply to small talk, has none. `conversation_id` is always set: the one the
+// question was sent with, or a new one when it was sent without.
 export type QueryAnswer = {
   answer: string
   citations: Citation[]
   latency_ms: number
+  conversation_id: string
 }
 
 export type Message = {
@@ -85,4 +88,43 @@ export type Message = {
   role: 'user' | 'assistant'
   text: string
   citations?: Citation[]
+}
+
+// GET /me. Until login exists the backend treats every request as its seeded
+// admin (docs/be-conversations-handoff.md).
+export type CurrentUser = {
+  id: string
+  username: string
+  display_name: string
+  is_admin: boolean
+}
+
+// GET /conversations item: the current user's conversations, most recently
+// updated first. `title` is the first question.
+export type ConversationSummary = {
+  id: string
+  title: string | null
+  created_at: string
+  updated_at: string
+  message_count: number
+}
+
+// One turn as the backend stored it. `citations` is set on answers only,
+// [] when the answer cited nothing, and null on answers stored before the
+// backend kept them.
+export type StoredMessage = {
+  id: number
+  role: 'user' | 'assistant'
+  text: string
+  citations: Citation[] | null
+  created_at: string
+}
+
+// GET /conversations/{id}: the turns oldest first.
+export type ConversationDetail = {
+  id: string
+  title: string | null
+  created_at: string
+  updated_at: string
+  messages: StoredMessage[]
 }
