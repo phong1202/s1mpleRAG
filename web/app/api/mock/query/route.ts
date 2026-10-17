@@ -10,8 +10,17 @@
 //   /html   HTML and Markdown in the answer and in a quote
 //   /500    the provider failed
 //   /slow   20 seconds, to try the stop button
+//   /forget the conversation sent along is dropped and refused with 404, as
+//           after the backend's database was reset; asked without one, the
+//           question is answered in a new conversation
 //   (else)  an answer citing two documents, ordinals 1 and 3, once as a
 //           list ([1, 3]), plus a [7] that has no citation behind it
+//
+// Answers are kept in conversations (../shared.ts), so GET /conversations and
+// GET /conversations/{id} read them back. A failed question is not kept, as
+// on the backend.
+
+import { addExchange, createConversation, deleteConversation, envelope, getConversation, MOCK_ENABLED } from '../shared'
 
 const API_URL = process.env.API_URL ?? 'http://localhost:8000'
 const MAX_QUESTION_CHARS = 2000
@@ -54,10 +63,6 @@ const ANSWERS = {
     'Mức phạt nằm ở bảng dưới đây [1].\n\n<img src=x onerror="document.title=\'pwned-answer\'">\n\n<script>document.title="pwned-answer"</script>\n\n<b onclick="document.title=\'pwned-answer\'">in đậm bằng HTML</b>\n\n[bấm vào đây](javascript:document.title=\'pwned-answer\')\n\n![ảnh ngoài](https://example.com/pixel.png)\n\n| Hành vi | Mức phạt |\n| --- | --- |\n| Vượt đèn đỏ | 18 - 20 triệu [1] |',
 }
 
-function envelope(status: number, message: string, data: unknown, requestId: string) {
-  return Response.json({ code: status, message, data }, { status, headers: { 'X-Request-ID': requestId } })
-}
-
 async function readyDocuments(): Promise<Doc[]> {
   try {
     const res = await fetch(`${API_URL}/documents?limit=100`, { cache: 'no-store' })
@@ -83,11 +88,12 @@ function cite(ordinal: number, doc: Doc, page: number, quote: string): Citation 
 
 export async function POST(request: Request) {
   const requestId = crypto.randomUUID()
-  if (process.env.QUERY_MOCK !== '1') return envelope(404, 'Not Found', null, requestId)
+  if (!MOCK_ENABLED) return envelope(404, 'Not Found', null, requestId)
 
   const started = Date.now()
-  const body = (await request.json().catch(() => null)) as { question?: unknown } | null
+  const body = (await request.json().catch(() => null)) as { question?: unknown; conversation_id?: unknown } | null
   const question = typeof body?.question === 'string' ? body.question.trim() : ''
+  const conversationId = body?.conversation_id ?? null
   if (!question || question.length > MAX_QUESTION_CHARS) {
     const errors = [{ field: 'question', message: 'String should have between 1 and 2000 characters' }]
     return envelope(422, 'Validation failed', { errors }, requestId)
@@ -96,6 +102,12 @@ export async function POST(request: Request) {
   const [command] = question.toLowerCase().split(/\s/)
   await new Promise((resolve) => setTimeout(resolve, command === '/slow' ? 20_000 : 1200))
   if (command === '/500') return envelope(500, 'Internal server error', null, requestId)
+  let conversation = conversationId === null ? undefined : getConversation(String(conversationId))
+  if (conversationId !== null && command === '/forget') {
+    deleteConversation(String(conversationId))
+    conversation = undefined
+  }
+  if (conversationId !== null && !conversation) return envelope(404, 'Conversation not found', null, requestId)
 
   const docs = await readyDocuments()
   const first = docs[0] ?? ABSENT
@@ -112,5 +124,9 @@ export async function POST(request: Request) {
     citations = [cite(1, first, 1, QUOTES.markup)]
   }
 
-  return envelope(200, 'Success', { answer, citations, latency_ms: Date.now() - started }, requestId)
+  // Created only now: a question that fails leaves no conversation behind.
+  conversation ??= createConversation()
+  addExchange(conversation, question, answer, citations)
+  const data = { answer, citations, latency_ms: Date.now() - started, conversation_id: conversation.id }
+  return envelope(200, 'Success', data, requestId)
 }
