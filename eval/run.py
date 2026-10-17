@@ -9,8 +9,11 @@ both need a judge of the answer's text, which arrives with R7.
 
 import argparse
 import asyncio
+import collections
 import json
 import pathlib
+import statistics
+import time
 import unicodedata
 from dataclasses import dataclass
 
@@ -142,8 +145,8 @@ class CachedEmbeddings:
             self.paid += 1
         return self._vectors[key]
 
-    async def complete(self, messages, schema):
-        return await self._provider.complete(messages, schema)
+    async def complete(self, messages, schema, reasoning_effort=None):
+        return await self._provider.complete(messages, schema, reasoning_effort)
 
     def save(self) -> None:
         # Written aside and moved into place: a run killed mid-write must not
@@ -152,6 +155,54 @@ class CachedEmbeddings:
         partial = self._path.with_suffix(".partial")
         partial.write_text(json.dumps(self._vectors), encoding="utf-8")
         partial.replace(self._path)
+
+
+class CachedCompletions:
+    """The provider, with model answers kept in a file between runs.
+
+    R4 asks the model to rewrite every question. The questions and their
+    history are frozen, so the answers can be too: keyed by model, schema and
+    the exact messages sent, a change to the prompt misses the cache instead of
+    reusing an answer to a different prompt.
+    """
+
+    def __init__(self, provider, path: pathlib.Path, model: str) -> None:
+        self._provider, self._path, self._model = provider, pathlib.Path(path), model
+        self._answers: dict[str, dict] = (
+            json.loads(self._path.read_text(encoding="utf-8")) if self._path.exists() else {}
+        )
+        self.paid = 0
+
+    async def complete(self, messages, schema, reasoning_effort=None):
+        # The effort is part of the key: the same prompt at another effort is
+        # another answer.
+        key = json.dumps(
+            [self._model, reasoning_effort, schema.__name__, messages],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if key not in self._answers:
+            answer = await self._provider.complete(messages, schema, reasoning_effort)
+            self._answers[key] = answer.model_dump()
+            self.paid += 1
+        return schema.model_validate(self._answers[key])
+
+    async def embed_query(self, text: str) -> list[float]:
+        return await self._provider.embed_query(text)
+
+    def save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        partial = self._path.with_suffix(".partial")
+        partial.write_text(json.dumps(self._answers, ensure_ascii=False), encoding="utf-8")
+        partial.replace(self._path)
+
+
+def intent_of(trace) -> str | None:
+    """What the rewriter (R4) took the question for; None without one."""
+    for node in trace.nodes:
+        if node.node == "rewrite_detail":
+            return node.detail.get("intent")
+    return None
 
 
 def stages_line(settings) -> str:
@@ -198,7 +249,11 @@ async def retrieved(stages, question: LabelledQuestion, trace=None) -> list:
     from app.core.contracts import Trace
 
     trace = Trace() if trace is None else trace
+    started = time.perf_counter()
     query = await stages.rewrite(_as_query(question), trace)
+    # Timed here because the eval calls the stages directly, not through the
+    # pipeline that would time them: R4 costs a model call per question.
+    trace.record("rewrite", ms=int((time.perf_counter() - started) * 1000))
     plan = await stages.plan(query, trace)
     return await stages.fuse(query, await stages.retrieve(plan, trace), trace)
 
@@ -215,7 +270,7 @@ async def _check_labels() -> None:
     print(f"labels           {len(dataset.set_a)} reachable")
 
 
-async def _main(full: bool, embed_cache: str | None = None) -> None:
+async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | None = None) -> None:
     from sqlalchemy import select
 
     from app.config import get_settings
@@ -233,10 +288,13 @@ async def _main(full: bool, embed_cache: str | None = None) -> None:
         # against it, and the recall it yields looks exactly like a number.
         raise SystemExit("eval needs LLM_PROVIDER=openai: the corpus holds real embeddings")
     provider = get_async_provider()
+    embeddings = completions = None
     if embed_cache:
-        provider = CachedEmbeddings(
+        provider = embeddings = CachedEmbeddings(
             provider, embed_cache, settings.openai_embed_model, settings.embed_dimensions
         )
+    if llm_cache:
+        provider = completions = CachedCompletions(provider, llm_cache, settings.openai_chat_model)
     top_k = settings.retrieval_top_k
 
     recalls: list[float] = []
@@ -247,6 +305,12 @@ async def _main(full: bool, embed_cache: str | None = None) -> None:
     iterations: list[int] = []
     rerank_models: set[str] = set()
     rerank_fallbacks: list[str] = []
+    intents: dict[str, collections.Counter] = {
+        "A": collections.Counter(),
+        "B": collections.Counter(),
+    }
+    chitchat_in_a: list[str] = []
+    rewrite_ms: list[int] = []
 
     try:
         async with AsyncSessionLocal() as session:
@@ -261,6 +325,12 @@ async def _main(full: bool, embed_cache: str | None = None) -> None:
                 gold = (question.gold_sha256, question.gold_page)
                 trace = Trace()
                 candidates = await retrieved(stages, question, trace)
+                intent = intent_of(trace)
+                if intent:
+                    rewrite_ms += [n.ms for n in trace.nodes if n.node == "rewrite"]
+                    intents["A"][intent] += 1
+                    if intent == "CHITCHAT":
+                        chitchat_in_a.append(question.id)
                 served, fallback = rerank_outcome(trace)
                 if served:
                     rerank_models.add(served)
@@ -293,10 +363,21 @@ async def _main(full: bool, embed_cache: str | None = None) -> None:
                     )
                 )
 
+            if settings.retrieval_intent_enabled:
+                # Set B is not scored yet (it needs a judge, R7), but what the
+                # rewriter makes of it is already worth seeing.
+                from app.core.contracts import Query
+
+                for question in dataset.set_b:
+                    trace = Trace()
+                    await stages.rewrite(Query(text=question.question), trace)
+                    intents["B"][intent_of(trace) or "none"] += 1
+
     finally:
-        # Also when a question fails mid-run: the vectors are paid for.
-        if isinstance(provider, CachedEmbeddings):
-            provider.save()
+        # Also when a question fails mid-run: what was paid for is kept.
+        for cache in (embeddings, completions):
+            if cache is not None:
+                cache.save()
     if rerank_fallbacks:
         # These would be R2 figures under an R3 label.
         raise SystemExit(
@@ -309,8 +390,22 @@ async def _main(full: bool, embed_cache: str | None = None) -> None:
         # From the traces, not the settings: what actually reranked.
         served = ", ".join(sorted(rerank_models)) or "none"
         print(f"reranker         {served} at {settings.reranker_url}")
-    if isinstance(provider, CachedEmbeddings):
-        print(f"paid embeddings  {provider.paid}")
+    if embeddings is not None:
+        print(f"paid embeddings  {embeddings.paid}")
+    if completions is not None:
+        print(f"paid completions {completions.paid}")
+    for name, counter in intents.items():
+        if counter:
+            shown = ", ".join(f"{intent} {count}" for intent, count in counter.most_common())
+            print(f"intents, set {name}   {shown}")
+    if rewrite_ms and completions is not None and completions.paid == 0:
+        print("rewrite          answered from the cache: time not measured")
+    elif rewrite_ms:
+        median = statistics.median(rewrite_ms)
+        print(f"rewrite          median {median:.0f} ms, max {max(rewrite_ms)} ms")
+    if chitchat_in_a:
+        # Small talk skips retrieval: a real question taken for it is lost.
+        print(f"WARNING          taken for small talk: {', '.join(chitchat_in_a)}")
     print(f"n                {n}")
     print(f"recall@{top_k:<10} {sum(recalls) / n:.3f}")
     print(f"MRR              {sum(ranks) / n:.3f}")
@@ -322,12 +417,14 @@ async def _main(full: bool, embed_cache: str | None = None) -> None:
         print(f"mean iterations  {sum(iterations) / len(iterations):.2f}")
 
 
-async def _run(full: bool, check_only: bool, embed_cache: str | None) -> None:
+async def _run(
+    full: bool, check_only: bool, embed_cache: str | None, llm_cache: str | None
+) -> None:
     # One event loop for both: the engine's pooled connections belong to the
     # loop that opened them.
     await _check_labels()
     if not check_only:
-        await _main(full, embed_cache)
+        await _main(full, embed_cache, llm_cache)
 
 
 if __name__ == "__main__":
@@ -339,9 +436,14 @@ if __name__ == "__main__":
         help="keep question embeddings in this file; later runs pay for none (data/ is gitignored)",
     )
     parser.add_argument(
+        "--llm-cache",
+        metavar="PATH",
+        help="keep model answers (the R4 rewrite) in this file; later runs pay for none",
+    )
+    parser.add_argument(
         "--check-labels",
         action="store_true",
         help="verify every Set A quote sits on its gold page, then stop; calls no provider",
     )
     args = parser.parse_args()
-    asyncio.run(_run(args.full, args.check_labels, args.embed_cache))
+    asyncio.run(_run(args.full, args.check_labels, args.embed_cache, args.llm_cache))

@@ -174,7 +174,7 @@ class _CountingProvider:
         self.embedded.append(text)
         return [float(len(text)), 1.0]
 
-    async def complete(self, messages, schema):
+    async def complete(self, messages, schema, reasoning_effort=None):
         return "completed"
 
 
@@ -237,3 +237,53 @@ def test_a_question_that_was_not_reranked_is_reported():
     assert rerank_outcome(reranked) == ("served/model", None)
     assert rerank_outcome(fell_back) == (None, "ConnectError: refused")
     assert rerank_outcome(without) == (None, None)
+
+
+class _ScriptedCompletions:
+    def __init__(self):
+        self.completed = 0
+
+    async def embed_query(self, text):
+        return [1.0]
+
+    async def complete(self, messages, schema, reasoning_effort=None):
+        from app.core.stages.rewrite import RewriteResult
+
+        self.completed += 1
+        text = messages[-1]["content"]
+        return RewriteResult(intent="SEARCH_CORPUS", standalone=text, sub_queries=[])
+
+
+@pytest.mark.asyncio
+async def test_a_cached_rewrite_is_not_asked_for_twice(tmp_path):
+    """R4 adds a paid model call per question. The questions and their
+    history are frozen, so the answer to them can be too."""
+    from app.core.stages.rewrite import RewriteResult
+    from eval.run import CachedCompletions
+
+    path = tmp_path / "llm.json"
+    messages = [{"role": "user", "content": "câu hỏi"}]
+    first = _ScriptedCompletions()
+    cached = CachedCompletions(first, path, model="m")
+    result = await cached.complete(messages, RewriteResult)
+    cached.save()
+
+    second = _ScriptedCompletions()
+    again = await CachedCompletions(second, path, model="m").complete(messages, RewriteResult)
+    other = await CachedCompletions(second, path, model="m").complete(
+        [{"role": "user", "content": "câu khác"}], RewriteResult
+    )
+
+    assert isinstance(again, RewriteResult) and again == result
+    assert (first.completed, second.completed) == (1, 1)
+    assert other.standalone == "câu khác"
+
+
+def test_the_intent_is_read_from_the_trace():
+    from app.core.contracts import Trace
+    from eval.run import intent_of
+
+    rewritten, untouched = Trace(), Trace()
+    rewritten.record("rewrite_detail", ms=0, intent="CHITCHAT", standalone="x", sub_queries=[])
+
+    assert intent_of(rewritten) == "CHITCHAT" and intent_of(untouched) is None
