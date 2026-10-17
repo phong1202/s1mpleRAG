@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from pydantic import BaseModel
 
 from app.core.contracts import Context, GateVerdict, Query, Trace
+from app.core.generator import source_line
 from shared.llm import AsyncLLMProvider
 
 _SYSTEM = (
@@ -39,10 +40,7 @@ class GateResult(BaseModel):
 
 def build_messages(query: Query, context: Context) -> list[dict]:
     lines = [f"[QUESTION] {query.text}", "", "[SOURCES]"]
-    for passage in context.passages:
-        label = [passage.ref.filename, passage.heading, f"page {passage.ref.page_number}"]
-        shown = " | ".join(part for part in label if part)
-        lines.append(f"[{passage.ordinal}] ({shown}) {passage.text}")
+    lines += [source_line(passage) for passage in context.passages]
     return [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": "\n".join(lines)}]
 
 

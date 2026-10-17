@@ -115,14 +115,26 @@ async def gather(query: Query, stages: Stages, max_iterations: int, trace: Trace
     return Gathered(asked, context, first_round, trace.iterations)
 
 
+async def respond(gathered: Gathered, stages: Stages, trace: Trace) -> tuple[Answer, Answer]:
+    """Answer, then check the answer (R7): the draft, and what the check left
+    of it. Apart from `answer` so the eval can judge both from one draft --
+    the answering model does not write the same answer twice."""
+    text, citations = await _run(
+        "generate", stages.generate, trace, gathered.asked, gathered.context, trace
+    )
+    draft = Answer(text=text, citations=citations, trace=trace)
+    # Checked against the question too: small talk has nothing to check.
+    final = await _run(
+        "reflect", stages.reflect, trace, gathered.asked, draft, gathered.context, trace
+    )
+    return draft, final
+
+
 async def answer(
     query: Query, stages: Stages, max_iterations: int, trace: Trace | None = None
 ) -> Answer:
     # Passed in by a caller that wants the trace even when this raises.
     trace = Trace() if trace is None else trace
     gathered = await gather(query, stages, max_iterations, trace)
-    text, citations = await _run(
-        "generate", stages.generate, trace, gathered.asked, gathered.context, trace
-    )
-    draft = Answer(text=text, citations=citations, trace=trace)
-    return await _run("reflect", stages.reflect, trace, draft, gathered.context, trace)
+    _, final = await respond(gathered, stages, trace)
+    return final

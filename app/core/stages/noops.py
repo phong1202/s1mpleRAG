@@ -48,6 +48,6 @@ async def gate(query: Query, context: Context, trace: Trace) -> GateVerdict:
     return GateVerdict(sufficient=True)
 
 
-async def reflect(answer, context: Context, trace: Trace):
+async def reflect(query: Query, answer, context: Context, trace: Trace):
     """R7 replaces this."""
     return answer

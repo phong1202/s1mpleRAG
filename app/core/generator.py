@@ -15,7 +15,15 @@ import re
 
 from pydantic import BaseModel
 
-from app.core.contracts import Citation, Context, DocCitation, DocRef, Query, WebCitation
+from app.core.contracts import (
+    Citation,
+    Context,
+    DocCitation,
+    DocRef,
+    Passage,
+    Query,
+    WebCitation,
+)
 from shared.llm import AsyncLLMProvider
 
 logger = logging.getLogger(__name__)
@@ -56,14 +64,18 @@ class Draft(BaseModel):
     answer: str
 
 
+def source_line(passage: Passage) -> str:
+    """A source as every prompt shows it. Document, heading and page are
+    shown; the uuid is not, and the map is in code. The heading is what tells
+    two look-alike provisions apart."""
+    label = [passage.ref.filename, passage.heading, f"page {passage.ref.page_number}"]
+    shown = " | ".join(part for part in label if part)
+    return f"[{passage.ordinal}] ({shown}) {passage.text}"
+
+
 def build_prompt(query: Query, context: Context) -> list[dict]:
     lines = ["[TRUSTED SOURCES]"]
-    for passage in context.passages:
-        # Document, heading and page are shown; the uuid is not. The map is in
-        # code. The heading is what tells two look-alike provisions apart.
-        label = [passage.ref.filename, passage.heading, f"page {passage.ref.page_number}"]
-        shown = " | ".join(part for part in label if part)
-        lines.append(f"[{passage.ordinal}] ({shown}) {passage.text}")
+    lines += [source_line(passage) for passage in context.passages]
 
     if context.untrusted:
         lines.append("")

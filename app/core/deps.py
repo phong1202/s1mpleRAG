@@ -14,6 +14,7 @@ from app.core.retrievers.browse import BrowseRetriever
 from app.core.retrievers.vector import VectorRetriever
 from app.core.stages import fusion, noops
 from app.core.stages.gate import make_gate
+from app.core.stages.reflect import make_reflect
 from app.core.stages.rewrite import make_rewrite
 from app.core.stages.route import route
 from app.repositories.chunk_repository import ChunkRepository
@@ -118,7 +119,13 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
             else noops.gate
         ),
         generate=generate,
-        reflect=noops.reflect,
+        # R7: a second reading of the answer, sentence by sentence, against
+        # the sources it was written from.
+        reflect=(
+            make_reflect(provider, reasoning_effort=settings.reflect_reasoning_effort)
+            if settings.retrieval_reflect_enabled
+            else noops.reflect
+        ),
     )
 
 

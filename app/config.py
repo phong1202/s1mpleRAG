@@ -142,6 +142,9 @@ class Settings(BaseSettings):
     rewrite_reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
     # The gate (R6) decides enough or not, and names what is missing.
     gate_reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
+    # Reflection (R7) compares each sentence of the answer with the sources.
+    # Measured: "none" still dropped a supported sentence where "low" dropped none.
+    reflect_reasoning_effort: Literal["none", "low", "medium", "high"] = "low"
     # -large rather than -small for its multilingual retrieval (MIRACL 54.9
     # vs 44.0) -- the corpus is Vietnamese. Shortened to embed_dimensions
     # by the API, which keeps the schema's vector(1536) and HNSW's 2000-dim
