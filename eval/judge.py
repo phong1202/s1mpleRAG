@@ -12,7 +12,7 @@ import re
 from pydantic import BaseModel
 
 from app.core.contracts import Context
-from app.core.generator import source_line
+from app.core.generator import source_lines
 
 JUDGE_REASONING_EFFORT = "high"
 
@@ -34,7 +34,7 @@ class Judgement(BaseModel):
 
 def build_messages(question: str, answer: str, context: Context) -> list[dict]:
     lines = [f"[QUESTION] {question}", "", "[SOURCES]"]
-    lines += [source_line(passage) for passage in context.passages]
+    lines += source_lines(context)
     lines += ["", "[ANSWER]", answer]
     return [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": "\n".join(lines)}]
 
@@ -52,10 +52,13 @@ def fabrication_rate(judged: list[Judgement]) -> float:
     return sum(bool(j.unsupported) for j in judged) / len(judged)
 
 
-def decided_right(kind: str, judged: Judgement) -> bool:
-    """Set B: a question outside the corpus is declined; one the corpus
-    answers, however much it sounds like it needs the web, is answered."""
-    return judged.declined if kind == "outside" else not judged.declined
+def decided_right(kind: str, judged: Judgement, cited_web: bool = False) -> bool:
+    """Set B: a question outside the corpus is declined, or answered from the
+    web (R8) with the pages cited; one the corpus answers, however much it
+    sounds like it needs the web, is answered."""
+    if kind == "outside":
+        return judged.declined or cited_web
+    return not judged.declined
 
 
 def _bare(sentence: str) -> str:

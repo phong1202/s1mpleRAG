@@ -395,6 +395,8 @@ def test_set_b_is_right_when_outside_questions_are_declined_and_the_rest_answere
 
     assert decided_right("outside", declined) and not decided_right("outside", answered)
     assert decided_right("web-tempting", answered) and not decided_right("web-tempting", declined)
+    # R8: an outside question answered from cited web pages is answered rightly.
+    assert decided_right("outside", answered, cited_web=True)
 
 
 def test_a_dropped_sentence_the_judge_did_not_flag_is_reported_as_a_possible_overdrop():
@@ -520,3 +522,44 @@ def test_every_planted_sentence_belongs_to_a_set_a_question():
 
     assert len(planted) == 20 and {p.id for p in planted} <= ids
     assert {p.kind for p in planted} == {"bracket", "number", "invented"}
+
+
+def test_a_question_that_went_to_the_web_is_read_from_the_trace():
+    from app.core.contracts import Trace
+    from eval.run import web_search_of
+
+    went, stayed = Trace(), Trace()
+    went.record("web_detail", ms=0, query="Tỷ giá USD?", urls=["https://x.vn", "https://y.vn"])
+
+    assert web_search_of(went) == ("Tỷ giá USD?", 2)
+    assert web_search_of(stayed) is None
+
+
+class _CountingSearch:
+    def __init__(self):
+        self.searched = []
+        self._max_results, self._include_domains = 5, []
+
+    async def search(self, text):
+        from app.core.contracts import Candidate, WebRef
+
+        self.searched.append(text)
+        return [Candidate("web", 1, 0.9, "Tỷ giá 25.460.", WebRef("https://x.vn", "X"))]
+
+
+@pytest.mark.asyncio
+async def test_a_cached_web_search_is_not_paid_for_twice(tmp_path):
+    """Tavily bills a credit a search, and the eval's questions do not change."""
+    from eval.run import CachedWebSearch
+
+    path = tmp_path / "web.json"
+    first = _CountingSearch()
+    cached = CachedWebSearch(first, path)
+    found = await cached.search("Tỷ giá USD?")
+    cached.save()
+
+    second = _CountingSearch()
+    again = await CachedWebSearch(second, path).search("Tỷ giá USD?")
+
+    assert again == found and first.searched == ["Tỷ giá USD?"] and second.searched == []
+    assert CachedWebSearch(second, path).paid == 0

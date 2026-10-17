@@ -194,6 +194,58 @@ class CachedCompletions:
         partial.replace(self._path)
 
 
+class CachedWebSearch:
+    """Tavily, with what it found kept in a file between runs: a credit a
+    search, and the eval asks the same questions every time."""
+
+    def __init__(self, searcher, path: pathlib.Path | str) -> None:
+        self._searcher = searcher
+        self._path = pathlib.Path(path)
+        self._found = json.loads(self._path.read_text()) if self._path.exists() else {}
+        self.paid = 0
+
+    def _key(self, text: str) -> str:
+        return json.dumps(
+            [text, self._searcher._max_results, list(self._searcher._include_domains)],
+            ensure_ascii=False,
+        )
+
+    async def search(self, text: str):
+        from app.core.contracts import Candidate, WebRef
+
+        key = self._key(text)
+        if key not in self._found:
+            found = await self._searcher.search(text)
+            self.paid += 1
+            self._found[key] = [
+                {
+                    "rank": c.rank,
+                    "score": c.score,
+                    "text": c.text,
+                    "url": c.ref.url,
+                    "title": c.ref.title,
+                }
+                for c in found
+            ]
+        return [
+            Candidate("web", r["rank"], r["score"], r["text"], WebRef(r["url"], r["title"]))
+            for r in self._found[key]
+        ]
+
+    def save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(self._found, ensure_ascii=False, indent=1))
+
+
+def web_search_of(trace) -> tuple[str, int] | None:
+    """(what was searched, how many pages came back) when the question went
+    to the web (R8)."""
+    for node in trace.nodes:
+        if node.node == "web_detail":
+            return node.detail["query"], len(node.detail["urls"])
+    return None
+
+
 async def outline_coverage(session, document_id, parent_ids) -> float:
     """The share of a document's top-level sections that the given parents
     belong to. A summary question's gold is one page (spec §8.4), which a
@@ -369,7 +421,12 @@ async def _check_labels() -> None:
     print(f"labels           {len(dataset.set_a)} reachable")
 
 
-async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | None = None) -> None:
+async def _main(
+    full: bool,
+    embed_cache: str | None = None,
+    llm_cache: str | None = None,
+    web_cache: str | None = None,
+) -> None:
     from sqlalchemy import select
 
     from app.config import get_settings
@@ -393,6 +450,20 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
         )
     if llm_cache:
         provider = completions = CachedCompletions(provider, llm_cache, settings.openai_chat_model)
+    searcher = None
+    if settings.web_search_enabled and web_cache:
+        from app.core.retrievers.web import WebRetriever
+
+        searcher = CachedWebSearch(
+            WebRetriever(
+                api_key=settings.tavily_api_key,
+                max_results=settings.web_search_max_results,
+                include_domains=settings.web_domains,
+                timeout_s=settings.web_search_timeout_s,
+            ),
+            web_cache,
+        )
+    went_to_web: dict[str, list[str]] = {"A": [], "B": []}
     top_k = settings.retrieval_top_k
 
     recalls: list[float] = []
@@ -428,7 +499,7 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
             rows = await session.execute(select(Document.id, Document.sha256_hash))
             sha_by_id = {row.id: row.sha256_hash for row in rows}
 
-            stages = build_stages(session, provider, settings)
+            stages = build_stages(session, provider, settings, searcher)
 
             for question in dataset.set_a:
                 gold = (question.gold_sha256, question.gold_page)
@@ -483,6 +554,8 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
                 if not full:
                     continue
 
+                if web := web_search_of(trace):
+                    went_to_web["A"].append(f"{question.id} ({web[1]} pages): {web[0]}")
                 checked["A"].append(
                     await answer_and_judge(stages, provider, question, gathered, trace)
                 )
@@ -496,6 +569,8 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
                     gathered = await retrieved(
                         stages, question, trace, settings.retrieval_max_iterations
                     )
+                    if web := web_search_of(trace):
+                        went_to_web["B"].append(question.id)
                     checked["B"].append(
                         await answer_and_judge(stages, provider, question, gathered, trace)
                     )
@@ -515,7 +590,7 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
 
     finally:
         # Also when a question fails mid-run: what was paid for is kept.
-        for cache in (embeddings, completions):
+        for cache in (embeddings, completions, searcher):
             if cache is not None:
                 cache.save()
     if rerank_fallbacks:
@@ -569,6 +644,27 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
         print(f"browsed          {right}/{len(browsed)} on the right document {wrong or ''}")
     if full:
         _print_checked(checked, dataset, sha_by_id, reflect_ms)
+    if full and settings.web_search_enabled:
+        if searcher is not None:
+            print(f"paid searches    {searcher.paid}")
+        _print_web(went_to_web, dataset)
+
+
+def _print_web(went_to_web, dataset) -> None:
+    """R8 is measured by the decision to go outside (spec §8.4): a question
+    the corpus answers, however much it sounds like news, must not."""
+    print(f"web, set A       {len(went_to_web['A'])} of {len(dataset.set_a)} went to the web")
+    for line in went_to_web["A"]:
+        print(f"  went           {line}")
+    for kind in ("outside", "web-tempting"):
+        ids = [q.id for q in dataset.set_b if q.kind == kind]
+        went = [i for i in ids if i in went_to_web["B"]]
+        should = "the corpus cannot answer" if kind == "outside" else "should be none"
+        print(f"web, {kind:<12} {len(went)}/{len(ids)} went ({should}) {went or ''}")
+
+
+def cites_the_web(answer) -> bool:
+    return any(getattr(c, "url", None) for c in answer.citations)
 
 
 def _print_checked(checked, dataset, sha_by_id, reflect_ms) -> None:
@@ -579,8 +675,12 @@ def _print_checked(checked, dataset, sha_by_id, reflect_ms) -> None:
         after = fabrication_rate([c.after for c in rows])
         print(f"fabrication, {name}   before {before:.3f}  after {after:.3f}  (n={len(rows)})")
     rows_b = checked["B"]
-    for label, judged in (("before", "before"), ("after", "after")):
-        wrong = [c for c in rows_b if not decided_right(c.kind, getattr(c, judged))]
+    for label, answer in (("before", "draft"), ("after", "final")):
+        wrong = [
+            c
+            for c in rows_b
+            if not decided_right(c.kind, getattr(c, label), cites_the_web(getattr(c, answer)))
+        ]
         shown = ", ".join(f"{c.id} ({c.kind})" for c in wrong) or "-"
         print(f"set B, {label:<9} {len(rows_b) - len(wrong)}/{len(rows_b)} right; wrong: {shown}")
     labelled = {q.id: q for q in dataset.set_a}
@@ -601,13 +701,17 @@ def _print_checked(checked, dataset, sha_by_id, reflect_ms) -> None:
 
 
 async def _run(
-    full: bool, check_only: bool, embed_cache: str | None, llm_cache: str | None
+    full: bool,
+    check_only: bool,
+    embed_cache: str | None,
+    llm_cache: str | None,
+    web_cache: str | None = None,
 ) -> None:
     # One event loop for both: the engine's pooled connections belong to the
     # loop that opened them.
     await _check_labels()
     if not check_only:
-        await _main(full, embed_cache, llm_cache)
+        await _main(full, embed_cache, llm_cache, web_cache)
 
 
 if __name__ == "__main__":
@@ -624,9 +728,16 @@ if __name__ == "__main__":
         help="keep model answers (the R4 rewrite) in this file; later runs pay for none",
     )
     parser.add_argument(
+        "--web-cache",
+        metavar="PATH",
+        help="keep Tavily's results in this file; later runs spend no credit (R8)",
+    )
+    parser.add_argument(
         "--check-labels",
         action="store_true",
         help="verify every Set A quote sits on its gold page, then stop; calls no provider",
     )
     args = parser.parse_args()
-    asyncio.run(_run(args.full, args.check_labels, args.embed_cache, args.llm_cache))
+    asyncio.run(
+        _run(args.full, args.check_labels, args.embed_cache, args.llm_cache, args.web_cache)
+    )
