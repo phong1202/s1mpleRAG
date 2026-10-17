@@ -13,7 +13,6 @@ import collections
 import json
 import pathlib
 import statistics
-import time
 import unicodedata
 from dataclasses import dataclass
 
@@ -270,20 +269,17 @@ def rerank_outcome(trace) -> tuple[str | None, str | None]:
     return None, None
 
 
-async def retrieved(stages, question: LabelledQuestion, trace=None) -> list:
-    """What retrieval hands to the context for this question: the candidates
-    leaving `fuse`. Measured there, not at one retriever, so the same ruler
-    judges hybrid search (R2), reranking (R3) and rewriting (R4) unchanged."""
+async def retrieved(stages, question: LabelledQuestion, trace=None, max_iterations: int = 1):
+    """Everything up to the answer, through the pipeline's own loop: the
+    candidates leaving `fuse` on the first round -- the ruler since R1, so
+    hybrid search (R2), reranking (R3), rewriting (R4) and routing (R5) are
+    judged unchanged -- and the context the rounds end with, which is what
+    the gate (R6) changes."""
     from app.core.contracts import Trace
+    from app.core.pipeline import gather
 
     trace = Trace() if trace is None else trace
-    started = time.perf_counter()
-    query = await stages.rewrite(_as_query(question), trace)
-    # Timed here because the eval calls the stages directly, not through the
-    # pipeline that would time them: R4 costs a model call per question.
-    trace.record("rewrite", ms=int((time.perf_counter() - started) * 1000))
-    plan = await stages.plan(query, trace)
-    return await stages.fuse(query, await stages.retrieve(plan, trace), trace)
+    return await gather(_as_query(question), stages, max_iterations, trace)
 
 
 async def _check_labels() -> None:
@@ -339,6 +335,11 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
     }
     chitchat_in_a: list[str] = []
     rewrite_ms: list[int] = []
+    context_recalls: list[float] = []
+    context_ranks: list[float] = []
+    rounds: list[int] = []
+    gate_ms: list[int] = []
+    short: list[str] = []
     coverage: dict[str, float] = {}
     strategies: dict[str, collections.Counter] = {
         "A": collections.Counter(),
@@ -358,7 +359,26 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
             for question in dataset.set_a:
                 gold = (question.gold_sha256, question.gold_page)
                 trace = Trace()
-                candidates = await retrieved(stages, question, trace)
+                gathered = await retrieved(
+                    stages, question, trace, settings.retrieval_max_iterations
+                )
+                candidates = gathered.first_round
+                # R6's ruler: the pages in the context the rounds ended with,
+                # in the order the model reads them.
+                held = [
+                    Hit(sha_by_id[p.ref.document_id], p.ref.page_number)
+                    for p in gathered.context.passages
+                ]
+                context_recalls.append(recall_at_k(held, gold, len(held)))
+                context_ranks.append(reciprocal_rank(held, gold))
+                rounds.append(gathered.iterations)
+                gate_ms += [n.ms for n in trace.nodes if n.node == "gate"]
+                for node in trace.nodes:
+                    if node.node == "gate_detail" and not node.detail["sufficient"]:
+                        short.append(
+                            f"{question.id}: missing {node.detail['missing']!r}"
+                            f" -> searched {node.detail['refined_query']!r}"
+                        )
                 if strategy := strategy_of(trace):
                     strategies["A"][strategy] += 1
                 intent = intent_of(trace)
@@ -462,6 +482,14 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
     for kind, (count, recall, rank) in by_kind(scored).items():
         print(f"  {kind:<14} n={count:<3} recall {recall:.3f}  MRR {rank:.3f}")
     print(f"missed           {', '.join(missed) or '-'}")
+    print(
+        f"context          recall {sum(context_recalls) / n:.3f}  MRR {sum(context_ranks) / n:.3f}"
+        f"  (all rounds; mean rounds {sum(rounds) / n:.2f})"
+    )
+    if gate_ms and (completions is None or completions.paid):
+        print(f"gate             median {statistics.median(gate_ms):.0f} ms, max {max(gate_ms)} ms")
+    for line in short:
+        print(f"  not enough     {line}")
     if coverage:
         mean = sum(coverage.values()) / len(coverage)
         shown = ", ".join(f"{qid} {share:.2f}" for qid, share in coverage.items())

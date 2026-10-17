@@ -122,7 +122,26 @@ async def test_the_ruler_scores_what_leaves_fuse_with_the_earlier_turns_as_histo
         calls.append(("fuse", candidates))
         return ["fused"]
 
-    stages = SimpleNamespace(rewrite=rewrite, plan=plan, retrieve=retrieve, fuse=fuse)
+    from app.core.contracts import GateVerdict
+
+    async def expand(candidates, trace):
+        return candidates
+
+    def build_context(previous, candidates, trace):
+        return previous
+
+    async def gate(query, context, trace):
+        return GateVerdict(sufficient=True)
+
+    stages = SimpleNamespace(
+        rewrite=rewrite,
+        plan=plan,
+        retrieve=retrieve,
+        fuse=fuse,
+        expand=expand,
+        build_context=build_context,
+        gate=gate,
+    )
     question = LabelledQuestion(
         id="f",
         kind="followup",
@@ -133,7 +152,7 @@ async def test_the_ruler_scores_what_leaves_fuse_with_the_earlier_turns_as_histo
         turns=("o to?", "con xe may?"),
     )
 
-    assert await retrieved(stages, question) == ["fused"]
+    assert (await retrieved(stages, question)).first_round == ["fused"]
     assert calls == [
         ("rewrite", (Turn(role="user", text="o to?"),)),
         ("plan", "con xe may?"),
