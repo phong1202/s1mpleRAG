@@ -1,14 +1,16 @@
 """Retrieval-only by default: recall@10 and MRR need no chat call, only one
 embedding per question, so the metric you check after every tuning change costs
-next to nothing. `--full` runs the whole pipeline and adds citation accuracy
-and mean iterations.
-
-Set B (fabrication, the decision to go outside the corpus) is not scored yet:
-both need a judge of the answer's text, which arrives with R7.
+next to nothing. `--full` also answers every question of both sets and has a
+judge read each answer twice, as drafted and as reflection (R7) left it:
+fabrication rate, Set B's decline-or-answer decisions, citation accuracy.
 """
 
 import argparse
 import asyncio
+import collections
+import json
+import pathlib
+import statistics
 import unicodedata
 from dataclasses import dataclass
 
@@ -115,26 +117,296 @@ def by_kind(rows: list[tuple[str, float, float]]) -> dict[str, tuple[int, float,
     }
 
 
+class CachedEmbeddings:
+    """The provider, with question embeddings kept in a file between runs.
+
+    The questions are frozen (spec §8.4), so their vectors are too: only the
+    first run pays for them, and every later tuning step can be measured
+    without a paid call. Keyed by model, dimensions and text, so a change to
+    any of them misses the cache instead of reusing a vector from another
+    model. Everything else goes to the provider unchanged.
+    """
+
+    def __init__(self, provider, path: pathlib.Path, model: str, dimensions: int) -> None:
+        self._provider, self._path = provider, pathlib.Path(path)
+        self._prefix = f"{model}|{dimensions}|"
+        self._vectors: dict[str, list[float]] = (
+            json.loads(self._path.read_text(encoding="utf-8")) if self._path.exists() else {}
+        )
+        self.paid = 0
+
+    async def embed_query(self, text: str) -> list[float]:
+        key = self._prefix + text
+        if key not in self._vectors:
+            self._vectors[key] = await self._provider.embed_query(text)
+            self.paid += 1
+        return self._vectors[key]
+
+    async def complete(self, messages, schema, reasoning_effort=None):
+        return await self._provider.complete(messages, schema, reasoning_effort)
+
+    def save(self) -> None:
+        # Written aside and moved into place: a run killed mid-write must not
+        # leave a half file that loses every vector already paid for.
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        partial = self._path.with_suffix(".partial")
+        partial.write_text(json.dumps(self._vectors), encoding="utf-8")
+        partial.replace(self._path)
+
+
+class CachedCompletions:
+    """The provider, with model answers kept in a file between runs.
+
+    R4 asks the model to rewrite every question. The questions and their
+    history are frozen, so the answers can be too: keyed by model, schema and
+    the exact messages sent, a change to the prompt misses the cache instead of
+    reusing an answer to a different prompt.
+    """
+
+    def __init__(self, provider, path: pathlib.Path, model: str) -> None:
+        self._provider, self._path, self._model = provider, pathlib.Path(path), model
+        self._answers: dict[str, dict] = (
+            json.loads(self._path.read_text(encoding="utf-8")) if self._path.exists() else {}
+        )
+        self.paid = 0
+
+    async def complete(self, messages, schema, reasoning_effort=None):
+        # The effort is part of the key: the same prompt at another effort is
+        # another answer.
+        key = json.dumps(
+            [self._model, reasoning_effort, schema.__name__, messages],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if key not in self._answers:
+            answer = await self._provider.complete(messages, schema, reasoning_effort)
+            self._answers[key] = answer.model_dump()
+            self.paid += 1
+        return schema.model_validate(self._answers[key])
+
+    async def embed_query(self, text: str) -> list[float]:
+        return await self._provider.embed_query(text)
+
+    def save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        partial = self._path.with_suffix(".partial")
+        partial.write_text(json.dumps(self._answers, ensure_ascii=False), encoding="utf-8")
+        partial.replace(self._path)
+
+
+class CachedWebSearch:
+    """Tavily, with what it found kept in a file between runs: a credit a
+    search, and the eval asks the same questions every time."""
+
+    def __init__(self, searcher, path: pathlib.Path | str) -> None:
+        self._searcher = searcher
+        self._path = pathlib.Path(path)
+        self._found = json.loads(self._path.read_text()) if self._path.exists() else {}
+        self.paid = 0
+
+    def _key(self, text: str) -> str:
+        return json.dumps(
+            [text, self._searcher._max_results, list(self._searcher._include_domains)],
+            ensure_ascii=False,
+        )
+
+    async def search(self, text: str):
+        from app.core.contracts import Candidate, WebRef
+
+        key = self._key(text)
+        if key not in self._found:
+            found = await self._searcher.search(text)
+            self.paid += 1
+            self._found[key] = [
+                {
+                    "rank": c.rank,
+                    "score": c.score,
+                    "text": c.text,
+                    "url": c.ref.url,
+                    "title": c.ref.title,
+                }
+                for c in found
+            ]
+        return [
+            Candidate("web", r["rank"], r["score"], r["text"], WebRef(r["url"], r["title"]))
+            for r in self._found[key]
+        ]
+
+    def save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(self._found, ensure_ascii=False, indent=1))
+
+
+def web_search_of(trace) -> tuple[str, int] | None:
+    """(what was searched, how many pages came back) when the question went
+    to the web (R8)."""
+    for node in trace.nodes:
+        if node.node == "web_detail":
+            return node.detail["query"], len(node.detail["urls"])
+    return None
+
+
+async def outline_coverage(session, document_id, parent_ids) -> float:
+    """The share of a document's top-level sections that the given parents
+    belong to. A summary question's gold is one page (spec §8.4), which a
+    plain search finds; what a summary needs is the document's parts (R5)."""
+    from sqlalchemy import text
+
+    rows = await session.execute(
+        text("""
+        SELECT DISTINCT split_part(heading_path, ' > ', 1) AS top,
+               bool_or(id = ANY(CAST(:reached AS uuid[]))) OVER (
+                   PARTITION BY split_part(heading_path, ' > ', 1)) AS reached
+        FROM   parent_chunks
+        WHERE  document_id = CAST(:document_id AS uuid) AND heading_path IS NOT NULL
+        """),
+        {"document_id": document_id, "reached": list(parent_ids)},
+    )
+    sections = {row.top: row.reached for row in rows}
+    return sum(sections.values()) / len(sections) if sections else 0.0
+
+
+def strategy_of(trace) -> str | None:
+    """What the router (R5) chose; None without one."""
+    for node in trace.nodes:
+        if node.node == "route_detail":
+            return node.detail.get("strategy")
+    return None
+
+
+def intent_of(trace) -> str | None:
+    """What the rewriter (R4) took the question for; None without one."""
+    for node in trace.nodes:
+        if node.node == "rewrite_detail":
+            return node.detail.get("intent")
+    return None
+
+
+def stages_line(settings) -> str:
+    """Which rung of the ladder was measured. A recall figure recorded without
+    it cannot be compared with the next one."""
+    flags = {
+        "bm25": settings.retrieval_bm25_enabled,
+        "rerank": settings.retrieval_rerank_enabled,
+        "intent": settings.retrieval_intent_enabled,
+        "router": settings.retrieval_router_enabled,
+        "reflect": settings.retrieval_reflect_enabled,
+    }
+    return "stages           " + " ".join(
+        f"{name}={'on' if enabled else 'off'}" for name, enabled in flags.items()
+    )
+
+
 def _as_query(question: LabelledQuestion):
     """The question as a user would have sent it: the last turn, with the
     turns before it as history. Until R4 reads the history, a follow-up is
     searched as its bare last turn -- and scores zero, which is the point."""
     from app.core.contracts import Query, Turn
 
-    earlier = tuple(Turn(role="user", text=turn) for turn in question.turns[:-1])
+    # Set B's questions are single turns.
+    turns = getattr(question, "turns", ())
+    earlier = tuple(Turn(role="user", text=turn) for turn in turns[:-1])
     return Query(text=question.question, history=earlier)
 
 
-async def retrieved(stages, question: LabelledQuestion) -> list:
-    """What retrieval hands to the context for this question: the candidates
-    leaving `fuse`. Measured there, not at one retriever, so the same ruler
-    judges hybrid search (R2), reranking (R3) and rewriting (R4) unchanged."""
-    from app.core.contracts import Trace
+def rerank_outcome(trace) -> tuple[str | None, str | None]:
+    """(the model that reranked, why it did not) from a question's trace;
+    (None, None) when no rerank stage ran."""
+    for node in trace.nodes:
+        if node.node == "rerank_detail":
+            fallback = node.detail.get("fallback")
+            if fallback:
+                return None, fallback
+            return node.detail.get("model"), None
+    return None, None
 
-    trace = Trace()
-    query = await stages.rewrite(_as_query(question), trace)
-    plan = await stages.plan(query, trace)
-    return await stages.fuse(query, await stages.retrieve(plan, trace), trace)
+
+async def retrieved(stages, question: LabelledQuestion, trace=None, max_iterations: int = 1):
+    """Everything up to the answer, through the pipeline's own loop: the
+    candidates leaving `fuse` on the first round -- the ruler since R1, so
+    hybrid search (R2), reranking (R3), rewriting (R4) and routing (R5) are
+    judged unchanged -- and the context the rounds end with, which is what
+    the gate (R6) changes."""
+    from app.core.contracts import Trace
+    from app.core.pipeline import gather
+
+    trace = Trace() if trace is None else trace
+    return await gather(_as_query(question), stages, max_iterations, trace)
+
+
+@dataclass(frozen=True)
+class Checked:
+    """One answer, judged as drafted and as reflection left it."""
+
+    id: str
+    kind: str
+    draft: object
+    final: object
+    before: object
+    after: object
+    dropped: tuple[str, ...]
+
+
+def dropped_by_reflection(trace) -> tuple[str, ...]:
+    for node in trace.nodes:
+        if node.node == "reflect_detail" and node.detail.get("asked_model"):
+            unmatched = node.detail["unmatched"]
+            return tuple(s for s in node.detail["unsupported"] if s not in unmatched)
+    return ()
+
+
+async def answer_and_judge(stages, provider, question, gathered, trace) -> Checked:
+    """One draft, judged before and after the check: two drafts would differ
+    by more than the check does."""
+    from app.core.pipeline import respond
+    from eval.judge import judge
+
+    draft, final = await respond(gathered, stages, trace)
+    asked = gathered.asked.text
+    before = await judge(provider, asked, draft.text, gathered.context)
+    after = (
+        before
+        if final.text == draft.text
+        else await judge(provider, asked, final.text, gathered.context)
+    )
+    return Checked(
+        question.id,
+        question.kind,
+        draft,
+        final,
+        before,
+        after,
+        dropped_by_reflection(trace) if final.text != draft.text else (),
+    )
+
+
+def cited_right(citations, question: LabelledQuestion, sha_by_id: dict) -> float:
+    return float(
+        any(
+            getattr(c, "page_number", None) == question.gold_page
+            and sha_by_id.get(getattr(c, "document_id", None)) == question.gold_sha256
+            for c in citations
+        )
+    )
+
+
+_CACHED_MS = 50
+
+
+def timed(trace, node: str) -> list[int]:
+    """A node's times, without the calls the cache answered: those return in
+    a millisecond or two and would pull the median to nothing. No model call
+    has taken under a few hundred."""
+    return [n.ms for n in trace.nodes if n.node == node and n.ms > _CACHED_MS]
+
+
+def print_timing(name: str, ms: list[int], ran: bool) -> None:
+    if not ran:
+        return
+    if not ms:
+        print(f"{name:<16} answered from the cache: time not measured")
+        return
+    print(f"{name:<16} median {statistics.median(ms):.0f} ms, max {max(ms)} ms")
 
 
 async def _check_labels() -> None:
@@ -149,12 +421,17 @@ async def _check_labels() -> None:
     print(f"labels           {len(dataset.set_a)} reachable")
 
 
-async def _main(full: bool) -> None:
+async def _main(
+    full: bool,
+    embed_cache: str | None = None,
+    llm_cache: str | None = None,
+    web_cache: str | None = None,
+) -> None:
     from sqlalchemy import select
 
     from app.config import get_settings
+    from app.core.contracts import Trace
     from app.core.deps import build_stages
-    from app.core.pipeline import answer as run_pipeline
     from app.models import Document
     from app.utils.database import AsyncSessionLocal
     from shared.llm import get_async_provider
@@ -166,79 +443,301 @@ async def _main(full: bool) -> None:
         # against it, and the recall it yields looks exactly like a number.
         raise SystemExit("eval needs LLM_PROVIDER=openai: the corpus holds real embeddings")
     provider = get_async_provider()
+    embeddings = completions = None
+    if embed_cache:
+        provider = embeddings = CachedEmbeddings(
+            provider, embed_cache, settings.openai_embed_model, settings.embed_dimensions
+        )
+    if llm_cache:
+        provider = completions = CachedCompletions(provider, llm_cache, settings.openai_chat_model)
+    searcher = None
+    if settings.web_search_enabled and web_cache:
+        from app.core.retrievers.web import WebRetriever
+
+        searcher = CachedWebSearch(
+            WebRetriever(
+                api_key=settings.tavily_api_key,
+                max_results=settings.web_search_max_results,
+                include_domains=settings.web_domains,
+                timeout_s=settings.web_search_timeout_s,
+            ),
+            web_cache,
+        )
+    went_to_web: dict[str, list[str]] = {"A": [], "B": []}
     top_k = settings.retrieval_top_k
 
     recalls: list[float] = []
     ranks: list[float] = []
     scored: list[tuple[str, float, float]] = []
     missed: list[str] = []
-    cited_right_page: list[float] = []
-    iterations: list[int] = []
+    checked: dict[str, list[Checked]] = {"A": [], "B": []}
+    reflect_ms: list[int] = []
+    rerank_models: set[str] = set()
+    rerank_fallbacks: list[str] = []
+    intents: dict[str, collections.Counter] = {
+        "A": collections.Counter(),
+        "B": collections.Counter(),
+    }
+    chitchat_in_a: list[str] = []
+    rewrite_ms: list[int] = []
+    context_recalls: list[float] = []
+    context_ranks: list[float] = []
+    rounds: list[int] = []
+    gate_ms: list[int] = []
+    short: list[str] = []
+    coverage: dict[str, float] = {}
+    strategies: dict[str, collections.Counter] = {
+        "A": collections.Counter(),
+        "B": collections.Counter(),
+    }
+    browsed: dict[str, bool] = {}
 
-    async with AsyncSessionLocal() as session:
-        # Labels are anchored to (sha256, page); candidates carry document_id.
-        # One lookup bridges them without widening DocRef, which is frozen.
-        rows = await session.execute(select(Document.id, Document.sha256_hash))
-        sha_by_id = {row.id: row.sha256_hash for row in rows}
+    try:
+        async with AsyncSessionLocal() as session:
+            # Labels are anchored to (sha256, page); candidates carry document_id.
+            # One lookup bridges them without widening DocRef, which is frozen.
+            rows = await session.execute(select(Document.id, Document.sha256_hash))
+            sha_by_id = {row.id: row.sha256_hash for row in rows}
 
-        stages = build_stages(session, provider, settings)
+            stages = build_stages(session, provider, settings, searcher)
 
-        for question in dataset.set_a:
-            gold = (question.gold_sha256, question.gold_page)
-            candidates = await retrieved(stages, question)
-            hits = [Hit(sha_by_id[c.ref.document_id], c.ref.page_number) for c in candidates]
-            recalls.append(recall_at_k(hits, gold, top_k))
-            ranks.append(reciprocal_rank(hits, gold))
-            scored.append((question.kind, recalls[-1], ranks[-1]))
-            if not recalls[-1]:
-                missed.append(question.id)
-
-            if not full:
-                continue
-
-            result = await run_pipeline(
-                _as_query(question),
-                stages,
-                max_iterations=settings.retrieval_max_iterations,
-            )
-            iterations.append(result.trace.iterations)
-            cited_right_page.append(
-                float(
-                    any(
-                        getattr(c, "page_number", None) == question.gold_page
-                        and sha_by_id.get(getattr(c, "document_id", None)) == question.gold_sha256
-                        for c in result.citations
-                    )
+            for question in dataset.set_a:
+                gold = (question.gold_sha256, question.gold_page)
+                trace = Trace()
+                gathered = await retrieved(
+                    stages, question, trace, settings.retrieval_max_iterations
                 )
-            )
+                candidates = gathered.first_round
+                # R6's ruler: the pages in the context the rounds ended with,
+                # in the order the model reads them.
+                held = [
+                    Hit(sha_by_id[p.ref.document_id], p.ref.page_number)
+                    for p in gathered.context.passages
+                ]
+                context_recalls.append(recall_at_k(held, gold, len(held)))
+                context_ranks.append(reciprocal_rank(held, gold))
+                rounds.append(gathered.iterations)
+                gate_ms += timed(trace, "gate")
+                for node in trace.nodes:
+                    if node.node == "gate_detail" and not node.detail["sufficient"]:
+                        short.append(
+                            f"{question.id}: missing {node.detail['missing']!r}"
+                            f" -> searched {node.detail['refined_query']!r}"
+                        )
+                if strategy := strategy_of(trace):
+                    strategies["A"][strategy] += 1
+                intent = intent_of(trace)
+                if intent:
+                    rewrite_ms += timed(trace, "rewrite")
+                    intents["A"][intent] += 1
+                    if intent == "CHITCHAT":
+                        chitchat_in_a.append(question.id)
+                served, fallback = rerank_outcome(trace)
+                if served:
+                    rerank_models.add(served)
+                if fallback:
+                    rerank_fallbacks.append(f"{question.id}: {fallback}")
+                if question.kind == "summarize":
+                    gold_id = next(i for i, sha in sha_by_id.items() if sha == question.gold_sha256)
+                    reached = [c.ref.parent_id for c in candidates if c.ref.document_id == gold_id]
+                    coverage[question.id] = await outline_coverage(session, gold_id, reached)
+                if candidates and all(c.source == "browse" for c in candidates):
+                    picked = sha_by_id.get(candidates[0].ref.document_id)
+                    browsed[question.id] = picked == question.gold_sha256
+                hits = [Hit(sha_by_id[c.ref.document_id], c.ref.page_number) for c in candidates]
+                recalls.append(recall_at_k(hits, gold, top_k))
+                ranks.append(reciprocal_rank(hits, gold))
+                scored.append((question.kind, recalls[-1], ranks[-1]))
+                if not recalls[-1]:
+                    missed.append(question.id)
 
+                if not full:
+                    continue
+
+                if web := web_search_of(trace):
+                    went_to_web["A"].append(f"{question.id} ({web[1]} pages): {web[0]}")
+                checked["A"].append(
+                    await answer_and_judge(stages, provider, question, gathered, trace)
+                )
+                reflect_ms += timed(trace, "reflect")
+
+            for question in dataset.set_b:
+                # Without --full, only what the rewriter and the router make
+                # of it: Set B is scored on the answer.
+                trace = Trace()
+                if full:
+                    gathered = await retrieved(
+                        stages, question, trace, settings.retrieval_max_iterations
+                    )
+                    if web := web_search_of(trace):
+                        went_to_web["B"].append(question.id)
+                    checked["B"].append(
+                        await answer_and_judge(stages, provider, question, gathered, trace)
+                    )
+                    reflect_ms += timed(trace, "reflect")
+                    _, fallback = rerank_outcome(trace)
+                    if fallback:
+                        rerank_fallbacks.append(f"{question.id}: {fallback}")
+                elif settings.retrieval_intent_enabled:
+                    rewritten = await stages.rewrite(_as_query(question), trace)
+                    await stages.plan(rewritten, trace)
+                else:
+                    continue
+                if settings.retrieval_intent_enabled:
+                    intents["B"][intent_of(trace) or "none"] += 1
+                if strategy := strategy_of(trace):
+                    strategies["B"][strategy] += 1
+
+    finally:
+        # Also when a question fails mid-run: what was paid for is kept.
+        for cache in (embeddings, completions, searcher):
+            if cache is not None:
+                cache.save()
+    if rerank_fallbacks:
+        # These would be R2 figures under an R3 label.
+        raise SystemExit(
+            f"{len(rerank_fallbacks)} of {len(dataset.set_a)} questions were not reranked; "
+            "no figures printed:\n  " + "\n  ".join(rerank_fallbacks)
+        )
     n = len(recalls)
+    print(stages_line(settings))
+    if settings.retrieval_rerank_enabled:
+        # From the traces, not the settings: what actually reranked.
+        served = ", ".join(sorted(rerank_models)) or "none"
+        print(f"reranker         {served} at {settings.reranker_url}")
+    if embeddings is not None:
+        print(f"paid embeddings  {embeddings.paid}")
+    if completions is not None:
+        print(f"paid completions {completions.paid}")
+    for name, counter in intents.items():
+        if counter:
+            shown = ", ".join(f"{intent} {count}" for intent, count in counter.most_common())
+            print(f"intents, set {name}   {shown}")
+    print_timing("rewrite", rewrite_ms, settings.retrieval_intent_enabled)
+    for name, counter in strategies.items():
+        if counter:
+            shown = ", ".join(f"{s} {count}" for s, count in counter.most_common())
+            print(f"strategies, {name}   {shown}")
+    if chitchat_in_a:
+        # Small talk skips retrieval: a real question taken for it is lost.
+        print(f"WARNING          taken for small talk: {', '.join(chitchat_in_a)}")
     print(f"n                {n}")
     print(f"recall@{top_k:<10} {sum(recalls) / n:.3f}")
     print(f"MRR              {sum(ranks) / n:.3f}")
     for kind, (count, recall, rank) in by_kind(scored).items():
         print(f"  {kind:<14} n={count:<3} recall {recall:.3f}  MRR {rank:.3f}")
     print(f"missed           {', '.join(missed) or '-'}")
+    print(
+        f"context          recall {sum(context_recalls) / n:.3f}  MRR {sum(context_ranks) / n:.3f}"
+        f"  (all rounds; mean rounds {sum(rounds) / n:.2f})"
+    )
+    print_timing("gate", gate_ms, settings.retrieval_max_iterations > 1)
+    for line in short:
+        print(f"  not enough     {line}")
+    if coverage:
+        mean = sum(coverage.values()) / len(coverage)
+        shown = ", ".join(f"{qid} {share:.2f}" for qid, share in coverage.items())
+        print(f"outline reached  {mean:.3f}  ({shown})")
+    if browsed:
+        right = sum(browsed.values())
+        wrong = [qid for qid, ok in browsed.items() if not ok]
+        print(f"browsed          {right}/{len(browsed)} on the right document {wrong or ''}")
     if full:
-        print(f"citation acc.    {sum(cited_right_page) / len(cited_right_page):.3f}")
-        print(f"mean iterations  {sum(iterations) / len(iterations):.2f}")
+        _print_checked(checked, dataset, sha_by_id, reflect_ms)
+    if full and settings.web_search_enabled:
+        if searcher is not None:
+            print(f"paid searches    {searcher.paid}")
+        _print_web(went_to_web, dataset)
 
 
-async def _run(full: bool, check_only: bool) -> None:
+def _print_web(went_to_web, dataset) -> None:
+    """R8 is measured by the decision to go outside (spec §8.4): a question
+    the corpus answers, however much it sounds like news, must not."""
+    print(f"web, set A       {len(went_to_web['A'])} of {len(dataset.set_a)} went to the web")
+    for line in went_to_web["A"]:
+        print(f"  went           {line}")
+    for kind in ("outside", "web-tempting"):
+        ids = [q.id for q in dataset.set_b if q.kind == kind]
+        went = [i for i in ids if i in went_to_web["B"]]
+        should = "the corpus cannot answer" if kind == "outside" else "should be none"
+        print(f"web, {kind:<12} {len(went)}/{len(ids)} went ({should}) {went or ''}")
+
+
+def cites_the_web(answer) -> bool:
+    return any(getattr(c, "url", None) for c in answer.citations)
+
+
+def _print_checked(checked, dataset, sha_by_id, reflect_ms) -> None:
+    from eval.judge import decided_right, fabrication_rate, unconfirmed
+
+    for name, rows in checked.items():
+        before = fabrication_rate([c.before for c in rows])
+        after = fabrication_rate([c.after for c in rows])
+        print(f"fabrication, {name}   before {before:.3f}  after {after:.3f}  (n={len(rows)})")
+    rows_b = checked["B"]
+    for label, answer in (("before", "draft"), ("after", "final")):
+        wrong = [
+            c
+            for c in rows_b
+            if not decided_right(c.kind, getattr(c, label), cites_the_web(getattr(c, answer)))
+        ]
+        shown = ", ".join(f"{c.id} ({c.kind})" for c in wrong) or "-"
+        print(f"set B, {label:<9} {len(rows_b) - len(wrong)}/{len(rows_b)} right; wrong: {shown}")
+    labelled = {q.id: q for q in dataset.set_a}
+    for label in ("draft", "final"):
+        right = [
+            cited_right(getattr(c, label).citations, labelled[c.id], sha_by_id)
+            for c in checked["A"]
+        ]
+        print(f"citation acc.    {label:<6} {sum(right) / len(right):.3f}")
+    print_timing("reflect", reflect_ms, bool(checked["A"]))
+    for c in checked["A"] + checked["B"]:
+        doubtful = unconfirmed(list(c.dropped), c.before)
+        for sentence in c.dropped:
+            verdict = "judge did not flag it" if sentence in doubtful else "judge agreed"
+            print(f"  dropped        {c.id}: {sentence!r} ({verdict})")
+        for sentence in c.after.unsupported:
+            print(f"  still unsupp.  {c.id}: {sentence!r}")
+
+
+async def _run(
+    full: bool,
+    check_only: bool,
+    embed_cache: str | None,
+    llm_cache: str | None,
+    web_cache: str | None = None,
+) -> None:
     # One event loop for both: the engine's pooled connections belong to the
     # loop that opened them.
     await _check_labels()
     if not check_only:
-        await _main(full)
+        await _main(full, embed_cache, llm_cache, web_cache)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--full", action="store_true", help="also run generation")
     parser.add_argument(
+        "--embed-cache",
+        metavar="PATH",
+        help="keep question embeddings in this file; later runs pay for none (data/ is gitignored)",
+    )
+    parser.add_argument(
+        "--llm-cache",
+        metavar="PATH",
+        help="keep model answers (the R4 rewrite) in this file; later runs pay for none",
+    )
+    parser.add_argument(
+        "--web-cache",
+        metavar="PATH",
+        help="keep Tavily's results in this file; later runs spend no credit (R8)",
+    )
+    parser.add_argument(
         "--check-labels",
         action="store_true",
         help="verify every Set A quote sits on its gold page, then stop; calls no provider",
     )
     args = parser.parse_args()
-    asyncio.run(_run(args.full, args.check_labels))
+    asyncio.run(
+        _run(args.full, args.check_labels, args.embed_cache, args.llm_cache, args.web_cache)
+    )

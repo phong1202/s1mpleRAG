@@ -1,22 +1,23 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { ArrowUp, MessageSquareText, RotateCcw, Square } from 'lucide-react'
-import { useChat } from '@/hooks/use-chat'
+import { ArrowUp, Loader2, MessageSquareText, RotateCcw, Square } from 'lucide-react'
 import { useDocuments } from '@/hooks/use-documents'
 import { MAX_QUESTION_CHARS } from '@/lib/backend'
 import { cn } from '@/lib/utils'
 import { ChatMessage } from './chat-message'
+import { useChat } from './chat-provider'
 import { useLocale } from './locale-provider'
 
 export function ChatPanel() {
   const { t } = useLocale()
   const { documents } = useDocuments()
   const [input, setInput] = useState('')
-  const { messages, send, retry, status, stop, reset, error } = useChat()
+  const { messages, send, retry, status, stop, error } = useChat()
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const busy = status === 'submitted'
+  const loading = status === 'loading'
   const hasDocs = documents.length > 0
   const question = input.trim()
   const tooLong = question.length > MAX_QUESTION_CHARS
@@ -27,7 +28,7 @@ export function ChatPanel() {
   }, [messages, status, error])
 
   function submit() {
-    if (!question || tooLong || busy) return
+    if (!question || tooLong || busy || loading) return
     send(question)
     setInput('')
   }
@@ -36,8 +37,13 @@ export function ChatPanel() {
     <section className="flex h-full min-h-0 flex-col" aria-label="Chat">
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-5 py-8">
-          {messages.length === 0 ? (
-            <EmptyState hasDocs={hasDocs} />
+          {loading ? (
+            <p className="flex items-center gap-2 text-sm text-muted-foreground" aria-live="polite">
+              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              {t.loadingConversation}
+            </p>
+          ) : messages.length === 0 ? (
+            error ? null : <EmptyState hasDocs={hasDocs} />
           ) : (
             messages.map((message) => <ChatMessage key={message.id} message={message} />)
           )}
@@ -115,7 +121,7 @@ export function ChatPanel() {
             ) : (
               <button
                 type="submit"
-                disabled={!question || tooLong || !hasDocs}
+                disabled={!question || tooLong || !hasDocs || loading}
                 className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground transition-opacity disabled:opacity-40"
                 aria-label={t.send}
               >
@@ -124,20 +130,6 @@ export function ChatPanel() {
             )}
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            {messages.length > 0 && (
-              <button
-                type="button"
-                onClick={reset}
-                disabled={busy}
-                className="flex items-center gap-1.5 transition-colors hover:text-foreground disabled:opacity-50"
-              >
-                <RotateCcw className="size-3" aria-hidden="true" />
-                {t.newChat}
-              </button>
-            )}
-            {/* The history stays on screen, which reads as memory. It is
-                not: the backend sees one question at a time. */}
-            <p className="text-pretty">{t.independentHint}</p>
             {/* Only once the limit is near: the backend refuses a longer
                 question, so the count shows before the send does. */}
             {question.length > MAX_QUESTION_CHARS * 0.9 && (

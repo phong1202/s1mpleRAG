@@ -26,6 +26,12 @@ async def expand_parents(
     at. Keeping any other child cites a page the answer did not come from, and
     nothing raises.
     """
+    # An outline from the browse tool (R5) already says what it means to: a
+    # chapter and the titles under it. Replacing that with the text of the
+    # chapter's first parent would throw the outline away.
+    if candidates and all(c.source == "browse" for c in candidates):
+        return candidates
+
     winners: dict[uuid.UUID, Candidate] = {}
     for candidate in candidates:
         if isinstance(candidate.ref, DocRef):

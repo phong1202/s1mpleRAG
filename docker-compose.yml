@@ -185,6 +185,11 @@ services:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
       REDIS_URL: redis://redis:6379/0
+      # The CPU container unless .env points the API at a hosted reranker.
+      # So .env leaves RERANKER_URL unset for the container: a value there
+      # reaches this service too, and http://localhost:8200 seen from in here
+      # is the API itself.
+      RERANKER_URL: ${RERANKER_URL:-http://reranker:8200}
     ports:
       - "${PORT:-8000}:8000"
     volumes:
@@ -208,6 +213,44 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+
+  reranker:
+    # R3, on the CPU: the GPU belongs to chandra while it runs. Any model
+    # sentence-transformers loads as a cross-encoder will do; it is chosen at
+    # build time and baked into the image. RERANKER_LOCAL_MODEL, not
+    # RERANKER_MODEL: the API's RERANKER_MODEL may name a hosted model when
+    # RERANKER_URL points elsewhere, and this server refuses requests for a
+    # model it does not serve.
+    build:
+      context: .
+      dockerfile: reranker_service/Dockerfile
+      args:
+        RERANKER_MODEL: ${RERANKER_LOCAL_MODEL:-cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
+        RERANKER_BACKEND: ${RERANKER_LOCAL_BACKEND:-onnx}
+        RERANKER_ONNX_FILE: ${RERANKER_LOCAL_ONNX_FILE-onnx/model_qint8_avx512_vnni.onnx}
+        RERANKER_TRUST_REMOTE_CODE: ${RERANKER_LOCAL_TRUST_REMOTE_CODE:-false}
+    environment:
+      RERANKER_THREADS: ${RERANKER_LOCAL_THREADS:-8}
+      RERANKER_MAX_WAITING: ${RERANKER_LOCAL_MAX_WAITING:-2}
+    # Loopback only: the server has no authentication, and only the API and
+    # the eval on this host need it.
+    ports:
+      - "127.0.0.1:8200:8200"
+    restart: unless-stopped
+    # Scored in one process, one request at a time: past this the kernel
+    # stops this container alone instead of the host. No CPU limit: Docker
+    # refuses one larger than the host has.
+    mem_limit: 3g
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8200/health')
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   worker-cpu:
     build: .

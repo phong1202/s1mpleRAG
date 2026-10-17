@@ -490,8 +490,10 @@ retrieval slightly; a dead-lettered document helps nobody.
    for a chunk is `title > heading_path`, then the S3 context sentence, then the content — and S5
    stores exactly that text as `contextualized`. The first line is what separates two provisions
    that read the same word for word (a fine for cars and the same clause for motorbikes).
-   The keyword index does not share this yet: `child_chunks.tsv` is generated from `content` alone,
-   so a keyword search still cannot see an article's title. That belongs to the R2 plan.
+   The keyword index does not share this: `child_chunks.tsv` is generated from `content` alone
+   (with `/` and `-` turned into spaces, so that a code is indexed as its parts), so a keyword
+   search cannot see an article's title. R2 measured adding it and found no gain
+   (`retrieval-design.md` §5.2), so it stays that way.
 2. **L2-normalize every vector.** Non-negotiable — `vector_ip_ops` assumes it.
 3. Assert returned count == input count; assert every vector is 1536-dim and finite.
 4. Write `.npy` (float32) plus a JSON manifest mapping row index → `chunk_index`.
@@ -887,7 +889,22 @@ Everything in §10: `app/core/`, `POST /query`, `query_controller.py`, `query_se
 retrieval SQL. Its design has since grown into a document of its own,
 [`retrieval-design.md`](retrieval-design.md), which supersedes §10 where the two differ; the first
 stage (R0, basic RAG) is built on the `phase-2` branch, and the plan is
-[`plans/phase-2-r0-r1.en.md`](plans/phase-2-r0-r1.en.md).
+[`plans/phase-2-r0-r1.en.md`](plans/phase-2-r0-r1.en.md). R2, keyword search beside the vectors
+fused by reciprocal rank, is built behind `RETRIEVAL_BM25_ENABLED` (off by default); its plan is
+[`plans/phase-2-r2.vi.md`](plans/phase-2-r2.vi.md). R3, reranking the fused candidates, is built behind
+`RETRIEVAL_RERANK_ENABLED`: the default reranker is the `reranker` container, a CPU cross-encoder, and
+any server speaking Cohere's `/rerank` can replace it by configuration; its plan is
+[`plans/phase-3-r3.vi.md`](plans/phase-3-r3.vi.md). R4 keeps conversations server-side (`conversations`, `messages`) and,
+behind `RETRIEVAL_INTENT_ENABLED`, rewrites each question into a standalone one before it is
+searched; its plan is [`plans/phase-3-r4.vi.md`](plans/phase-3-r4.vi.md). R5, behind
+`RETRIEVAL_ROUTER_ENABLED`, answers a question about a whole document from that document's outline
+(`parent_chunks.heading_path`) instead of a search; its plan is
+[`plans/phase-3-r5.vi.md`](plans/phase-3-r5.vi.md). R6, a sufficiency gate that may search again up to
+`RETRIEVAL_MAX_ITERATIONS` rounds, is built and ships at one round: it found no gain on the eval set;
+its plan is [`plans/phase-3-r6.vi.md`](plans/phase-3-r6.vi.md). R7, behind `RETRIEVAL_REFLECT_ENABLED`, checks each sentence of the answer against the sources and drops those none supports; it is built and ships off; on the eval set it caught all 20 planted fabrications and dropped nothing true; its plan is [`plans/phase-3-r7.vi.md`](plans/phase-3-r7.vi.md). R8, behind `WEB_SEARCH_ENABLED`, searches the web with Tavily when the gate still finds the documents short after a second round; the pages reach only the answer and its check, as external sources cited by URL; it is built and ships off; its plan is [`plans/phase-3-r8.vi.md`](plans/phase-3-r8.vi.md). Conversations belong to a user
+(`users`, a seeded admin that every request is until login exists, `AUTH_MODE=auto_admin`) and can be
+listed, reopened with their citations, and deleted; see
+[`plans/phase-3-conversations.vi.md`](plans/phase-3-conversations.vi.md).
 
 **Nothing from Phase 2 is stubbed during Phase 1** — no empty `app/core/` directory, no placeholder
 router. It arrives whole, or not at all.

@@ -8,10 +8,17 @@ const nextConfig = {
   async rewrites() {
     const api = process.env.API_URL ?? 'http://localhost:8000'
     return [
-      // Development only: /query answered from fixtures instead of the
-      // backend, which spends OpenAI money on every real question. See
-      // app/api/mock/query/route.ts.
-      ...(process.env.QUERY_MOCK === '1' ? [{ source: '/backend/query', destination: '/api/mock/query' }] : []),
+      // Development only: the chat's endpoints answered from fixtures
+      // instead of the backend, which spends OpenAI money on every real
+      // question. See app/api/mock/.
+      ...(process.env.QUERY_MOCK === '1'
+        ? [
+            { source: '/backend/query', destination: '/api/mock/query' },
+            { source: '/backend/me', destination: '/api/mock/me' },
+            { source: '/backend/conversations', destination: '/api/mock/conversations' },
+            { source: '/backend/conversations/:id', destination: '/api/mock/conversations/:id' },
+          ]
+        : []),
       { source: '/backend/:path*', destination: `${api}/:path*` },
     ]
   },

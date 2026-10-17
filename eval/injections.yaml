@@ -1,0 +1,31 @@
+# One fabricated sentence per Set A draft, planted to measure whether
+# reflection (R7) catches what it exists for. The drafts themselves had
+# nothing to catch (docs/retrieval-design.md §8.7).
+#
+# Each sentence was checked against the passages its draft was written from:
+#   bracket  -- pairs an act in the sources with a penalty or limit the
+#               sources give to something else, often in the same article.
+#               The clause-head clause of the prompt could let these through.
+#   number   -- a figure the sources state differently, or not at all.
+#   invented -- a rule, penalty or duty the sources do not contain.
+
+- {id: a01, kind: invented, sentence: "Ngoài phạt tiền, người lái ô tô vượt đèn đỏ còn bị tạm giữ phương tiện 07 ngày. [3]"}
+- {id: a02, kind: invented, sentence: "Đường tỉnh phải có tối thiểu 4 làn xe. [1]"}
+- {id: a03, kind: bracket, sentence: "Người đủ 16 tuổi chỉ được điều khiển xe gắn máy có dung tích xi-lanh dưới 125 cm3. [1]"}
+- {id: a04, kind: invented, sentence: "Thời hạn này được gia hạn thêm tối đa 02 năm nếu phương tiện còn đủ điều kiện. [1]"}
+- {id: a05, kind: invented, sentence: "Phương tiện chở trên 20 người còn phải có giấy phép vận tải do Bộ Xây dựng cấp. [3]"}
+- {id: a06, kind: invented, sentence: "Chủ phương tiện còn bị tạm giữ phương tiện đến 07 ngày. [1]"}
+- {id: a07, kind: number, sentence: "Hãng khai thác từ 11 đến 30 tàu bay cần vốn chủ sở hữu tối thiểu 500 tỷ đồng Việt Nam. [1]"}
+- {id: a08, kind: invented, sentence: "Dữ liệu trong cơ sở dữ liệu này phải được lưu trữ tối thiểu 10 năm. [5]"}
+- {id: a09, kind: number, sentence: "Nghị định 168/2024/NĐ-CP có hiệu lực thi hành từ ngày 01 tháng 3 năm 2025. [4]"}
+- {id: a10, kind: invented, sentence: "Nghị định này cũng áp dụng đối với tàu cá hoạt động trên vùng biển quốc tế. [1]"}
+- {id: a11, kind: invented, sentence: "Xe không lắp thiết bị giám sát hành trình bị phạt 2.000.000 đồng. [5]"}
+- {id: a12, kind: bracket, sentence: "Điều khiển xe ô tô cứu hộ chở xe được cứu hộ vượt quá khối lượng cho phép bị phạt từ 3.000.000 đồng đến 5.000.000 đồng. [1]"}
+- {id: a13, kind: bracket, sentence: "Người điều khiển xe máy không đội mũ bảo hiểm bị phạt từ 600.000 đồng đến 800.000 đồng. [4]"}
+- {id: a14, kind: bracket, sentence: "Người lái ô tô có nồng độ cồn chưa vượt quá 50 miligam/100 mililít máu bị phạt từ 18.000.000 đồng đến 20.000.000 đồng. [7]"}
+- {id: a15, kind: invented, sentence: "Phương tiện có trọng tải toàn phần dưới 1 tấn cũng phải đăng ký nếu chở trên 3 người. [1]"}
+- {id: a16, kind: invented, sentence: "Doanh nghiệp được gia hạn 03 tháng để bổ sung vốn trước khi giấy phép bị hủy. [2]"}
+- {id: a17, kind: number, sentence: "Luật Đường bộ gồm 12 chương. [2]"}
+- {id: a18, kind: number, sentence: "Luật có tổng cộng 120 điều. [1]"}
+- {id: a19, kind: invented, sentence: "Nghị định cũng quy định khung giá vé trên các đường bay nội địa. [2]"}
+- {id: a20, kind: number, sentence: "Luật có hiệu lực kể từ ngày 01 tháng 01 năm 2010. [1]"}

@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -26,6 +27,12 @@ def create_app() -> FastAPI:
         title=settings.app_name,
         lifespan=lifespan,
     )
+
+    if settings.auth_mode == "auto_admin":
+        logging.getLogger(__name__).warning(
+            "AUTH_MODE=auto_admin: every request is the admin user and nothing is "
+            "authenticated. Do not expose this API beyond this machine."
+        )
 
     register_middleware(app)
     register_exception_handlers(app)

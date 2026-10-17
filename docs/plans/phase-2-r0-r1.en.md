@@ -26,7 +26,7 @@ Updated 2026-10-10, after the first execution pass. Nothing is committed; each t
 | 9b, 9c | Done. |
 | 9d | Done. One answer was wrong at first (a look-alike provision); after the [article-context plan](phase-2-article-context.vi.md) that question is answered correctly, citing page 14. |
 | 10, 11 | Done. |
-| 12 | Steps 1 → 7 done: runner, tests, 28 drafted items, 20 labels reported reachable. The set is provisionally approved (not yet frozen). Baseline measured 2026-10-11 on the re-ingested corpus, with the four follow-ups replaced: `recall@10` 0.750, `MRR` 0.517, with per-kind figures in spec §8.7. |
+| 12 | Steps 1 → 7 done: runner, tests, 28 drafted items, 20 labels reported reachable. The set is provisionally approved (not yet frozen). Baseline measured 2026-10-11 on the re-ingested corpus, with the four follow-ups replaced: `recall@10` 0.750, `MRR` 0.517. After the third review the corpus was re-ingested once more and the baseline measured again at 0.700 / 0.463; the current figure and the per-kind breakdown are in spec §8.7. |
 | 13 | README rewritten and the spec's facts corrected (Steps 1 → 3, 5). The README's commands were run, except `pnpm dev` (the FE session's) and a live ingest with `chandra` absent. |
 | 14 | Done: the recommendation is not to use DeepSeek. |
 

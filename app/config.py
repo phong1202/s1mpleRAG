@@ -117,6 +117,11 @@ class Settings(BaseSettings):
     minio_bucket_raw: str = "raw"
     minio_bucket_staging: str = "staging"
 
+    # --- Auth ---
+    # auto_admin: every request is the seeded admin, until login exists. The
+    # only mode for now; named so that adding login means choosing one.
+    auth_mode: Literal["auto_admin"] = "auto_admin"
+
     # --- LLM ---
     # "stub" is the deliberate default: without a key the suite still runs.
     # A Literal, not a plain str: a typo like "opneai" must fail at
@@ -132,6 +137,14 @@ class Settings(BaseSettings):
     # from eight categories need little of it; "medium", the API default,
     # would multiply the cost of S3 for no visible gain.
     openai_reasoning_effort: Literal["none", "low", "medium", "high"] = "low"
+    # The rewriter (R4) only rephrases. Measured on the eval set: "none" gave
+    # the same rewrites and the same recall as "low", median 1.3 s against 1.9 s.
+    rewrite_reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
+    # The gate (R6) decides enough or not, and names what is missing.
+    gate_reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
+    # Reflection (R7) compares each sentence of the answer with the sources.
+    # Measured: "none" still dropped a supported sentence where "low" dropped none.
+    reflect_reasoning_effort: Literal["none", "low", "medium", "high"] = "low"
     # -large rather than -small for its multilingual retrieval (MIRACL 54.9
     # vs 44.0) -- the corpus is Vietnamese. Shortened to embed_dimensions
     # by the API, which keeps the schema's vector(1536) and HNSW's 2000-dim
@@ -156,7 +169,27 @@ class Settings(BaseSettings):
     retrieval_ef_search: int = 100  # MUST be >= 2 x over_fetch
     retrieval_rrf_k: int = 60
     retrieval_rerank_keep: int = 10
+    # How deep the fused list goes to the reranker. Cut at top_k first and a
+    # chunk at fused rank 20 -- the one a reranker exists to rescue -- never
+    # reaches it.
+    retrieval_rerank_candidates: int = 50
     context_token_budget: int = 8000
+    # Added to the budget for each round of search after the first (R6). Only
+    # a question the gate found short pays for the longer context.
+    context_round_extra: int = 3000
+
+    # --- Reranker (R3) ---
+    # Any server speaking the Cohere shape of /rerank: the repo's own CPU
+    # container by default, or OpenRouter (https://openrouter.ai/api/v1),
+    # Cohere or vLLM with a key. The model is the server's to resolve.
+    reranker_url: str = "http://localhost:8200"
+    # Unset, the server chooses: the CPU container serves the model it was
+    # built with (RERANKER_LOCAL_MODEL). A hosted reranker needs it named.
+    reranker_model: str | None = None
+    reranker_api_key: str | None = None
+    # Past this the fused order is kept: a slow reranker must cost the
+    # answer a little quality, never the answer.
+    reranker_timeout_s: float = 5.0
 
     # --- Stage flags ---
     # One mechanism, two purposes: these roll the R0 -> R8 ladder out, and they
@@ -170,6 +203,32 @@ class Settings(BaseSettings):
     retrieval_reflect_enabled: bool = False  # R7
     web_search_enabled: bool = False  # R8
 
+    # --- Web search (R8): Tavily, after the gate, and only then ---
+    tavily_api_key: str | None = None
+    web_search_max_results: int = 5
+    # Comma-separated. Empty searches the whole web.
+    web_search_include_domains: str = ""
+    web_search_timeout_s: float = 10.0
+
+    @property
+    def web_domains(self) -> tuple[str, ...]:
+        return tuple(d.strip() for d in self.web_search_include_domains.split(",") if d.strip())
+
+    @model_validator(mode="after")
+    def _require_what_web_search_runs_on(self) -> "Settings":
+        if not self.web_search_enabled:
+            return self
+        if not self.tavily_api_key:
+            raise ValueError("WEB_SEARCH_ENABLED needs TAVILY_API_KEY")
+        # The web waits for the corpus to be searched a second time (spec
+        # decision 13). With one round it would be on and never run.
+        if self.retrieval_max_iterations < 2:
+            raise ValueError(
+                "WEB_SEARCH_ENABLED needs RETRIEVAL_MAX_ITERATIONS of at least 2, "
+                f"got {self.retrieval_max_iterations}"
+            )
+        return self
+
     @model_validator(mode="after")
     def _require_a_wide_enough_candidate_queue(self) -> "Settings":
         # pgvector reads ef_search candidates and returns the best of them:
@@ -179,6 +238,19 @@ class Settings(BaseSettings):
             raise ValueError(
                 "RETRIEVAL_EF_SEARCH must be at least twice RETRIEVAL_OVER_FETCH "
                 f"(got {self.retrieval_ef_search} and {self.retrieval_over_fetch})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_a_rerank_pool_at_least_as_deep_as_what_is_kept(self) -> "Settings":
+        # A pool of five would keep five on success and top_k on a fallback,
+        # with nothing to say why two answers saw different contexts.
+        floor = max(self.retrieval_rerank_keep, self.retrieval_top_k)
+        if self.retrieval_rerank_candidates < floor:
+            raise ValueError(
+                f"RETRIEVAL_RERANK_CANDIDATES must be at least {floor} "
+                "(RETRIEVAL_RERANK_KEEP and RETRIEVAL_TOP_K), "
+                f"got {self.retrieval_rerank_candidates}"
             )
         return self
 

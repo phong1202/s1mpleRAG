@@ -192,11 +192,9 @@ export function DocumentPanel() {
   }
 
   return (
-    <aside className="flex h-full flex-col gap-5 overflow-hidden border-b bg-card/40 p-5 md:border-r md:border-b-0">
-      <div className="flex flex-col gap-1">
-        <h2 className="text-sm font-semibold">{t.knowledgeBase}</h2>
-        <p className="text-xs text-muted-foreground">{t.knowledgeBaseHint}</p>
-      </div>
+    // The column, its border and its title belong to the sidebar's tab.
+    <div className="flex h-full flex-col gap-5 overflow-hidden p-5">
+      <p className="text-xs text-muted-foreground">{t.knowledgeBaseHint}</p>
 
       <div
         onDragOver={(e) => {
@@ -322,6 +320,6 @@ export function DocumentPanel() {
           setPendingDelete(null)
         }}
       />
-    </aside>
+    </div>
   )
 }

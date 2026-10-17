@@ -63,4 +63,9 @@ def build_context(previous: Context, candidates: list[Candidate], budget: int) -
             untrusted.append(WebPassage(ordinal=ordinal, text=candidate.text, ref=ref))
         used += cost
 
-    return Context(passages=tuple(passages), untrusted=tuple(untrusted), token_count=used)
+    return Context(
+        passages=tuple(passages),
+        untrusted=tuple(untrusted),
+        token_count=used,
+        rounds=previous.rounds + 1,
+    )

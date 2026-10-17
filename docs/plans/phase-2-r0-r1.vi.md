@@ -26,7 +26,7 @@ Cập nhật 2026-10-10, sau lượt thực thi đầu. Chưa có gì được c
 | 9b, 9c | Xong. |
 | 9d | Xong. Lần đầu sai một câu (lấy nhầm điều khoản giống chữ); sau plan [ngữ cảnh điều khoản](phase-2-article-context.vi.md) câu đó trả lời đúng, trích trang 14. |
 | 10, 11 | Xong. |
-| 12 | Step 1 → 7 xong: runner, test, 28 mục nháp, máy báo 20 nhãn trúng được. Bộ câu hỏi được tạm duyệt (chưa đóng băng). Con số nền đo ngày 2026-10-11 trên corpus đã nạp lại, với bốn câu nối tiếp đã thay: `recall@10` 0,750, `MRR` 0,517, kèm điểm theo loại câu hỏi ở spec §8.7. |
+| 12 | Step 1 → 7 xong: runner, test, 28 mục nháp, máy báo 20 nhãn trúng được. Bộ câu hỏi được tạm duyệt (chưa đóng băng). Con số nền đo ngày 2026-10-11 trên corpus đã nạp lại, với bốn câu nối tiếp đã thay: `recall@10` 0,750, `MRR` 0,517. Sau lần review thứ ba corpus được nạp lại lần nữa và số nền đo lại là 0,700 / 0,463; số hiện hành và điểm theo loại câu hỏi ở spec §8.7. |
 | 13 | README viết lại và các dữ kiện trong spec đã sửa (Step 1 → 3, 5). Các lệnh của README đã chạy thử, trừ `pnpm dev` (thuộc session FE) và một lần nạp thật khi không có `chandra`. |
 | 14 | Xong: khuyến nghị không dùng DeepSeek. |
 

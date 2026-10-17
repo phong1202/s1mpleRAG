@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import get_current_user
+from app.models import User
 from app.schemas.query import QueryRequest, QueryResponse
 from app.schemas.response import ApiResponse
 from app.services.query_service import QueryService
@@ -15,5 +17,6 @@ async def query(
     payload: QueryRequest,
     session: AsyncSession = Depends(get_session),
     provider: AsyncLLMProvider = Depends(get_async_provider),
+    user: User = Depends(get_current_user),
 ) -> ApiResponse[QueryResponse]:
-    return ApiResponse.ok(await QueryService(session, provider).ask(payload))
+    return ApiResponse.ok(await QueryService(session, provider).ask(payload, user.id))

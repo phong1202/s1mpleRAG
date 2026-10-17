@@ -198,3 +198,57 @@ async def test_a_stage_without_a_no_op_is_allowed_to_fail_the_request():
 
     with pytest.raises(RuntimeError):
         await answer(Query(text="q"), _stages(retrieve=broken_retrieve), max_iterations=1)
+
+
+async def test_the_answer_is_to_the_question_not_to_the_gates_search():
+    """The gate writes a search query for the next round. Handing that to the
+    generator answered a search string instead of what the user asked."""
+    verdicts = [
+        GateVerdict(sufficient=False, missing="m", refined_query="câu tìm của gate"),
+        GateVerdict(sufficient=True),
+    ]
+    answered = {}
+
+    async def gate(query, context, trace):
+        return verdicts.pop(0)
+
+    async def generate(query, context, trace):
+        answered["text"], answered["unanswered"] = query.text, query.unanswered
+        return "ok", ()
+
+    await answer(
+        Query(text="câu hỏi của người dùng"),
+        _stages(gate=gate, generate=generate),
+        max_iterations=3,
+    )
+
+    assert answered == {"text": "câu hỏi của người dùng", "unanswered": None}
+
+
+async def test_out_of_rounds_the_answer_is_told_what_was_not_found():
+    """It answers anyway (spec §6.3), and says which part the documents may
+    not cover instead of filling it in."""
+    searched = []
+
+    async def gate(query, context, trace):
+        return GateVerdict(
+            sufficient=False, missing=f"thiếu sau {query.text}", refined_query=f"{query.text}+"
+        )
+
+    async def retrieve(plan, trace):
+        searched.append(plan.queries[0])
+        return [_candidate(plan.queries[0])]
+
+    answered = {}
+
+    async def generate(query, context, trace):
+        answered["text"], answered["unanswered"] = query.text, query.unanswered
+        return "ok", ()
+
+    result = await answer(
+        Query(text="q"), _stages(gate=gate, retrieve=retrieve, generate=generate), max_iterations=3
+    )
+
+    assert searched == ["q", "q+", "q++"]
+    assert answered == {"text": "q", "unanswered": "thiếu sau q++"}
+    assert result.trace.iterations == 3

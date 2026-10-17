@@ -47,7 +47,7 @@ Settled. If the implementation disagrees with a row here, the implementation is 
 | 4 | Seams | Built at **R0**, filled later | Five no-op stages exist from day one; upgrading is replacing a function, never restructuring |
 | 5 | Fusion | **RRF over rank**, `k = 60` | Cosine ∈ [0,1] and `ts_rank` unbounded cannot be summed |
 | 6 | Keyword search | Postgres `ts_rank_cd`, config by `language` | Not true BM25 — no IDF — but RRF reads rank, not score. See §5.2 |
-| 7 | Reranker | `bge-reranker-v2-m3`, self-hosted | Multilingual; own container, same pattern as `chandra`; no third API vendor |
+| 7 | Reranker | **`mmarco-mMiniLMv2-L12` (int8) in a CPU container**, behind a client for any server speaking Cohere's `/rerank` (revised at R3) | `bge-reranker-v2-m3` on the CPU takes 10.5 s for 50 pairs (3.8 s quantised to int8), and the GPU is chandra's while it runs. The model is a setting: measured candidates in §5.4 |
 | 8 | Cross-lingual recall | **Bilingual sub-queries at node ①** | A prompt line instead of a new embedding model and a full re-ingest |
 | 9 | Conversation state | Server-side `conversations` / `messages` | Auditable, and the trace needs somewhere to hang |
 | 10 | Loop bound | `MAX_ITERATIONS = 3`, hard | Out of budget still answers, never errors |
@@ -77,7 +77,7 @@ Cheap deterministic wins first, then LLM decision points in order of increasing 
 |---|---|---|---|---|
 | **R0** | Basic RAG | §10 as written, plus all eight seams | — | Runs end to end |
 | **R1** | Eval + trace | 28 labelled items (§8.4), `query_traces`, `eval.py` | code | **Is the measuring stick** |
-| **R2** | Hybrid search | BM25 beside vectors, RRF, bilingual sub-queries | code | `recall@10` |
+| **R2** | Hybrid search | Keyword search beside vectors, RRF. Bilingual sub-queries moved to R4: they are written by the rewriter (§6.1), an LLM call | code | `recall@10` |
 | **R3** | Reranking | Cross-encoder over the fused candidates | model | `MRR` |
 | **R4** | Intent + rewrite | Multi-turn, standalone questions, intent routing | **LLM** | `recall@10` on follow-ups |
 | **R5** | Tool routing | Router + document-browsing tool | **LLM** | Strategy distribution + browse accuracy |
@@ -238,14 +238,22 @@ other form code and near nothing in particular.
 ### 5.2 Keyword search — and what Postgres actually gives you
 
 ```sql
--- child_chunks.tsv is a GENERATED column (Phase 1, Task 8b)
-SELECT id, parent_id, ts_rank_cd(tsv, query) AS score
-FROM   child_chunks,
-       websearch_to_tsquery(
-           CASE WHEN :language = 'en' THEN 'english'::regconfig
-                ELSE 'simple'::regconfig END, :q) AS query
-WHERE  tsv @@ query
-ORDER  BY score DESC
+-- child_chunks.tsv is a GENERATED column (Phase 1, Task 8b; rebuilt by a0454bfe1fe8)
+WITH words AS (
+  SELECT translate(:q, '/-', '  ') AS text
+), q AS (
+  SELECT (SELECT string_agg(quote_literal(lex), ' | ')::tsquery
+          FROM   unnest(tsvector_to_array(to_tsvector('simple', words.text))) AS lex) AS plain,
+         (SELECT string_agg(quote_literal(lex), ' | ')::tsquery
+          FROM   unnest(tsvector_to_array(to_tsvector('english', words.text))) AS lex) AS english
+  FROM   words
+)
+SELECT c.id, c.parent_id,
+       ts_rank(c.tsv, CASE WHEN c.language = 'en' THEN q.english ELSE q.plain END, 1) AS score
+FROM   child_chunks c, q
+WHERE  (c.language = 'en' AND c.tsv @@ q.english)
+    OR (c.language IS DISTINCT FROM 'en' AND c.tsv @@ q.plain)
+ORDER  BY score DESC, c.id
 LIMIT  :over_fetch;
 ```
 
@@ -257,15 +265,49 @@ This is tolerable here for one specific reason: **RRF reads rank, not score.** A
 still orders reasonably contributes correctly to the fusion. Were the scores being summed, the
 missing IDF would be disqualifying.
 
-`ts_rank_cd` (cover density) over plain `ts_rank` is a deliberate choice for the Vietnamese half of
-the corpus. Vietnamese compounds tokenize into separate lexemes — `hóa đơn` becomes `hóa` + `đơn` —
-so a chunk containing `hóa` and `đơn` forty words apart matches as well as one containing the actual
-phrase. Cover density scores adjacency, which recovers most of that loss for free. It is not a
-Vietnamese dictionary, but it is the difference between usable and noisy.
+**The words of the question are joined with OR.** The first draft of this section used
+`websearch_to_tsquery`, which joins them with AND. Nobody's question has all of its words in one
+chunk: "thì bị xử phạt thế nào" is not in the decree. Measured before R2 was built, keyword search
+alone against the labels of §8.4, on the real corpus (2,982 chunks, gold page within the first ten):
 
-If `recall@10` on Vietnamese exact-match questions is still poor after R2, the escalation is
-`pg_search` (ParadeDB) for real BM25, which costs a custom Postgres image. Do not pay that before the
-eval set says it is needed.
+| Query and ranking | Found | MRR | Questions with no result |
+|---|---|---|---|
+| `websearch_to_tsquery` (AND) + `ts_rank_cd` | 0 / 20 | 0.000 | 19 |
+| OR + `ts_rank_cd` | 9 / 20 | 0.119 | 0 |
+| OR + `ts_rank` | 12 / 20 | 0.334 | 0 |
+| **OR + `ts_rank(…, 1)`**, divided by log length | **15 / 20** | **0.397** | 0 |
+| the same, with title and heading path added to the searched text | 13 / 20 | 0.301 | 0 |
+
+Three things in that table overturn what this section used to say:
+
+- AND is unusable for questions asked in sentences.
+- **`ts_rank` beats `ts_rank_cd`** on this corpus. The argument for cover density (Vietnamese
+  compounds split into syllables, so adjacency should matter) did not survive measurement.
+- Adding the article's title to the keyword index does not help, so the index stays on `content`.
+
+Twenty questions are enough to reject a variant that returns nothing. They are not enough to tune
+on, and nothing here was tuned further.
+
+**What the tokenizer does to codes.** Postgres' parser reads `04/SS-HĐĐT` as a file path that ends at
+the first non-ASCII letter and indexes `04/ss-h` and `đđt`; `168/2024/NĐ-CP` becomes `168/2024/n`,
+`đ-cp`, `đ`, `cp`. A question that wrote the code in full was tokenized the same way and matched; one
+that wrote part of it ("nghị định 168", "SS-HĐĐT") did not. Migration `a0454bfe1fe8` rebuilds `tsv`
+over `translate(content, '/-', '  ')`, and the query applies the same `translate` to the question:
+the code is indexed as `168`, `2024`, `nđ`, `cp`, and any part of it matches. The two expressions
+must change together.
+
+The price is noise. `2024` and `cp` are in a great many chunks, and with no IDF they count as much as
+`168`: of the first ten results for "168/2024", four quote that decree. The eval set cannot weigh the
+trade, because all four of its code questions quote their code in full: keyword search alone scores
+15 / 20 before and after. The change was made for the questions the set does not contain.
+
+The query matches about 70% of the corpus, since any shared word is a match, and ranks all of it:
+7–13 ms at 3,000 chunks, growing linearly. Japanese and Chinese text is not searchable this way at
+all: the `simple` config splits on whitespace.
+
+If `recall@10` on exact-match questions is still poor after R2, the escalation is `pg_search`
+(ParadeDB) for real BM25, which costs a custom Postgres image. Do not pay that before the eval set
+says it is needed.
 
 ### 5.3 Fusion — RRF
 
@@ -304,9 +346,56 @@ That accuracy costs one model call per pair, so it cannot run over the corpus:
 Hence the ordering: **narrow cheaply, then score expensively.** A reranker placed before hybrid
 search is polishing a candidate set that is still missing rows.
 
-`bge-reranker-v2-m3` runs in its own container at concurrency 1, models loaded at startup — the same
-shape as `chandra`, the OCR server. **A timeout or error skips reranking and keeps the RRF order**, logged. Never a
-failed request.
+**Where it runs — revised at R3.** The first draft put `bge-reranker-v2-m3` in its own GPU container,
+the same shape as `chandra`. Two measurements ended that: on the CPU it takes 10.5 s for 50 pairs, and
+the GPU is chandra's while it runs (about 15.6 of 16 GB). The read path now has one client that
+speaks the Cohere shape of `/rerank` — `{model, query, documents, top_n}` in,
+`results[{index, relevance_score}]` out — and three settings choose who answers it:
+
+| Server | `RERANKER_URL` | Key |
+|---|---|---|
+| `reranker`, this repository's CPU container (default) | `http://reranker:8200` inside compose | none |
+| OpenRouter, Cohere, or vLLM serving a model | the provider's base URL | `RERANKER_API_KEY` |
+
+The container loads any cross-encoder through sentence-transformers, chosen when the image is built
+(`RERANKER_LOCAL_*`); left unset, `RERANKER_MODEL` lets it score with that model, and a request naming
+another one is refused. The trace records which model reranked, or why reranking fell back, and the
+eval refuses to print figures when any question fell back: a dead container or a wrong URL would
+otherwise print R2 figures under an R3 label.
+
+The container scores one request at a time and lets two wait; a request past that is refused at
+once with 503, so its caller keeps the fused order without waiting out its timeout. Measured with 30
+requests at once: 3 answered within 2.4 s, 27 refused within 0.24 s, and the next request after the
+burst took 0.66 s.
+
+Measured on the eval set before the choice was made: each question's top 50 keyword candidates,
+reranked, gold page position scored (MRR 0.399 without a reranker). Same machine (Ryzen 5 7500F,
+RTX 5060 Ti):
+
+| Model | Runs on | Found in top 10 | Gold at rank 1 | MRR | 50 pairs |
+|---|---|---|---|---|---|
+| `Qwen3-Reranker-4B` | GPU, vLLM | 17 / 20 | 15 | **0.800** | 1.35 s, ~9 GB VRAM |
+| `PhoRanker` (Vietnamese only) | CPU | 16 / 20 | 12 | 0.655 | 4.0 s |
+| `gte-multilingual-reranker-base` | CPU | 16 / 20 | 12 | 0.649 | 4.8 s |
+| `Qwen3-Reranker-0.6B` | GPU / CPU | 17 / 20 | 10 | 0.625 | 0.66 s / 36 s |
+| `bge-reranker-v2-m3` | GPU | 17 / 20 | 9 | 0.607 | 0.19 s |
+| `bge-reranker-v2-m3`, int8 | CPU | 17 / 20 | 9 | 0.614 | 3.8 s |
+| `mmarco-mMiniLMv2-L12` (int8 ONNX) | CPU | 17 / 20 | 8 | 0.557 | **0.8 s** |
+| the same, in the `reranker` container, over HTTP | CPU | 17 / 20 | — | 0.539 | 0.62 s |
+
+The default is `mmarco-mMiniLMv2-L12`: the only one fast enough on the CPU for a chat, and well short
+of the first row. `Qwen3-Reranker-4B` is listed on OpenRouter, whose `/rerank` takes this shape;
+DeepInfra also hosts it, but its API takes a different shape and would need its own client.
+
+**Chosen on 2026-10-17: `mmarco-mMiniLMv2-L12`, int8, in the CPU container.** It needs no GPU, no key
+and no third vendor, and it moved `recall@10` from 0.750 to 0.850 and MRR from 0.542 to 0.583 on the
+eval set (§8.7). A hosted `Qwen3-Reranker-4B` stays one change of settings away if its quality is
+worth a vendor.
+
+**Any failure skips reranking and keeps the RRF order** -- an error, a malformed answer, a non-finite
+score, or the deadline `RERANKER_TIMEOUT_S` for the whole call -- logged and recorded in the trace.
+Never a failed request. The request's database transaction ends before the reranker is called, as it
+does before the model.
 
 ### 5.5 Parent expansion
 
@@ -382,6 +471,12 @@ the other language. `text-embedding-3-small` aligns Vietnamese and English weakl
 question under-retrieves English chunks that answer it. Searching both and letting RRF fuse costs a
 prompt line; changing the embedding model costs a dimension change and a full re-ingest.
 
+> **Built at R4 (2026-10-17).** The rewriter returns `intent`, `standalone` and `sub_queries`, at
+> reasoning effort `none`, reading the last six turns the server keeps in `conversations` and
+> `messages`. Only `CHITCHAT` changes what happens: retrieval is skipped and the reply cites nothing.
+> The other intents are recorded in the trace for R5 and R7. Filters still come from the client, and
+> bilingual sub-queries are not built: the eval set has no cross-lingual question to justify them.
+
 > **Premise changed (2026-10-10).** Phase 1 shipped with `text-embedding-3-large`, not `-small`.
 > The weakness this paragraph argues from was `-small`'s. Before R4 is built, measure cross-lingual
 > recall on the eval set: bilingual expansion stays only if it still earns its prompt line.
@@ -398,6 +493,15 @@ class Plan(BaseModel):
     document_hint: str | None       # BROWSE_DOC only
     reason: str                     # one sentence, for the trace
 ```
+
+> **Built at R5 (2026-10-17) without a model call of its own.** The rewriter (R4) already reads the
+> question and returns its intent; it now also returns the one document the question names
+> (`document_hint`). The router is code over those two fields: `CHITCHAT` → `NO_RETRIEVAL`,
+> `SUMMARIZE_DOC` with a named or open document → `BROWSE_DOC`, everything else → `HYBRID`. A second
+> call would cost every question about a second (measured at R4) to decide what the first call
+> already knew. `VECTOR_ONLY` is not used: nothing says when keyword search should be skipped.
+> `BROWSE_DOC` reads the document's outline from `parent_chunks.heading_path`; when no single
+> document clearly matches the name, the question is searched instead and the trace says why.
 
 **A closed set, not free-form JSON.** An open router invents tools that do not exist, filters in the
 wrong shape, and `top_k = 5000`. With a closed set, an invalid output is caught and falls back to
@@ -438,6 +542,13 @@ Loop semantics, all three easy to get wrong:
 Out of iterations, the pipeline **answers anyway**, with a note that the documents may not cover the
 question fully. It never returns an error for failing to find enough.
 
+> **Built at R6 (2026-10-17), and shipped at one round.** The gate runs when
+> `RETRIEVAL_MAX_ITERATIONS` is above 1, at reasoning effort `GATE_REASONING_EFFORT` (`none`); it
+> answers "sufficient" without a call for small talk and summaries, whose second search could add
+> nothing. The answer is always to the user's question, never to the gate's last search; each round
+> after the first may add `CONTEXT_ROUND_EXTRA` tokens to the budget. On the eval set it was
+> calibrated (1.15–1.20 rounds) but found no page the first round had missed (§8.7).
+
 **Health metric: mean iterations must sit in 1.2–1.6.** At 3.0 the gate is never satisfied and costs
 triple for nothing. At exactly 1.0 it is indistinguishable from its no-op.
 
@@ -476,6 +587,14 @@ supported" costs it nothing.
 On a catch: **drop the unsupported sentence and add a line saying the documents do not cover it.**
 Preferred over regenerating (another call, no guarantee) and over discarding the whole answer
 (usually an overreaction).
+
+> **Built at R7 (2026-10-17), and shipped off.** `RETRIEVAL_REFLECT_ENABLED` turns it on, at
+> reasoning effort `REFLECT_REASONING_EFFORT` (`low`); small talk is not checked. One departure
+> from the schema above: a `note` field, so the line replacing a dropped sentence is written in the
+> answer's language. The prompt says an omission is not an unsupported claim, and that a penalty
+> stated at the head of a clause covers every point under it: both were over-drops measured on the
+> set. With them it drops nothing from the eval set's drafts, which had nothing to drop, and catches
+> all twenty fabrications planted in those drafts (§8.7). It costs about 1.5 s a question.
 
 ### 6.6 Cost and model allocation
 
@@ -530,6 +649,17 @@ true. It is the last resort, not a parallel source.
 
 Do not use Tavily's `include_answer`. It has Tavily's own model synthesise a response, bypassing the
 generator, the citation model and the trace.
+
+> **Built at R8 (2026-10-17), and shipped off.** `WEB_SEARCH_ENABLED` needs `TAVILY_API_KEY` and
+> `RETRIEVAL_MAX_ITERATIONS` of at least 2, or the app refuses to start: with one round the web would
+> be on and never run. The search runs once, after the loop, with the rewritten question rather than
+> the gate's last search (worded for the corpus), and what it finds goes into `Context.untrusted`
+> only. Layer 1 is tested: a page carrying "Ignore previous instructions…" reaches the answer and
+> reflection and no other call. Reflection reads the web pages as sources and treats a sentence that
+> tells the reader or a system what to do as unsupported (layer 3). The answering prompt counts web
+> pages as sources, prefers the documents, and must say when a claim comes from the web; it is also
+> given today's date when web pages are present, since pages print this year's figure beside last
+> year's.
 
 ---
 
@@ -645,42 +775,154 @@ stage that might need it.
 **No stage merges without a before/after number from the eval set.** Including when the number says
 the stage did not help — that is a result too, and a reason to delete the node rather than carry it.
 
-### 8.7 The R1 baseline
+### 8.7 Results so far
 
-Measured 2026-10-11 with `python -m eval.run` (retrieval-only), R0 as built: vector search alone, every
-stage flag off.
+Measured 2026-10-11 with `python -m eval.run` (retrieval-only), both rows on the same corpus, one
+after the other.
 
-| Kind | n | `recall@10` | `MRR` |
-|---|---|---|---|
-| **all** | **20** | **0.750** | **0.517** |
-| baseline | 8 | 0.875 | 0.708 |
-| code | 4 | 1.000 | 0.569 |
-| followup | 4 | 0.250 | 0.250 |
-| summarize | 4 | 0.750 | 0.348 |
+| Stage | Kind | n | `recall@10` | `MRR` |
+|---|---|---|---|---|
+| **R1** — vectors alone, every flag off | **all** | **20** | **0.700** | **0.463** |
+| | baseline | 8 | 0.750 | 0.688 |
+| | code | 4 | 0.750 | 0.425 |
+| | followup | 4 | 0.250 | 0.125 |
+| | summarize | 4 | 1.000 | 0.392 |
+| **R2** — `RETRIEVAL_BM25_ENABLED=true` | **all** | **20** | **0.750** | **0.542** |
+| | baseline | 8 | 0.875 | 0.625 |
+| | code | 4 | 1.000 | 0.750 |
+| | followup | 4 | 0.250 | 0.250 |
+| | summarize | 4 | 0.750 | 0.458 |
+| **R3** — `RETRIEVAL_RERANK_ENABLED=true`, CPU reranker `mmarco-mMiniLMv2-L12` (int8) | **all** | **20** | **0.850** | **0.583** |
+| | baseline | 8 | 0.875 | 0.698 |
+| | code | 4 | 1.000 | 0.613 |
+| | followup | 4 | 0.500 | 0.250 |
+| | summarize | 4 | 1.000 | 0.656 |
+| **R4** — `RETRIEVAL_INTENT_ENABLED=true`, on top of R3 | **all** | **20** | **0.900** | **0.580** |
+| | baseline | 8 | 0.875 | 0.698 |
+| | code | 4 | 1.000 | 0.613 |
+| | followup | 4 | 0.750 | 0.237 |
+| | summarize | 4 | 1.000 | 0.656 |
+| **R5** — `RETRIEVAL_ROUTER_ENABLED=true`, on top of R4 | **all** | **20** | **0.900** | **0.624** |
+| | baseline | 8 | 0.875 | 0.698 |
+| | code | 4 | 1.000 | 0.613 |
+| | followup | 4 | 0.750 | 0.237 |
+| | summarize | 4 | 1.000 | 0.875 |
 
-Missed: `a08`, `a13`, `a14`, `a16`, `a20`.
+Missed at R1: `a06`, `a08`, `a10`, `a13`, `a14`, `a16`. Missed at R2: `a08`, `a13`, `a14`, `a16`, `a18`.
+Missed at R3: `a01`, `a14`, `a16`. Missed at R4: `a01`, `a15`. Missed at R5: `a01`, `a15`.
 
-Corpus: 10 documents, 2,982 child chunks, ingested with the outline learned from each document and
-with the title and heading path in the embedded text. Embedding: `text-embedding-3-large`, 1536
+**R6, measured at the final context** (the pages the model is given, after every round), against R5
+measured the same way, both on 2026-10-17:
+
+| Setup | Context recall | Context MRR | Mean rounds | Gate time |
+|---|---|---|---|---|
+| R5 (one round) | 0.900 | 0.635 | 1.00 | — |
+| R6, gate at reasoning effort `none` | 0.900 | 0.635 | 1.20 | median 1.2 s, at most 3.4 s |
+| R6, gate at `low` | 0.900 | 0.635 | 1.15 | median 1.3 s, at most 5.2 s |
+| R5 with the reranker off | 0.850 | 0.598 | 1.00 | — |
+| R6 with the reranker off, gate at `low` | 0.850 | 0.598 | 1.20 | median 1.3 s | R3 was measured on 2026-10-17 with the same corpus and the same
+question vectors as R2 (`--embed-cache`), so the two rows differ only by the reranker.
+
+The R2 row was measured twice, before and after the keyword index was rebuilt to split codes (§5.2):
+the same figures and the same misses both times.
+
+Corpus: 10 documents, 2,986 child chunks, ingested with the outline as corrected after the third
+review, title and heading path in the embedded text. Embedding: `text-embedding-3-large`, 1536
 dimensions. All 20 labels machine-checked as reachable.
-
-**The stored corpus is one outline fix behind the code.** A third review, after this measurement,
-found about 260 chunks with a wrong heading path (sections that had lost their chapter in two
-documents, clauses filed under the clause before them) and the outline was corrected. The database
-still holds the chunks as they were measured. The numbers above are the baseline for that corpus;
-after the next re-ingest they have to be measured again before anything is compared with them.
 
 How to read it:
 
+- **R2 does what it was built for, and little else.** The code questions go from three of four to
+  four of four and their MRR from 0.425 to 0.750. Overall the gain is one question: two found that
+  were missed (`a06`, `a10`), one lost (`a18`).
+- **Keyword search alone found more than the fusion kept.** On its own it ranked `a08` fifth and
+  `a13` sixth (§5.2); both are still missed after fusion. A chunk only one source votes for, at rank
+  five or worse, is beaten by the first four of each list and by everything both lists agree on, and
+  the cut to ten comes straight after. Recall beyond that is what the reranker of R3 is for: it
+  chooses from the whole fused set, not from its first ten.
+- **R8 went to the web for every question the corpus cannot answer, and for one it should have
+  answered.** Measured with `--full`, `RETRIEVAL_MAX_ITERATIONS=3`, no domain limit, on 2026-10-17.
+  All five outside questions in Set B went to the web and were answered from it with the pages cited
+  and the web named as the source (Set B 8 of 8 right, against 7 of 8 at R7). Of the three that sound
+  like news but the corpus answers, `b06` went to the web, and so did `a01` in Set A: both ask the
+  red-light fine, whose page the CPU reranker has lost since R3; the web gave the right figure
+  (18--20 million đồng for a car under Decree 168), but from the web rather than the documents. The
+  first run showed the answering prompt declining all seven although the pages answered them --
+  told only to use the sources and that the documents fell short, it said the documents fell short.
+  Two further faults were fixed on the way: without today's date, "the minimum wage now" got the
+  2025 figure from a page that also gave the one in force since 2026, and one answer ended with the
+  prompt's own `[NOT FOUND]` label. Seven Tavily searches in all, kept in `data/eval-web.json`.
+  Turning it on costs every question the gate (about 1.2 s) and a question that goes out two more
+  rounds and the search.
+- **R7 found nothing to catch.** Measured with `--full` on 2026-10-17: one draft per question, read
+  by a separate judge prompt (`eval/judge.py`, the same model at reasoning effort `high`) as drafted
+  and again after the check. The drafts stated nothing the judge could not find in the sources, in
+  Set A or Set B, and all five outside questions in Set B were declined by the answering prompt
+  alone; the one Set B miss, `b06`, is a question the corpus answers that was declined, which is
+  retrieval's and R8's. The first prompt only did harm: at `none` it dropped a right answer
+  (`a13`, whose fine is stated at the head of the clause and the act in a point under it) and
+  citation accuracy fell from 0.900 to 0.850; at `low` it also dropped `a08` for leaving out an
+  exception, and fell to 0.800. With the two clauses added, `low` drops nothing (0.900 before and
+  after) at a median 1.5 s, at most 5.4 s; `none` still drops a sentence of `a05`.
+- **Planted fabrications are caught, 20 of 20.** Since the drafts had nothing to catch, one
+  fabricated sentence was planted in each Set A draft (`eval/injections.yaml`, `python -m
+  eval.inject`), each checked against the passages: four pair an act with a penalty the sources give
+  to something else, five change a figure, eleven add a rule the sources do not have. At `low`
+  reflection dropped all twenty and nothing else. The clause-head line was the worry -- written
+  after `a13`, it could have let a wrong bracket through -- so it was measured out: without it, 19
+  of 20, and on `a13` the check dropped the true fine and kept the planted one. The other three
+  bracket plants were caught either way. Limits: twenty sentences written by hand, by the same kind
+  of model that checks them, one run each.
+- **R6 changed nothing on this set, and the table says why.** The gate is calibrated: 1.15–1.20
+  rounds on average, inside the healthy 1.2–1.6 of §8.2 or just under it, and it calls "not enough"
+  only where something is missing: `a01` (the fine for a car running a red light), `a14` (how long the
+  licence is withdrawn), `a13`, `a11`. But the searches it writes do not bring the missing page up.
+  For `a01` the page is lost to the CPU reranker from R3 on, and every refined search goes through
+  the same reranker; with the reranker off, `a14`'s refined search ("Thời hạn tước quyền sử dụng
+  giấy phép lái xe …") still does not find page 15, because those words are in nearly every article
+  of the decree. Two faults were found and fixed on the way: the answer was given to the gate's last
+  search instead of the user's question, and the first round filled 7,712 of 8,000 tokens, leaving
+  later rounds no room (each round after the first now adds `CONTEXT_ROUND_EXTRA`, 3,000 tokens).
+  What would move these questions is retrieval -- a stronger reranker -- not more rounds of the same
+  one. `RETRIEVAL_MAX_ITERATIONS` stays 1 by default: the gate costs every question a model call
+  (about 1.2 s) for no measured gain here. When it does run out of rounds, the answer now says what
+  the documents may not cover.
+- **R5 is measured by the share of the document's outline that reached the context**, not by recall:
+  one gold page cannot measure a summary (§8.4). For the four summary questions it went from 0.440 at
+  R4 -- the ten passages most like the question cover two to four of a law's six to nine chapters --
+  to 1.000. All four were routed to `BROWSE_DOC` and all four found the right document by the name
+  the question used. Summary MRR rose from 0.656 to 0.875 because the outline opens with the
+  document's first page, which is the gold page. No other kind changed. The router took every Set B
+  question for `HYBRID`; the rewriter, with the `document_hint` field added to its prompt, now flags
+  only one of the five outside questions as `OUT_OF_SCOPE` (four before). That intent is not acted
+  on before R7, which will have to measure it again.
+- **R4 rewrote all four follow-ups correctly** ("Thế nếu người ngồi sau không đội thì sao?" became
+  "Đi xe máy, người ngồi sau không đội mũ bảo hiểm thì bị phạt bao nhiêu?") and left all sixteen other
+  questions word for word. Follow-up recall went from 0.500 to 0.750 and every other kind is unchanged.
+  The one follow-up still missed, `a15`, retrieves page 17 instead of its gold page 18; page 17 also
+  says a vessel must hold a registration certificate, so the miss is at least partly the label's.
+  Follow-up MRR stayed low (0.237): the right page arrives, but not first.
+- **R4 costs one model call per question**: median 1.3 s, at most 1.8 s, with the rewriter at reasoning
+  effort `none`. At `low`, the default for the rest of the pipeline, it gave the same rewrites and the
+  same recall in 1.9 s (at most 3.3 s), and took four of the five outside questions in Set B for
+  `SEARCH_CORPUS` instead of `OUT_OF_SCOPE`; at `none` it found four of the five.
+- **R3 moved recall as well as MRR**, against what §8.2 predicted ("Recall will *not* move when
+  reranking is enabled"). That held for a reranker choosing among the same ten; this one chooses ten
+  out of the fifty RRF hands it (`RETRIEVAL_RERANK_CANDIDATES`), and brought in `a08`, `a13` and `a18`
+  from beyond the fused top ten. It lost `a01`, and the code questions' MRR fell from 0.750 to 0.613:
+  a small model reads "Điều 52 của Nghị định 168/2024/NĐ-CP" less exactly than the keyword match did.
+  The model is the smallest measured in §5.4; a stronger one is a change of settings.
+- **One question is inside the noise of a re-ingest.** The previous corpus, chunked before the third
+  review, gave 0.750 / 0.517 at R1 with a different set of misses (`a08`, `a13`, `a14`, `a16`,
+  `a20`). Between the two, 4 chunks were added, about 260 heading paths changed, and every context
+  sentence was written again by the model, which does not write the same sentence twice. So the two
+  rows above are comparable with each other, and neither is comparable with a figure from another
+  ingest. A difference of one question in twenty proves nothing; the per-kind rows say where to look.
 - **Follow-ups score 0.250, as §8.4 intends.** Their last turn names no topic ("Thế nếu người ngồi sau
-  không đội thì sao?"), so a search on that turn alone finds the right page once in four. This is the
-  row R4 has to move.
-- **"Summarise X" scores 0.750, which is not what §8.4 intends.** Its gold is the page stating the
-  document's scope, and with the title in every embedded text plain vector search finds that page. One
-  gold page cannot measure a summary; R5 needs a measure of its own (how much of the document's
-  outline the context covers). The four questions are kept as they are until then.
-- An earlier run the same day gave 0.850 / 0.573. It used four easier follow-ups and an outline that
-  mislabelled some articles; it is not comparable and is not the baseline.
+  không đội thì sao?"). This is the row R4 has to move.
+- **"Summarise X" is not measured by this set.** Its gold is the page stating the document's scope,
+  and with the title in every embedded text plain vector search finds that page. R5 needs a measure
+  of its own (how much of the document's outline the context covers).
 - The set is approved for use but small: one question is 5 points of recall overall and 25 within a
   kind of four.
 
@@ -717,7 +959,7 @@ app/services/query_service.py          ★ R0 — orchestrates app/core/
 app/repositories/chunk_repository.py   ★ R0 — read-only retrieval SQL
 
 shared/llm.py                    MODIFY — add an async Protocol beside the sync one
-reranker_service/                ★ R3 — own container, same shape as the chandra service in docker-compose.yml
+reranker_service/                ★ R3 — CPU cross-encoder behind Cohere's /rerank, its own container
 eval/
 ├── dataset.yaml                 ★ R1 — the labelled pairs
 └── run.py                       ★ R1 — retrieval-only by default, --full for generation
@@ -756,11 +998,13 @@ RETRIEVAL_OVER_FETCH=50               # per source, before fusion
 RETRIEVAL_EF_SEARCH=100               # MUST be >= 2 x OVER_FETCH
 RETRIEVAL_RRF_K=60
 RETRIEVAL_RERANK_KEEP=10
+RETRIEVAL_RERANK_CANDIDATES=50        # how deep the fused list goes to the reranker
 CONTEXT_TOKEN_BUDGET=8000
 
 # --- services ---
-RERANKER_URL=http://reranker:8200
-RERANKER_TIMEOUT_S=10                 # on timeout: keep RRF order, log
+# RERANKER_URL, RERANKER_MODEL, RERANKER_API_KEY: unset for the CPU container (http://reranker:8200
+# in compose, http://localhost:8200 on the host); set all three for a hosted reranker
+RERANKER_TIMEOUT_S=5                  # on timeout: keep RRF order, log
 TAVILY_API_KEY=
 RL_TAVILY_RPM=60                      # fifth bucket, same Redis limiter
 ```

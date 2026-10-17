@@ -6,8 +6,9 @@ import { Group, Panel, Separator, useDefaultLayout, type LayoutStorage } from 'r
 import { useDocuments } from '@/hooks/use-documents'
 import { displayName } from '@/lib/documents'
 import { ChatPanel } from './chat-panel'
-import { DocumentPanel } from './document-panel'
+import { ChatProvider } from './chat-provider'
 import { useLocale } from './locale-provider'
+import { Sidebar } from './sidebar'
 import { ToastProvider } from './toast-provider'
 import { useViewer, ViewerProvider } from './viewer/viewer-provider'
 
@@ -52,14 +53,18 @@ export function Workspace() {
   return (
     <ToastProvider>
       <ViewerProvider>
-        <main className="flex min-h-0 flex-1 flex-col md:flex-row">
-          <div className="max-h-[45dvh] shrink-0 md:max-h-none md:w-80 lg:w-96">
-            <DocumentPanel />
-          </div>
-          <div className="min-h-0 flex-1">
-            <ChatArea />
-          </div>
-        </main>
+        {/* Above both columns: the conversation list in the sidebar and the
+            chat show the same conversation. */}
+        <ChatProvider>
+          <main className="flex min-h-0 flex-1 flex-col md:flex-row">
+            <div className="max-h-[45dvh] shrink-0 md:max-h-none md:w-80 lg:w-96">
+              <Sidebar />
+            </div>
+            <div className="min-h-0 flex-1">
+              <ChatArea />
+            </div>
+          </main>
+        </ChatProvider>
       </ViewerProvider>
     </ToastProvider>
   )

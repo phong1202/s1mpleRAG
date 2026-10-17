@@ -122,7 +122,26 @@ async def test_the_ruler_scores_what_leaves_fuse_with_the_earlier_turns_as_histo
         calls.append(("fuse", candidates))
         return ["fused"]
 
-    stages = SimpleNamespace(rewrite=rewrite, plan=plan, retrieve=retrieve, fuse=fuse)
+    from app.core.contracts import GateVerdict
+
+    async def expand(candidates, trace):
+        return candidates
+
+    def build_context(previous, candidates, trace):
+        return previous
+
+    async def gate(query, context, trace):
+        return GateVerdict(sufficient=True)
+
+    stages = SimpleNamespace(
+        rewrite=rewrite,
+        plan=plan,
+        retrieve=retrieve,
+        fuse=fuse,
+        expand=expand,
+        build_context=build_context,
+        gate=gate,
+    )
     question = LabelledQuestion(
         id="f",
         kind="followup",
@@ -133,7 +152,7 @@ async def test_the_ruler_scores_what_leaves_fuse_with_the_earlier_turns_as_histo
         turns=("o to?", "con xe may?"),
     )
 
-    assert await retrieved(stages, question) == ["fused"]
+    assert (await retrieved(stages, question)).first_round == ["fused"]
     assert calls == [
         ("rewrite", (Turn(role="user", text="o to?"),)),
         ("plan", "con xe may?"),
@@ -148,3 +167,399 @@ def test_scores_are_broken_down_by_kind_of_question():
     rows = [("baseline", 1.0, 1.0), ("baseline", 0.0, 0.0), ("followup", 1.0, 0.5)]
 
     assert by_kind(rows) == {"baseline": (2, 0.5, 0.5), "followup": (1, 1.0, 0.5)}
+
+
+def test_the_result_names_the_stages_that_were_on():
+    from types import SimpleNamespace
+
+    from eval.run import stages_line
+
+    settings = SimpleNamespace(
+        retrieval_bm25_enabled=True,
+        retrieval_rerank_enabled=False,
+        retrieval_intent_enabled=False,
+        retrieval_router_enabled=False,
+        retrieval_reflect_enabled=False,
+    )
+
+    assert stages_line(settings).split()[1:3] == ["bm25=on", "rerank=off"]
+
+
+class _CountingProvider:
+    def __init__(self):
+        self.embedded: list[str] = []
+
+    async def embed_query(self, text):
+        self.embedded.append(text)
+        return [float(len(text)), 1.0]
+
+    async def complete(self, messages, schema, reasoning_effort=None):
+        return "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_cached_question_is_not_embedded_twice(tmp_path):
+    """Every re-run of the eval cost twenty paid embeddings, so each tuning
+    step had to wait for a go-ahead. The questions do not change between
+    runs; their vectors need not either."""
+    from eval.run import CachedEmbeddings
+
+    path = tmp_path / "cache.json"
+    first = _CountingProvider()
+    cached = CachedEmbeddings(first, path, model="m", dimensions=2)
+    vector = await cached.embed_query("câu hỏi")
+    cached.save()
+
+    second = _CountingProvider()
+    again = await CachedEmbeddings(second, path, model="m", dimensions=2).embed_query("câu hỏi")
+
+    assert again == vector
+    assert first.embedded == ["câu hỏi"] and second.embedded == []
+
+
+@pytest.mark.asyncio
+async def test_another_model_or_size_does_not_reuse_the_cache(tmp_path):
+    from eval.run import CachedEmbeddings
+
+    path = tmp_path / "cache.json"
+    cached = CachedEmbeddings(_CountingProvider(), path, model="m", dimensions=2)
+    await cached.embed_query("q")
+    cached.save()
+
+    other_model, other_size = _CountingProvider(), _CountingProvider()
+    await CachedEmbeddings(other_model, path, model="n", dimensions=2).embed_query("q")
+    await CachedEmbeddings(other_size, path, model="m", dimensions=3).embed_query("q")
+
+    assert other_model.embedded == ["q"] and other_size.embedded == ["q"]
+
+
+@pytest.mark.asyncio
+async def test_the_cache_only_stands_in_for_embeddings(tmp_path):
+    from eval.run import CachedEmbeddings
+
+    cached = CachedEmbeddings(_CountingProvider(), tmp_path / "c.json", model="m", dimensions=2)
+
+    assert await cached.complete([], str) == "completed"
+
+
+def test_a_question_that_was_not_reranked_is_reported():
+    """A dead container, a wrong URL or a model the server refuses all fall
+    back to the fused order -- and an eval reading only its settings printed
+    those R2 figures under an R3 label."""
+    from app.core.contracts import Trace
+    from eval.run import rerank_outcome
+
+    reranked, fell_back, without = Trace(), Trace(), Trace()
+    reranked.record("rerank_detail", ms=0, model="served/model", fallback=False)
+    fell_back.record("rerank_detail", ms=0, sent=50, fallback="ConnectError: refused")
+
+    assert rerank_outcome(reranked) == ("served/model", None)
+    assert rerank_outcome(fell_back) == (None, "ConnectError: refused")
+    assert rerank_outcome(without) == (None, None)
+
+
+class _ScriptedCompletions:
+    def __init__(self):
+        self.completed = 0
+
+    async def embed_query(self, text):
+        return [1.0]
+
+    async def complete(self, messages, schema, reasoning_effort=None):
+        from app.core.stages.rewrite import RewriteResult
+
+        self.completed += 1
+        text = messages[-1]["content"]
+        return RewriteResult(
+            intent="SEARCH_CORPUS", standalone=text, sub_queries=[], document_hint=""
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_cached_rewrite_is_not_asked_for_twice(tmp_path):
+    """R4 adds a paid model call per question. The questions and their
+    history are frozen, so the answer to them can be too."""
+    from app.core.stages.rewrite import RewriteResult
+    from eval.run import CachedCompletions
+
+    path = tmp_path / "llm.json"
+    messages = [{"role": "user", "content": "câu hỏi"}]
+    first = _ScriptedCompletions()
+    cached = CachedCompletions(first, path, model="m")
+    result = await cached.complete(messages, RewriteResult)
+    cached.save()
+
+    second = _ScriptedCompletions()
+    again = await CachedCompletions(second, path, model="m").complete(messages, RewriteResult)
+    other = await CachedCompletions(second, path, model="m").complete(
+        [{"role": "user", "content": "câu khác"}], RewriteResult
+    )
+
+    assert isinstance(again, RewriteResult) and again == result
+    assert (first.completed, second.completed) == (1, 1)
+    assert other.standalone == "câu khác"
+
+
+def test_the_intent_is_read_from_the_trace():
+    from app.core.contracts import Trace
+    from eval.run import intent_of
+
+    rewritten, untouched = Trace(), Trace()
+    rewritten.record(
+        "rewrite_detail", ms=0, intent="CHITCHAT", standalone="x", sub_queries=[], document_hint=""
+    )
+
+    assert intent_of(rewritten) == "CHITCHAT" and intent_of(untouched) is None
+
+
+@pytest.mark.asyncio
+async def test_outline_coverage_counts_the_chapters_the_context_reaches(db_session):
+    """A summary needs the document's parts, not its ten passages most like
+    the question. One gold page cannot measure that (spec §8.7); the share of
+    top-level sections that reached the context can."""
+    import uuid
+
+    from app.models import ChildChunk, Document, ParentChunk
+    from eval.run import outline_coverage
+    from tests.helpers import unit_vector
+
+    document = Document(
+        sha256_hash=uuid.uuid4().hex * 2,
+        filename="x.pdf",
+        object_key=f"raw/{uuid.uuid4().hex}",
+        size_bytes=1,
+    )
+    db_session.add(document)
+    await db_session.flush()
+    parents = []
+    for i, heading in enumerate(
+        [
+            "Chương I > Điều 1",
+            "Chương I > Điều 2",
+            "Chương II > Điều 3",
+            "Chương III > Điều 4",
+            None,
+        ]
+    ):
+        parent = ParentChunk(
+            document_id=document.id,
+            chunk_index=i,
+            content="x",
+            heading_path=heading,
+            token_count=1,
+            page_start=1,
+            page_end=1,
+        )
+        db_session.add(parent)
+        await db_session.flush()
+        parents.append(parent.id)
+        db_session.add(
+            ChildChunk(
+                document_id=document.id,
+                parent_id=parent.id,
+                chunk_index=i,
+                content="x",
+                contextualized="x",
+                page_number=1,
+                token_count=1,
+                embedding=unit_vector(i),
+            )
+        )
+    await db_session.flush()
+
+    reached = await outline_coverage(db_session, document.id, [parents[0], parents[1], parents[3]])
+
+    assert reached == pytest.approx(2 / 3)
+
+
+def test_fabrication_is_the_share_of_answers_with_any_unsupported_claim():
+    from eval.judge import Judgement, fabrication_rate
+
+    judged = [
+        Judgement(declined=False, unsupported=[]),
+        Judgement(declined=False, unsupported=["Tạm giữ xe 7 ngày."]),
+        Judgement(declined=True, unsupported=[]),
+        Judgement(declined=False, unsupported=["a", "b"]),
+    ]
+
+    assert fabrication_rate(judged) == 0.5
+
+
+def test_set_b_is_right_when_outside_questions_are_declined_and_the_rest_answered():
+    from eval.judge import Judgement, decided_right
+
+    declined, answered = (
+        Judgement(declined=True, unsupported=[]),
+        Judgement(declined=False, unsupported=[]),
+    )
+
+    assert decided_right("outside", declined) and not decided_right("outside", answered)
+    assert decided_right("web-tempting", answered) and not decided_right("web-tempting", declined)
+    # R8: an outside question answered from cited web pages is answered rightly.
+    assert decided_right("outside", answered, cited_web=True)
+
+
+def test_a_dropped_sentence_the_judge_did_not_flag_is_reported_as_a_possible_overdrop():
+    """The check and the judge are the same model on different prompts.
+    Where they disagree is where a person has to read."""
+    from eval.judge import Judgement, unconfirmed
+
+    judged = Judgement(declined=False, unsupported=["Tạm giữ xe  7 ngày [2]."])
+
+    assert unconfirmed(["Tạm giữ xe 7 ngày [2].", "Trừ 4 điểm [1]."], judged) == ["Trừ 4 điểm [1]."]
+
+
+def test_the_judge_reads_the_question_the_sources_and_the_answer():
+    import uuid
+
+    from app.core.contracts import Context, DocRef, Passage
+    from eval.judge import build_messages
+
+    context = Context(
+        passages=(
+            Passage(
+                ordinal=1,
+                text="Phạt tiền 4 triệu đồng.",
+                ref=DocRef(uuid.UUID(int=1), uuid.UUID(int=2), uuid.UUID(int=3), 5, "nd.pdf"),
+            ),
+        )
+    )
+
+    messages = build_messages("Phạt bao nhiêu?", "Phạt 4 triệu.", context)
+    system, user = (m["content"] for m in messages)
+
+    assert "declined" in system and "unsupported" in system
+    assert "Phạt bao nhiêu?" in user and "Phạt 4 triệu." in user
+    assert "Phạt tiền 4 triệu đồng." in user
+
+
+@pytest.mark.asyncio
+async def test_an_answer_is_judged_as_drafted_and_again_only_if_the_check_changed_it():
+    from app.core.contracts import Answer, Query, Trace
+    from app.core.pipeline import gather
+    from eval.judge import Judgement
+    from eval.run import answer_and_judge
+    from shared.llm import AsyncStubProvider
+    from tests.test_pipeline import _stages
+
+    async def generate(query, context, trace):
+        return "Phạt 4 triệu [1]. Tạm giữ xe [1].", ()
+
+    async def reflect(query, answer, context, trace):
+        trace.record(
+            "reflect_detail", ms=0, asked_model=True, unsupported=["Tạm giữ xe [1]."], unmatched=[]
+        )
+        return Answer(text="Phạt 4 triệu [1].", citations=(), trace=trace)
+
+    async def keep(query, answer, context, trace):
+        return answer
+
+    question = LabelledQuestion(
+        id="a1", kind="baseline", question="q", gold_sha256="a" * 64, gold_page=1, quote="x"
+    )
+    provider = AsyncStubProvider()
+    provider.script(
+        Judgement,
+        Judgement(declined=False, unsupported=["Tạm giữ xe [1]."]),
+        Judgement(declined=False, unsupported=[]),
+    )
+    stages = _stages(generate=generate, reflect=reflect)
+    trace = Trace()
+    gathered = await gather(Query(text="q"), stages, 1, trace)
+
+    checked = await answer_and_judge(stages, provider, question, gathered, trace)
+
+    assert (checked.before.unsupported, checked.after.unsupported) == (["Tạm giữ xe [1]."], [])
+    assert checked.dropped == ("Tạm giữ xe [1].",)
+
+    unchanged = _stages(generate=generate, reflect=keep)
+    calls = len(provider.calls)
+    await answer_and_judge(unchanged, provider, question, gathered, Trace())
+    assert len(provider.calls) == calls + 1
+
+
+def test_a_call_the_cache_answered_is_not_timed(capsys):
+    from app.core.contracts import Trace
+    from eval.run import print_timing, timed
+
+    trace = Trace()
+    trace.record("reflect", ms=0)
+    trace.record("reflect", ms=2)
+    trace.record("reflect", ms=1400)
+
+    assert timed(trace, "reflect") == [1400]
+    print_timing("rewrite", [], ran=True)
+    print_timing("gate", [], ran=False)
+    assert (
+        capsys.readouterr().out == "rewrite          answered from the cache: time not measured\n"
+    )
+
+
+def test_a_fabrication_is_planted_at_the_end_of_the_first_paragraph():
+    from eval.inject import plant
+
+    assert (
+        plant("Một [1]. Hai [2].\n\nBa [3].", "Bịa [1].") == "Một [1]. Hai [2]. Bịa [1].\n\nBa [3]."
+    )
+    assert plant("Một [1].", "Bịa [1].") == "Một [1]. Bịa [1]."
+
+
+def test_a_planted_sentence_is_caught_only_if_reflection_dropped_it():
+    """The rest of what it dropped was right before the plant: collateral."""
+    from eval.inject import outcome
+
+    planted = "Phạt từ 600.000 đồng đến 800.000 đồng. [4]"
+
+    assert outcome(planted, ["Phạt từ 600.000 đồng đến 800.000 đồng [4]."]) == (True, [])
+    assert outcome(planted, ["Trừ 4 điểm. [2]"]) == (False, ["Trừ 4 điểm. [2]"])
+
+
+def test_every_planted_sentence_belongs_to_a_set_a_question():
+    from eval.inject import load_injections
+
+    planted = load_injections("eval/injections.yaml")
+    ids = {q.id for q in load_dataset("eval/dataset.yaml").set_a}
+
+    assert len(planted) == 20 and {p.id for p in planted} <= ids
+    assert {p.kind for p in planted} == {"bracket", "number", "invented"}
+
+
+def test_a_question_that_went_to_the_web_is_read_from_the_trace():
+    from app.core.contracts import Trace
+    from eval.run import web_search_of
+
+    went, stayed = Trace(), Trace()
+    went.record("web_detail", ms=0, query="Tỷ giá USD?", urls=["https://x.vn", "https://y.vn"])
+
+    assert web_search_of(went) == ("Tỷ giá USD?", 2)
+    assert web_search_of(stayed) is None
+
+
+class _CountingSearch:
+    def __init__(self):
+        self.searched = []
+        self._max_results, self._include_domains = 5, []
+
+    async def search(self, text):
+        from app.core.contracts import Candidate, WebRef
+
+        self.searched.append(text)
+        return [Candidate("web", 1, 0.9, "Tỷ giá 25.460.", WebRef("https://x.vn", "X"))]
+
+
+@pytest.mark.asyncio
+async def test_a_cached_web_search_is_not_paid_for_twice(tmp_path):
+    """Tavily bills a credit a search, and the eval's questions do not change."""
+    from eval.run import CachedWebSearch
+
+    path = tmp_path / "web.json"
+    first = _CountingSearch()
+    cached = CachedWebSearch(first, path)
+    found = await cached.search("Tỷ giá USD?")
+    cached.save()
+
+    second = _CountingSearch()
+    again = await CachedWebSearch(second, path).search("Tỷ giá USD?")
+
+    assert again == found and first.searched == ["Tỷ giá USD?"] and second.searched == []
+    assert CachedWebSearch(second, path).paid == 0

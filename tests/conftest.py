@@ -94,6 +94,26 @@ def stub_llm_provider(request, monkeypatch):
         monkeypatch.setattr(get_settings(), "llm_provider", "stub")
 
 
+@pytest.fixture(autouse=True)
+def stages_off(monkeypatch):
+    """Every test starts at R1 whatever .env switches on; a test that needs a
+    stage sets its flag. With rerank on in a developer's .env, the R2 tests
+    were calling the reranker container on localhost, and failing without it."""
+    settings = get_settings()
+    for flag in (
+        "retrieval_bm25_enabled",
+        "retrieval_rerank_enabled",
+        "retrieval_intent_enabled",
+        "retrieval_router_enabled",
+        "retrieval_reflect_enabled",
+        "web_search_enabled",
+    ):
+        monkeypatch.setattr(settings, flag, False)
+    # One round: with more, a developer's .env would put a real gate in front of
+    # every test's scripted answer.
+    monkeypatch.setattr(settings, "retrieval_max_iterations", 1)
+
+
 @pytest_asyncio.fixture
 async def db_session():
     """A session inside a transaction that is always rolled back.

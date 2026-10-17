@@ -124,3 +124,33 @@ def test_a_passage_keeps_the_heading_of_its_candidate():
     context = build_context(Context.empty(), [candidate], budget=6000)
 
     assert context.passages[0].heading == "Chuong II > Dieu 8"
+
+
+def test_each_round_counts_itself():
+    first = build_context(Context.empty(), [_candidate(1, "alpha")], budget=8000)
+    second = build_context(first, [_candidate(2, "beta")], budget=8000)
+
+    assert (first.rounds, second.rounds) == (1, 2)
+
+
+def test_a_later_round_has_room_of_its_own(monkeypatch):
+    """Round one filled 7,712 of 8,000 tokens, so the gate's second and third
+    searches (R6) could add nothing whatever they found. Each round after the
+    first gets room of its own; a question answered in one round still gets
+    the base budget and no more."""
+    from app.config import get_settings
+    from app.core.contracts import Trace
+    from app.core.stages.noops import build_context_stage
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "context_token_budget", 50)
+    monkeypatch.setattr(settings, "context_round_extra", 50)
+    words = "word " * 40  # about 40 tokens: one fits in 50, two do not
+
+    first = build_context_stage(
+        Context.empty(), [_candidate(1, words), _candidate(2, words)], Trace()
+    )
+    second = build_context_stage(first, [_candidate(3, words)], Trace())
+
+    assert len(first.passages) == 1
+    assert len(second.passages) == 2

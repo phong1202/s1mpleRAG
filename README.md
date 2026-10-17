@@ -27,9 +27,10 @@ before it:
 
 **Read path — retrieval.** One loop in `app/core/pipeline.py`: rewrite, plan,
 retrieve, fuse, expand to parents, build the context, gate, generate, reflect.
-Retrieval, expansion, context building and generation are real today; the
-other five are no-ops that later stages replace, each behind a
-`RETRIEVAL_*_ENABLED` flag.
+Retrieval, expansion, context building and generation always run; the other
+five are built behind settings (`RETRIEVAL_*_ENABLED`, and
+`RETRIEVAL_MAX_ITERATIONS` for the gate) and fall back to a no-op when off or
+when they fail.
 
 The design, and the reasons behind it, are in
 [`docs/system-design.md`](docs/system-design.md) (ingestion) and
@@ -198,7 +199,11 @@ in a bug report.
 | GET | `/documents/{id}/status` | One document's status, metadata and progress; 404 if absent. |
 | GET | `/documents/{id}/file-url` | A short-lived URL (300 seconds) for the PDF viewer to fetch the file. |
 | DELETE | `/documents/{id}` | 200 with `data: null`; 404 if absent. |
-| POST | `/query` | An answer with citations. |
+| POST | `/query` | An answer with citations, and the `conversation_id` to send with the next question; 404 for a conversation that is not the caller's. |
+| GET | `/me` | The current user. Always the seeded admin until login exists. |
+| GET | `/conversations` | The user's conversations, most recently updated first, with title and message count; paginated. |
+| GET | `/conversations/{id}` | One conversation with every message, oldest first; answers keep their citations. 404 if absent or not the user's. |
+| DELETE | `/conversations/{id}` | 200 with `data: null`; its traces stay, unlinked. 404 if absent or not the user's. |
 
 Interactive documentation is at `/docs` on the running API.
 
@@ -307,6 +312,30 @@ It calls the LLM provider for every chunk again. A document that is still being 
 and reported; `--force` relaunches one anyway, for a document stuck in a running status because its
 task was lost. The old chunks stay searchable until the new ones replace them.
 
+## Reranking
+
+R3 sends the fused candidates to a reranker and keeps the ten it ranks highest. The default reranker
+is the `reranker` container: a small multilingual cross-encoder on the CPU, built into the image, no
+GPU and no key needed.
+
+```bash
+docker compose build reranker            # model chosen by RERANKER_LOCAL_* in .env
+docker compose up -d --no-deps reranker
+curl localhost:8200/health
+```
+
+Then set `RETRIEVAL_RERANK_ENABLED=true`. To use a hosted model instead, point the API elsewhere; no
+code changes:
+
+```bash
+RERANKER_URL=https://openrouter.ai/api/v1
+RERANKER_MODEL=qwen/qwen3-reranker-4b
+RERANKER_API_KEY=sk-or-...
+```
+
+The models measured for this, and why the CPU one is the default, are in
+`docs/retrieval-design.md` §5.4.
+
 ## Evaluation
 
 `eval/dataset.yaml` holds a fixed set of labelled questions, anchored to
@@ -317,6 +346,9 @@ uv run python -m eval.run --check-labels   # every quote sits on its gold page; 
 uv run python -m eval.run                  # recall@10 and MRR
 uv run python -m eval.run --full           # adds citation accuracy and mean iterations
 ```
+
+`--embed-cache data/eval-embeddings.json` keeps the question embeddings between runs: only the
+first run pays for them.
 
 The last two need `LLM_PROVIDER=openai` and an ingested corpus: the corpus is
 embedded by the real model, and a stub query vector measured against it is
@@ -351,9 +383,16 @@ variables are required; the rest fall back to defaults in `app/config.py`.
 | `ENRICH_BATCH_SIZE`, `EMBED_BATCH_SIZE` | `20`, `100` | Chunks per provider call. |
 | `RL_CHAT_RPM`, `RL_CHAT_TPM`, `RL_EMBED_RPM`, `RL_EMBED_TPM` | `500`, `200000`, `3000`, `1000000` | The workers' rate limits against the provider. |
 | `RETRIEVAL_TOP_K`, `RETRIEVAL_OVER_FETCH`, `RETRIEVAL_EF_SEARCH` | `10`, `50`, `100` | `RETRIEVAL_EF_SEARCH` must be at least twice `RETRIEVAL_OVER_FETCH`. |
-| `RETRIEVAL_RRF_K`, `RETRIEVAL_RERANK_KEEP`, `CONTEXT_TOKEN_BUDGET` | `60`, `10`, `8000` | |
+| `RETRIEVAL_RRF_K`, `RETRIEVAL_RERANK_KEEP`, `RETRIEVAL_RERANK_CANDIDATES`, `CONTEXT_TOKEN_BUDGET` | `60`, `10`, `50`, `8000` | |
 | `RETRIEVAL_MAX_ITERATIONS` | `1` | How many times the read path may loop. |
-| `RETRIEVAL_BM25_ENABLED`, `RETRIEVAL_RERANK_ENABLED`, `RETRIEVAL_INTENT_ENABLED`, `RETRIEVAL_ROUTER_ENABLED`, `RETRIEVAL_REFLECT_ENABLED`, `WEB_SEARCH_ENABLED` | all `false` | Stage flags for retrieval stages that are not built yet. |
+| `RETRIEVAL_BM25_ENABLED` | `false` | Hybrid search (R2): keyword search beside the vectors, fused by reciprocal rank. |
+| `RETRIEVAL_RERANK_ENABLED` | `false` | Reranking (R3): a cross-encoder reorders the fused candidates. Needs a reranker server; see below. |
+| `RERANKER_URL`, `RERANKER_MODEL`, `RERANKER_API_KEY`, `RERANKER_TIMEOUT_S` | unset, unset, unset, `5` | Any server speaking Cohere's `/rerank`. Leave the first three unset for the CPU container: the URL becomes `http://reranker:8200` in compose and `http://localhost:8200` on the host, and the container uses the model it was built with. On any failure, or past the timeout, the fused order is kept. |
+| `RETRIEVAL_INTENT_ENABLED` | `false` | Follow-up questions (R4): one model call rewrites the question, using the conversation the server keeps, into one that stands alone; small talk is answered without searching. Conversations are kept either way: `POST /query` returns a `conversation_id` to send back with the next question. |
+| `RETRIEVAL_ROUTER_ENABLED` | `false` | Routing (R5): a request to summarise a named document is answered from its outline -- chapters and the titles under them -- instead of a search. Needs `RETRIEVAL_INTENT_ENABLED`. |
+| `RETRIEVAL_MAX_ITERATIONS`, `GATE_REASONING_EFFORT`, `CONTEXT_ROUND_EXTRA` | `1`, `none`, `3000` | The gate (R6): above 1, a model call after each round decides whether the context answers the main part of the question, and if not, what to search for next, up to that many rounds; each extra round may add `CONTEXT_ROUND_EXTRA` tokens. Built, but measured with no gain on the eval set (`docs/retrieval-design.md` §8.7), so it ships at 1. |
+| `RETRIEVAL_REFLECT_ENABLED`, `REFLECT_REASONING_EFFORT` | `false`, `low` | Reflection (R7): a model call after the answer drops each sentence no source supports and says the documents do not cover it. On the eval set it caught all 20 planted fabrications and dropped nothing true, at about 1.5 s a question (`docs/retrieval-design.md` §8.7). |
+| `WEB_SEARCH_ENABLED`, `TAVILY_API_KEY`, `WEB_SEARCH_MAX_RESULTS`, `WEB_SEARCH_INCLUDE_DOMAINS`, `WEB_SEARCH_TIMEOUT_S` | `false`, unset, `5`, empty, `10` | Web search (R8): when the gate still finds the documents short after a second round, one Tavily search with the question; the pages reach the answer as external sources, cited as `kind: "web"`, and nothing else. Needs `RETRIEVAL_MAX_ITERATIONS` of at least 2 and a key, or the app does not start. Empty `WEB_SEARCH_INCLUDE_DOMAINS` searches the whole web (`docs/retrieval-design.md` §7, §8.7). |
 
 Addresses in `.env` are as seen **from the host**. `docker-compose.yml` reads
 the same file and overrides them with service names for the containers.
@@ -385,9 +424,13 @@ the service name and the internal port rather than the host mapping.
   was lost stays in a running state.
 - **Citations point at a page, not a region.** The `locations` format is fixed
   in §5.3 of `docs/system-design.md`, but nothing produces it yet.
-- **Only basic retrieval is built.** Hybrid search, reranking, query rewriting,
-  routing, the sufficiency loop, reflection and web search are designed and
-  flagged off.
-- **Questions are answered one at a time.** There is no conversation memory and
-  no streaming.
-- **The frontend's chat is not wired to `POST /query` yet.**
+- **Every retrieval stage ships off.** Hybrid search, reranking, query
+  rewriting, routing, the sufficiency loop, reflection and web search (R0--R8)
+  are built behind settings; a fresh checkout answers as R1.
+- **Web pages are untrusted text in the prompt.** Only the answer and its
+  check read them, but what a page says is not verified, and a page can be
+  wrong or out of date.
+- **No authentication.** `AUTH_MODE=auto_admin`, the only mode, treats every
+  request as the seeded admin, and `GET /conversations` lists every
+  conversation. Do not expose the API beyond this machine until login exists.
+- **No streaming.** An answer arrives whole.
