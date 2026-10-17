@@ -69,6 +69,13 @@ async def fuse(query: Query, candidates: list[Candidate], trace: Trace) -> list[
     return await make_fuse(None)(query, candidates, trace)
 
 
+def is_outline(candidates: list[Candidate]) -> bool:
+    """The browse tool's output (R5): one document's outline, in reading
+    order. Fusion would cut it to ten and a reranker would reorder chapters by
+    how much "Chương III" resembles the question; it is kept whole."""
+    return bool(candidates) and all(c.source == "browse" for c in candidates)
+
+
 def make_fuse(
     reranker: Reranker | None, release: Callable[[], Awaitable[None]] | None = None
 ) -> Callable:
@@ -81,6 +88,9 @@ def make_fuse(
     """
 
     async def stage(query: Query, candidates: list[Candidate], trace: Trace) -> list[Candidate]:
+        if is_outline(candidates):
+            trace.record("fuse_detail", ms=0, kept={"browse": len(candidates)})
+            return candidates
         settings = get_settings()
         depth = settings.retrieval_rerank_candidates if reranker else settings.retrieval_top_k
         fused, kept = reciprocal_rank_fusion(candidates, k=settings.retrieval_rrf_k, top_k=depth)

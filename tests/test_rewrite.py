@@ -16,7 +16,12 @@ HISTORY = (
 
 def _provider(**fields) -> AsyncStubProvider:
     provider = AsyncStubProvider()
-    result = {"intent": "SEARCH_CORPUS", "standalone": "", "sub_queries": []} | fields
+    result = {
+        "intent": "SEARCH_CORPUS",
+        "standalone": "",
+        "sub_queries": [],
+        "document_hint": "",
+    } | fields
     provider.script(RewriteResult, RewriteResult(**result))
     return provider
 
@@ -77,7 +82,12 @@ async def test_the_trace_shows_what_was_searched_for():
     )
 
     detail = {n.node: n.detail for n in trace.nodes}["rewrite_detail"]
-    assert detail == {"intent": "CHITCHAT", "standalone": "câu đầy đủ", "sub_queries": []}
+    assert detail == {
+        "intent": "CHITCHAT",
+        "standalone": "câu đầy đủ",
+        "sub_queries": [],
+        "document_hint": None,
+    }
 
 
 async def test_a_refined_query_keeps_its_intent():
@@ -94,9 +104,29 @@ async def test_the_rewriter_asks_for_its_own_reasoning_effort():
 
     provider = Recording()
     provider.script(
-        RewriteResult, RewriteResult(intent="SEARCH_CORPUS", standalone="q", sub_queries=[])
+        RewriteResult,
+        RewriteResult(intent="SEARCH_CORPUS", standalone="q", sub_queries=[], document_hint=""),
     )
 
     await make_rewrite(provider, reasoning_effort="none")(Query(text="q"), Trace())
 
     assert provider.effort == "none"
+
+
+async def test_the_document_a_question_names_travels_with_it():
+    """R5 reads it: "Tóm tắt Luật Đường bộ" is answered from that law's outline."""
+    provider = _provider(
+        intent="SUMMARIZE_DOC", standalone="Tóm tắt Luật Đường bộ", document_hint=" Luật Đường bộ "
+    )
+
+    rewritten = await make_rewrite(provider)(Query(text="Tóm tắt Luật Đường bộ"), Trace())
+
+    assert rewritten.document_hint == "Luật Đường bộ"
+
+
+async def test_no_document_named_is_none():
+    rewritten = await make_rewrite(_provider(standalone="q", document_hint=""))(
+        Query(text="q"), Trace()
+    )
+
+    assert rewritten.document_hint is None

@@ -16,7 +16,10 @@ pytestmark = pytest.mark.asyncio
 
 def _script(provider, answer="Phạt từ 400.000 đến 600.000 đồng [1].", standalone="q"):
     provider.script(
-        RewriteResult, RewriteResult(intent="SEARCH_CORPUS", standalone=standalone, sub_queries=[])
+        RewriteResult,
+        RewriteResult(
+            intent="SEARCH_CORPUS", standalone=standalone, sub_queries=[], document_hint=""
+        ),
     )
     provider.script(Draft, Draft(answer=answer))
 

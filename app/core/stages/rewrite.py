@@ -35,10 +35,14 @@ _SYSTEM = (
     "sub_queries: empty, unless the message asks about two or more separate things; then one "
     "standalone question per thing, at most three.\n"
     "intent: CHITCHAT for greetings, thanks and small talk that ask for no information; "
-    "SUMMARIZE_DOC when it asks to summarise or outline a document; METADATA when it asks about "
+    "SUMMARIZE_DOC when it asks to summarise or outline a document, or what a document covers "
+    "or is about; METADATA when it asks about "
     "the library itself, such as which documents it holds; OUT_OF_SCOPE when it asks for "
     "information no document library would hold, such as today's weather or an exchange rate; "
-    "otherwise SEARCH_CORPUS. When unsure, SEARCH_CORPUS."
+    "otherwise SEARCH_CORPUS. When unsure, SEARCH_CORPUS.\n"
+    "document_hint: when the message, read with the conversation, is about one particular "
+    "document -- named by its title, number or subject -- that name as the user or the "
+    'conversation wrote it, such as "Luật Đường bộ" or "Nghị định 168"; otherwise empty.'
 )
 
 
@@ -49,6 +53,7 @@ class RewriteResult(BaseModel):
     intent: Intent
     standalone: str
     sub_queries: list[str]
+    document_hint: str
 
 
 def build_messages(query: Query) -> list[dict]:
@@ -74,12 +79,14 @@ def make_rewrite(
         )
         standalone = result.standalone.strip() or query.text
         searches = tuple(s.strip() for s in result.sub_queries if s.strip())[:_MAX_SEARCHES]
+        document_hint = result.document_hint.strip() or None
         trace.record(
             "rewrite_detail",
             ms=0,
             intent=result.intent,
             standalone=standalone,
             sub_queries=list(searches),
+            document_hint=document_hint,
         )
         return Query(
             text=standalone,
@@ -89,6 +96,7 @@ def make_rewrite(
             # One search is the question itself; only two or more are a split.
             sub_queries=searches if len(searches) > 1 else (),
             intent=result.intent,
+            document_hint=document_hint,
         )
 
     return rewrite

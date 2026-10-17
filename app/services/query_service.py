@@ -121,6 +121,12 @@ async def _persist_trace(
                 QueryTrace(
                     question=question,
                     conversation_id=conversation_id,
+                    # The router's choice (R5): its distribution is how a
+                    # router stuck on one answer shows.
+                    strategy=next(
+                        (n.detail.get("strategy") for n in trace.nodes if n.node == "route_detail"),
+                        None,
+                    ),
                     # What was searched for, when the rewriter changed it.
                     standalone=next(
                         (

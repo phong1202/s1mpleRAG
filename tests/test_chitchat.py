@@ -21,7 +21,8 @@ async def test_thanks_are_answered_without_searching(
 ):
     client, provider = query_client
     provider.script(
-        RewriteResult, RewriteResult(intent="CHITCHAT", standalone="cảm ơn", sub_queries=[])
+        RewriteResult,
+        RewriteResult(intent="CHITCHAT", standalone="cảm ơn", sub_queries=[], document_hint=""),
     )
     provider.script(Draft, Draft(answer="Không có gì, bạn cứ hỏi tiếp nhé."))
     embedded: list[str] = []
@@ -49,7 +50,8 @@ async def test_the_small_talk_reply_is_told_not_to_state_facts(
 ):
     client, provider = query_client
     provider.script(
-        RewriteResult, RewriteResult(intent="CHITCHAT", standalone="xin chào", sub_queries=[])
+        RewriteResult,
+        RewriteResult(intent="CHITCHAT", standalone="xin chào", sub_queries=[], document_hint=""),
     )
     provider.script(Draft, Draft(answer="Chào bạn."))
 

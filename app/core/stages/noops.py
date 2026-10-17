@@ -26,8 +26,11 @@ async def fuse(query: Query, candidates: list[Candidate], trace: Trace) -> list[
 
     The depth cut is real work, not a no-op: the retriever returns over_fetch
     deep, and only the top retrieval_top_k are worth expanding into parents.
-    Every version of this stage ends with the same cut.
+    Every version of this stage ends with the same cut -- except for an
+    outline from the browse tool (R5), which is kept whole.
     """
+    if candidates and all(c.source == "browse" for c in candidates):
+        return candidates
     return candidates[: get_settings().retrieval_top_k]
 
 

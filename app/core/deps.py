@@ -10,9 +10,11 @@ from app.core.parent_expander import expand_parents
 from app.core.pipeline import Stages
 from app.core.rerank_client import RerankClient
 from app.core.retrievers.bm25 import BM25Retriever
+from app.core.retrievers.browse import BrowseRetriever
 from app.core.retrievers.vector import VectorRetriever
 from app.core.stages import fusion, noops
 from app.core.stages.rewrite import make_rewrite
+from app.core.stages.route import route
 from app.repositories.chunk_repository import ChunkRepository
 from shared.llm import AsyncLLMProvider
 
@@ -34,7 +36,22 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
         retrievers.append(BM25Retriever(session))
     # R5 appends BrowseRetriever here, R8 WebRetriever.
 
+    browse = BrowseRetriever(session)
+
     async def retrieve(plan, trace):
+        if plan.strategy == "BROWSE_DOC":
+            # R5: a question about a whole document reads its outline.
+            outline = await browse.search(plan)
+            if outline:
+                trace.record("retrieve_detail", ms=0, per_source={"browse": len(outline)})
+                return outline
+            # No single document is clearly the one named: search the corpus,
+            # which can still answer, rather than browse the wrong one.
+            trace.record(
+                "browse_fallback",
+                ms=0,
+                reason=f"no single document matches {plan.document_hint!r}",
+            )
         # One after the other, not gathered: the retrievers share one
         # AsyncSession, and a connection cannot run two statements at once.
         # The keyword query takes about 10 ms; there is nothing to win.
@@ -79,7 +96,8 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
             if settings.retrieval_intent_enabled
             else noops.rewrite
         ),
-        plan=noops.plan,
+        # R5: the rewriter's intent and named document choose the tool.
+        plan=route if settings.retrieval_router_enabled else noops.plan,
         retrieve=retrieve,
         # With one source and no reranker there is nothing to fuse, and the
         # no-op keeps R1's scores and order to the last digit: the flags are

@@ -66,6 +66,9 @@ class Query:
     history: tuple[Turn, ...] = ()
     sub_queries: tuple[str, ...] = ()
     intent: Intent | None = None
+    # The one document the question names, as the user wrote it (R4 finds it,
+    # R5 browses it).
+    document_hint: str | None = None
 
     def refined(self, text: str) -> "Query":
         """R6 loops by refining. Filters and history must survive the trip, or
@@ -77,6 +80,7 @@ class Query:
             history=self.history,
             sub_queries=(),
             intent=self.intent,
+            document_hint=self.document_hint,
         )
 
     @property

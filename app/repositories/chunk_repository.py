@@ -95,6 +95,19 @@ JOIN   documents d ON d.id = c.document_id
 ORDER  BY c.score DESC, c.id
 """)
 
+# A document's parents in reading order, each with its first child -- the one
+# a citation of that parent points at. For the browse tool (R5).
+_OUTLINE = text("""
+SELECT p.id AS parent_id, p.heading_path, p.page_start, p.content,
+       (SELECT c.id FROM child_chunks c WHERE c.parent_id = p.id ORDER BY c.chunk_index LIMIT 1)
+         AS child_id,
+       d.title, d.filename
+FROM   parent_chunks p
+JOIN   documents d ON d.id = p.document_id
+WHERE  p.document_id = CAST(:document_id AS uuid)
+ORDER  BY p.chunk_index
+""")
+
 _PARENTS = text("""
 SELECT id, content, heading_path FROM parent_chunks WHERE id = ANY(CAST(:ids AS uuid[]))
 """)
@@ -119,6 +132,17 @@ class KeywordHit:
     page_number: int
     child_content: str
     score: float
+    filename: str
+
+
+@dataclass(frozen=True)
+class OutlineRow:
+    parent_id: uuid.UUID
+    heading_path: str | None
+    page_start: int
+    content: str
+    child_id: uuid.UUID | None
+    title: str | None
     filename: str
 
 
@@ -177,6 +201,10 @@ class ChunkRepository:
             },
         )
         return [KeywordHit(**row) for row in rows.mappings()]
+
+    async def outline(self, document_id: uuid.UUID) -> list[OutlineRow]:
+        rows = await self._session.execute(_OUTLINE, {"document_id": document_id})
+        return [OutlineRow(**row) for row in rows.mappings()]
 
     async def fetch_parents(self, parent_ids: list[uuid.UUID]) -> dict[uuid.UUID, ParentText]:
         """One statement for the whole set. Fetching per parent inside the
