@@ -392,7 +392,7 @@ variables are required; the rest fall back to defaults in `app/config.py`.
 | `RETRIEVAL_ROUTER_ENABLED` | `false` | Routing (R5): a request to summarise a named document is answered from its outline -- chapters and the titles under them -- instead of a search. Needs `RETRIEVAL_INTENT_ENABLED`. |
 | `RETRIEVAL_MAX_ITERATIONS`, `GATE_REASONING_EFFORT`, `CONTEXT_ROUND_EXTRA` | `1`, `none`, `3000` | The gate (R6): above 1, a model call after each round decides whether the context answers the main part of the question, and if not, what to search for next, up to that many rounds; each extra round may add `CONTEXT_ROUND_EXTRA` tokens. Built, but measured with no gain on the eval set (`docs/retrieval-design.md` §8.7), so it ships at 1. |
 | `RETRIEVAL_REFLECT_ENABLED`, `REFLECT_REASONING_EFFORT` | `false`, `low` | Reflection (R7): a model call after the answer drops each sentence no source supports and says the documents do not cover it. On the eval set it caught all 20 planted fabrications and dropped nothing true, at about 1.5 s a question (`docs/retrieval-design.md` §8.7). |
-| `WEB_SEARCH_ENABLED` | `false` | Stage flag for web search (R8), not built yet. |
+| `WEB_SEARCH_ENABLED`, `TAVILY_API_KEY`, `WEB_SEARCH_MAX_RESULTS`, `WEB_SEARCH_INCLUDE_DOMAINS`, `WEB_SEARCH_TIMEOUT_S` | `false`, unset, `5`, empty, `10` | Web search (R8): when the gate still finds the documents short after a second round, one Tavily search with the question; the pages reach the answer as external sources, cited as `kind: "web"`, and nothing else. Needs `RETRIEVAL_MAX_ITERATIONS` of at least 2 and a key, or the app does not start. Empty `WEB_SEARCH_INCLUDE_DOMAINS` searches the whole web (`docs/retrieval-design.md` §7, §8.7). |
 
 Addresses in `.env` are as seen **from the host**. `docker-compose.yml` reads
 the same file and overrides them with service names for the containers.
@@ -424,9 +424,12 @@ the service name and the internal port rather than the host mapping.
   was lost stays in a running state.
 - **Citations point at a page, not a region.** The `locations` format is fixed
   in §5.3 of `docs/system-design.md`, but nothing produces it yet.
-- **Retrieval stops at R7.** Hybrid search, reranking, query rewriting,
-  routing, the sufficiency loop and reflection are built behind settings that
-  ship off; web search is designed, not built.
+- **Every retrieval stage ships off.** Hybrid search, reranking, query
+  rewriting, routing, the sufficiency loop, reflection and web search (R0--R8)
+  are built behind settings; a fresh checkout answers as R1.
+- **Web pages are untrusted text in the prompt.** Only the answer and its
+  check read them, but what a page says is not verified, and a page can be
+  wrong or out of date.
 - **No authentication.** `AUTH_MODE=auto_admin`, the only mode, treats every
   request as the seeded admin, and `GET /conversations` lists every
   conversation. Do not expose the API beyond this machine until login exists.

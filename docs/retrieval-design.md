@@ -650,6 +650,17 @@ true. It is the last resort, not a parallel source.
 Do not use Tavily's `include_answer`. It has Tavily's own model synthesise a response, bypassing the
 generator, the citation model and the trace.
 
+> **Built at R8 (2026-10-17), and shipped off.** `WEB_SEARCH_ENABLED` needs `TAVILY_API_KEY` and
+> `RETRIEVAL_MAX_ITERATIONS` of at least 2, or the app refuses to start: with one round the web would
+> be on and never run. The search runs once, after the loop, with the rewritten question rather than
+> the gate's last search (worded for the corpus), and what it finds goes into `Context.untrusted`
+> only. Layer 1 is tested: a page carrying "Ignore previous instructions…" reaches the answer and
+> reflection and no other call. Reflection reads the web pages as sources and treats a sentence that
+> tells the reader or a system what to do as unsupported (layer 3). The answering prompt counts web
+> pages as sources, prefers the documents, and must say when a claim comes from the web; it is also
+> given today's date when web pages are present, since pages print this year's figure beside last
+> year's.
+
 ---
 
 ## 8. Evaluation
@@ -829,6 +840,20 @@ How to read it:
   five or worse, is beaten by the first four of each list and by everything both lists agree on, and
   the cut to ten comes straight after. Recall beyond that is what the reranker of R3 is for: it
   chooses from the whole fused set, not from its first ten.
+- **R8 went to the web for every question the corpus cannot answer, and for one it should have
+  answered.** Measured with `--full`, `RETRIEVAL_MAX_ITERATIONS=3`, no domain limit, on 2026-10-17.
+  All five outside questions in Set B went to the web and were answered from it with the pages cited
+  and the web named as the source (Set B 8 of 8 right, against 7 of 8 at R7). Of the three that sound
+  like news but the corpus answers, `b06` went to the web, and so did `a01` in Set A: both ask the
+  red-light fine, whose page the CPU reranker has lost since R3; the web gave the right figure
+  (18--20 million đồng for a car under Decree 168), but from the web rather than the documents. The
+  first run showed the answering prompt declining all seven although the pages answered them --
+  told only to use the sources and that the documents fell short, it said the documents fell short.
+  Two further faults were fixed on the way: without today's date, "the minimum wage now" got the
+  2025 figure from a page that also gave the one in force since 2026, and one answer ended with the
+  prompt's own `[NOT FOUND]` label. Seven Tavily searches in all, kept in `data/eval-web.json`.
+  Turning it on costs every question the gate (about 1.2 s) and a question that goes out two more
+  rounds and the search.
 - **R7 found nothing to catch.** Measured with `--full` on 2026-10-17: one draft per question, read
   by a separate judge prompt (`eval/judge.py`, the same model at reasoning effort `high`) as drafted
   and again after the check. The drafts stated nothing the judge could not find in the sources, in
