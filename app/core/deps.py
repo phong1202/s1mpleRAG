@@ -12,6 +12,7 @@ from app.core.rerank_client import RerankClient
 from app.core.retrievers.bm25 import BM25Retriever
 from app.core.retrievers.vector import VectorRetriever
 from app.core.stages import fusion, noops
+from app.core.stages.rewrite import make_rewrite
 from app.repositories.chunk_repository import ChunkRepository
 from shared.llm import AsyncLLMProvider
 
@@ -72,7 +73,12 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
         return text, citations
 
     return Stages(
-        rewrite=noops.rewrite,
+        # R4: one call that turns a follow-up into the question it stands for.
+        rewrite=(
+            make_rewrite(provider, reasoning_effort=settings.rewrite_reasoning_effort)
+            if settings.retrieval_intent_enabled
+            else noops.rewrite
+        ),
         plan=noops.plan,
         retrieve=retrieve,
         # With one source and no reranker there is nothing to fuse, and the

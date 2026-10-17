@@ -250,7 +250,11 @@ class AsyncLLMProvider(Protocol):
     schema-driven because every decision node returns a typed verdict rather
     than prose."""
 
-    async def complete(self, messages: list[dict], schema: type[T]) -> T: ...
+    # reasoning_effort: None keeps the configured one. A node whose job is
+    # small -- the rewriter -- asks for less and answers sooner.
+    async def complete(
+        self, messages: list[dict], schema: type[T], reasoning_effort: str | None = None
+    ) -> T: ...
     async def embed_query(self, text: str) -> list[float]: ...
 
 
@@ -267,7 +271,9 @@ class AsyncStubProvider:
         self._dimensions = dimensions
         self.calls: list[tuple[type, list[dict]]] = []
 
-    async def complete(self, messages: list[dict], schema: type[T]) -> T:
+    async def complete(
+        self, messages: list[dict], schema: type[T], reasoning_effort: str | None = None
+    ) -> T:
         self.calls.append((schema, messages))
         # KeyError is deliberate: an unscripted schema must fail loudly rather
         # than hand back a default a test would silently pass against.
@@ -309,13 +315,15 @@ class AsyncOpenAIProvider:
         self._embed_model = settings.openai_embed_model
         self._dimensions = settings.embed_dimensions
 
-    async def complete(self, messages: list[dict], schema: type[T]) -> T:
+    async def complete(
+        self, messages: list[dict], schema: type[T], reasoning_effort: str | None = None
+    ) -> T:
         # Structured outputs, strict -- the choice enrich() made above. JSON
         # mode never showed the model the schema, and the API refuses it
         # unless a message happens to say "json".
         response = await self._client.chat.completions.parse(
             model=self._chat_model,
-            reasoning_effort=self._reasoning_effort,
+            reasoning_effort=reasoning_effort or self._reasoning_effort,
             response_format=schema,
             messages=messages,
         )

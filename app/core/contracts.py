@@ -16,6 +16,9 @@ from typing import Literal
 
 Source = Literal["vector", "bm25", "browse", "web"]
 Strategy = Literal["VECTOR_ONLY", "HYBRID", "BROWSE_DOC", "NO_RETRIEVAL"]
+# Set by the rewriter (R4). Only CHITCHAT changes what happens at R4; the rest
+# are recorded for the router (R5) and reflection (R7) to be measured against.
+Intent = Literal["CHITCHAT", "SEARCH_CORPUS", "SUMMARIZE_DOC", "METADATA", "OUT_OF_SCOPE"]
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,7 @@ class Query:
     filters: Filters = field(default_factory=Filters)
     history: tuple[Turn, ...] = ()
     sub_queries: tuple[str, ...] = ()
+    intent: Intent | None = None
 
     def refined(self, text: str) -> "Query":
         """R6 loops by refining. Filters and history must survive the trip, or
@@ -72,6 +76,7 @@ class Query:
             filters=self.filters,
             history=self.history,
             sub_queries=(),
+            intent=self.intent,
         )
 
     @property

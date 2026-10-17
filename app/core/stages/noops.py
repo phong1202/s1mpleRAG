@@ -13,7 +13,11 @@ async def rewrite(query: Query, trace: Trace) -> Query:
 
 
 async def plan(query: Query, trace: Trace) -> Plan:
-    """R5 replaces this. One vector search over the question as written."""
+    """R5 replaces this. One search over the question as written -- or none,
+    when the rewriter (R4) found small talk: "cảm ơn" asks for no
+    information, and searching it only puts unrelated pages in the prompt."""
+    if query.intent == "CHITCHAT":
+        return Plan(strategy="NO_RETRIEVAL", queries=(), filters=query.filters)
     return Plan(strategy="VECTOR_ONLY", queries=query.search_texts, filters=query.filters)
 
 

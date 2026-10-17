@@ -132,6 +132,9 @@ class Settings(BaseSettings):
     # from eight categories need little of it; "medium", the API default,
     # would multiply the cost of S3 for no visible gain.
     openai_reasoning_effort: Literal["none", "low", "medium", "high"] = "low"
+    # The rewriter (R4) only rephrases. Measured on the eval set: "none" gave
+    # the same rewrites and the same recall as "low", median 1.3 s against 1.9 s.
+    rewrite_reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
     # -large rather than -small for its multilingual retrieval (MIRACL 54.9
     # vs 44.0) -- the corpus is Vietnamese. Shortened to embed_dimensions
     # by the API, which keeps the schema's vector(1536) and HNSW's 2000-dim

@@ -144,3 +144,14 @@ async def test_the_client_gives_up_long_before_the_sdk_would(monkeypatch):
 
     assert built[0]["timeout"] <= 30
     assert built[0]["max_retries"] <= 1
+
+
+async def test_a_node_may_ask_for_less_reasoning_than_the_default(monkeypatch):
+    """The rewriter (R4) gave the same rewrites at reasoning effort "none" in
+    two thirds of the time; the answer itself keeps the configured effort."""
+    requests: list[dict] = []
+    provider = _async_openai_returning(monkeypatch, Verdict(sufficient=True), requests)
+
+    await provider.complete([{"role": "user", "content": "?"}], Verdict, reasoning_effort="none")
+
+    assert requests[0]["reasoning_effort"] == "none"

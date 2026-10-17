@@ -85,7 +85,7 @@ def make_fuse(
         depth = settings.retrieval_rerank_candidates if reranker else settings.retrieval_top_k
         fused, kept = reciprocal_rank_fusion(candidates, k=settings.retrieval_rrf_k, top_k=depth)
         trace.record("fuse_detail", ms=0, kept=kept)
-        if reranker is None:
+        if reranker is None or not fused:
             return fused
         if release is not None:
             await release()
