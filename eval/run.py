@@ -9,6 +9,8 @@ both need a judge of the answer's text, which arrives with R7.
 
 import argparse
 import asyncio
+import json
+import pathlib
 import unicodedata
 from dataclasses import dataclass
 
@@ -115,6 +117,43 @@ def by_kind(rows: list[tuple[str, float, float]]) -> dict[str, tuple[int, float,
     }
 
 
+class CachedEmbeddings:
+    """The provider, with question embeddings kept in a file between runs.
+
+    The questions are frozen (spec §8.4), so their vectors are too: only the
+    first run pays for them, and every later tuning step can be measured
+    without a paid call. Keyed by model, dimensions and text, so a change to
+    any of them misses the cache instead of reusing a vector from another
+    model. Everything else goes to the provider unchanged.
+    """
+
+    def __init__(self, provider, path: pathlib.Path, model: str, dimensions: int) -> None:
+        self._provider, self._path = provider, pathlib.Path(path)
+        self._prefix = f"{model}|{dimensions}|"
+        self._vectors: dict[str, list[float]] = (
+            json.loads(self._path.read_text(encoding="utf-8")) if self._path.exists() else {}
+        )
+        self.paid = 0
+
+    async def embed_query(self, text: str) -> list[float]:
+        key = self._prefix + text
+        if key not in self._vectors:
+            self._vectors[key] = await self._provider.embed_query(text)
+            self.paid += 1
+        return self._vectors[key]
+
+    async def complete(self, messages, schema):
+        return await self._provider.complete(messages, schema)
+
+    def save(self) -> None:
+        # Written aside and moved into place: a run killed mid-write must not
+        # leave a half file that loses every vector already paid for.
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        partial = self._path.with_suffix(".partial")
+        partial.write_text(json.dumps(self._vectors), encoding="utf-8")
+        partial.replace(self._path)
+
+
 def stages_line(settings) -> str:
     """Which rung of the ladder was measured. A recall figure recorded without
     it cannot be compared with the next one."""
@@ -140,13 +179,25 @@ def _as_query(question: LabelledQuestion):
     return Query(text=question.question, history=earlier)
 
 
-async def retrieved(stages, question: LabelledQuestion) -> list:
+def rerank_outcome(trace) -> tuple[str | None, str | None]:
+    """(the model that reranked, why it did not) from a question's trace;
+    (None, None) when no rerank stage ran."""
+    for node in trace.nodes:
+        if node.node == "rerank_detail":
+            fallback = node.detail.get("fallback")
+            if fallback:
+                return None, fallback
+            return node.detail.get("model"), None
+    return None, None
+
+
+async def retrieved(stages, question: LabelledQuestion, trace=None) -> list:
     """What retrieval hands to the context for this question: the candidates
     leaving `fuse`. Measured there, not at one retriever, so the same ruler
     judges hybrid search (R2), reranking (R3) and rewriting (R4) unchanged."""
     from app.core.contracts import Trace
 
-    trace = Trace()
+    trace = Trace() if trace is None else trace
     query = await stages.rewrite(_as_query(question), trace)
     plan = await stages.plan(query, trace)
     return await stages.fuse(query, await stages.retrieve(plan, trace), trace)
@@ -164,10 +215,11 @@ async def _check_labels() -> None:
     print(f"labels           {len(dataset.set_a)} reachable")
 
 
-async def _main(full: bool) -> None:
+async def _main(full: bool, embed_cache: str | None = None) -> None:
     from sqlalchemy import select
 
     from app.config import get_settings
+    from app.core.contracts import Trace
     from app.core.deps import build_stages
     from app.core.pipeline import answer as run_pipeline
     from app.models import Document
@@ -181,6 +233,10 @@ async def _main(full: bool) -> None:
         # against it, and the recall it yields looks exactly like a number.
         raise SystemExit("eval needs LLM_PROVIDER=openai: the corpus holds real embeddings")
     provider = get_async_provider()
+    if embed_cache:
+        provider = CachedEmbeddings(
+            provider, embed_cache, settings.openai_embed_model, settings.embed_dimensions
+        )
     top_k = settings.retrieval_top_k
 
     recalls: list[float] = []
@@ -189,46 +245,72 @@ async def _main(full: bool) -> None:
     missed: list[str] = []
     cited_right_page: list[float] = []
     iterations: list[int] = []
+    rerank_models: set[str] = set()
+    rerank_fallbacks: list[str] = []
 
-    async with AsyncSessionLocal() as session:
-        # Labels are anchored to (sha256, page); candidates carry document_id.
-        # One lookup bridges them without widening DocRef, which is frozen.
-        rows = await session.execute(select(Document.id, Document.sha256_hash))
-        sha_by_id = {row.id: row.sha256_hash for row in rows}
+    try:
+        async with AsyncSessionLocal() as session:
+            # Labels are anchored to (sha256, page); candidates carry document_id.
+            # One lookup bridges them without widening DocRef, which is frozen.
+            rows = await session.execute(select(Document.id, Document.sha256_hash))
+            sha_by_id = {row.id: row.sha256_hash for row in rows}
 
-        stages = build_stages(session, provider, settings)
+            stages = build_stages(session, provider, settings)
 
-        for question in dataset.set_a:
-            gold = (question.gold_sha256, question.gold_page)
-            candidates = await retrieved(stages, question)
-            hits = [Hit(sha_by_id[c.ref.document_id], c.ref.page_number) for c in candidates]
-            recalls.append(recall_at_k(hits, gold, top_k))
-            ranks.append(reciprocal_rank(hits, gold))
-            scored.append((question.kind, recalls[-1], ranks[-1]))
-            if not recalls[-1]:
-                missed.append(question.id)
+            for question in dataset.set_a:
+                gold = (question.gold_sha256, question.gold_page)
+                trace = Trace()
+                candidates = await retrieved(stages, question, trace)
+                served, fallback = rerank_outcome(trace)
+                if served:
+                    rerank_models.add(served)
+                if fallback:
+                    rerank_fallbacks.append(f"{question.id}: {fallback}")
+                hits = [Hit(sha_by_id[c.ref.document_id], c.ref.page_number) for c in candidates]
+                recalls.append(recall_at_k(hits, gold, top_k))
+                ranks.append(reciprocal_rank(hits, gold))
+                scored.append((question.kind, recalls[-1], ranks[-1]))
+                if not recalls[-1]:
+                    missed.append(question.id)
 
-            if not full:
-                continue
+                if not full:
+                    continue
 
-            result = await run_pipeline(
-                _as_query(question),
-                stages,
-                max_iterations=settings.retrieval_max_iterations,
-            )
-            iterations.append(result.trace.iterations)
-            cited_right_page.append(
-                float(
-                    any(
-                        getattr(c, "page_number", None) == question.gold_page
-                        and sha_by_id.get(getattr(c, "document_id", None)) == question.gold_sha256
-                        for c in result.citations
+                result = await run_pipeline(
+                    _as_query(question),
+                    stages,
+                    max_iterations=settings.retrieval_max_iterations,
+                )
+                iterations.append(result.trace.iterations)
+                cited_right_page.append(
+                    float(
+                        any(
+                            getattr(c, "page_number", None) == question.gold_page
+                            and sha_by_id.get(getattr(c, "document_id", None))
+                            == question.gold_sha256
+                            for c in result.citations
+                        )
                     )
                 )
-            )
 
+    finally:
+        # Also when a question fails mid-run: the vectors are paid for.
+        if isinstance(provider, CachedEmbeddings):
+            provider.save()
+    if rerank_fallbacks:
+        # These would be R2 figures under an R3 label.
+        raise SystemExit(
+            f"{len(rerank_fallbacks)} of {len(dataset.set_a)} questions were not reranked; "
+            "no figures printed:\n  " + "\n  ".join(rerank_fallbacks)
+        )
     n = len(recalls)
     print(stages_line(settings))
+    if settings.retrieval_rerank_enabled:
+        # From the traces, not the settings: what actually reranked.
+        served = ", ".join(sorted(rerank_models)) or "none"
+        print(f"reranker         {served} at {settings.reranker_url}")
+    if isinstance(provider, CachedEmbeddings):
+        print(f"paid embeddings  {provider.paid}")
     print(f"n                {n}")
     print(f"recall@{top_k:<10} {sum(recalls) / n:.3f}")
     print(f"MRR              {sum(ranks) / n:.3f}")
@@ -240,21 +322,26 @@ async def _main(full: bool) -> None:
         print(f"mean iterations  {sum(iterations) / len(iterations):.2f}")
 
 
-async def _run(full: bool, check_only: bool) -> None:
+async def _run(full: bool, check_only: bool, embed_cache: str | None) -> None:
     # One event loop for both: the engine's pooled connections belong to the
     # loop that opened them.
     await _check_labels()
     if not check_only:
-        await _main(full)
+        await _main(full, embed_cache)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--full", action="store_true", help="also run generation")
     parser.add_argument(
+        "--embed-cache",
+        metavar="PATH",
+        help="keep question embeddings in this file; later runs pay for none (data/ is gitignored)",
+    )
+    parser.add_argument(
         "--check-labels",
         action="store_true",
         help="verify every Set A quote sits on its gold page, then stop; calls no provider",
     )
     args = parser.parse_args()
-    asyncio.run(_run(args.full, args.check_labels))
+    asyncio.run(_run(args.full, args.check_labels, args.embed_cache))

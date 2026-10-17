@@ -164,3 +164,76 @@ def test_the_result_names_the_stages_that_were_on():
     )
 
     assert stages_line(settings).split()[1:3] == ["bm25=on", "rerank=off"]
+
+
+class _CountingProvider:
+    def __init__(self):
+        self.embedded: list[str] = []
+
+    async def embed_query(self, text):
+        self.embedded.append(text)
+        return [float(len(text)), 1.0]
+
+    async def complete(self, messages, schema):
+        return "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_cached_question_is_not_embedded_twice(tmp_path):
+    """Every re-run of the eval cost twenty paid embeddings, so each tuning
+    step had to wait for a go-ahead. The questions do not change between
+    runs; their vectors need not either."""
+    from eval.run import CachedEmbeddings
+
+    path = tmp_path / "cache.json"
+    first = _CountingProvider()
+    cached = CachedEmbeddings(first, path, model="m", dimensions=2)
+    vector = await cached.embed_query("câu hỏi")
+    cached.save()
+
+    second = _CountingProvider()
+    again = await CachedEmbeddings(second, path, model="m", dimensions=2).embed_query("câu hỏi")
+
+    assert again == vector
+    assert first.embedded == ["câu hỏi"] and second.embedded == []
+
+
+@pytest.mark.asyncio
+async def test_another_model_or_size_does_not_reuse_the_cache(tmp_path):
+    from eval.run import CachedEmbeddings
+
+    path = tmp_path / "cache.json"
+    cached = CachedEmbeddings(_CountingProvider(), path, model="m", dimensions=2)
+    await cached.embed_query("q")
+    cached.save()
+
+    other_model, other_size = _CountingProvider(), _CountingProvider()
+    await CachedEmbeddings(other_model, path, model="n", dimensions=2).embed_query("q")
+    await CachedEmbeddings(other_size, path, model="m", dimensions=3).embed_query("q")
+
+    assert other_model.embedded == ["q"] and other_size.embedded == ["q"]
+
+
+@pytest.mark.asyncio
+async def test_the_cache_only_stands_in_for_embeddings(tmp_path):
+    from eval.run import CachedEmbeddings
+
+    cached = CachedEmbeddings(_CountingProvider(), tmp_path / "c.json", model="m", dimensions=2)
+
+    assert await cached.complete([], str) == "completed"
+
+
+def test_a_question_that_was_not_reranked_is_reported():
+    """A dead container, a wrong URL or a model the server refuses all fall
+    back to the fused order -- and an eval reading only its settings printed
+    those R2 figures under an R3 label."""
+    from app.core.contracts import Trace
+    from eval.run import rerank_outcome
+
+    reranked, fell_back, without = Trace(), Trace(), Trace()
+    reranked.record("rerank_detail", ms=0, model="served/model", fallback=False)
+    fell_back.record("rerank_detail", ms=0, sent=50, fallback="ConnectError: refused")
+
+    assert rerank_outcome(reranked) == ("served/model", None)
+    assert rerank_outcome(fell_back) == (None, "ConnectError: refused")
+    assert rerank_outcome(without) == (None, None)
