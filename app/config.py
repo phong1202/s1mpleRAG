@@ -156,7 +156,24 @@ class Settings(BaseSettings):
     retrieval_ef_search: int = 100  # MUST be >= 2 x over_fetch
     retrieval_rrf_k: int = 60
     retrieval_rerank_keep: int = 10
+    # How deep the fused list goes to the reranker. Cut at top_k first and a
+    # chunk at fused rank 20 -- the one a reranker exists to rescue -- never
+    # reaches it.
+    retrieval_rerank_candidates: int = 50
     context_token_budget: int = 8000
+
+    # --- Reranker (R3) ---
+    # Any server speaking the Cohere shape of /rerank: the repo's own CPU
+    # container by default, or OpenRouter (https://openrouter.ai/api/v1),
+    # Cohere or vLLM with a key. The model is the server's to resolve.
+    reranker_url: str = "http://localhost:8200"
+    # Unset, the server chooses: the CPU container serves the model it was
+    # built with (RERANKER_LOCAL_MODEL). A hosted reranker needs it named.
+    reranker_model: str | None = None
+    reranker_api_key: str | None = None
+    # Past this the fused order is kept: a slow reranker must cost the
+    # answer a little quality, never the answer.
+    reranker_timeout_s: float = 5.0
 
     # --- Stage flags ---
     # One mechanism, two purposes: these roll the R0 -> R8 ladder out, and they
@@ -179,6 +196,19 @@ class Settings(BaseSettings):
             raise ValueError(
                 "RETRIEVAL_EF_SEARCH must be at least twice RETRIEVAL_OVER_FETCH "
                 f"(got {self.retrieval_ef_search} and {self.retrieval_over_fetch})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_a_rerank_pool_at_least_as_deep_as_what_is_kept(self) -> "Settings":
+        # A pool of five would keep five on success and top_k on a fallback,
+        # with nothing to say why two answers saw different contexts.
+        floor = max(self.retrieval_rerank_keep, self.retrieval_top_k)
+        if self.retrieval_rerank_candidates < floor:
+            raise ValueError(
+                f"RETRIEVAL_RERANK_CANDIDATES must be at least {floor} "
+                "(RETRIEVAL_RERANK_KEEP and RETRIEVAL_TOP_K), "
+                f"got {self.retrieval_rerank_candidates}"
             )
         return self
 

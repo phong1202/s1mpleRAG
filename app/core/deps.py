@@ -8,6 +8,7 @@ from app.core.contracts import DocRef
 from app.core.generator import generate as _generate
 from app.core.parent_expander import expand_parents
 from app.core.pipeline import Stages
+from app.core.rerank_client import RerankClient
 from app.core.retrievers.bm25 import BM25Retriever
 from app.core.retrievers.vector import VectorRetriever
 from app.core.stages import fusion, noops
@@ -17,6 +18,16 @@ from shared.llm import AsyncLLMProvider
 
 def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Settings) -> Stages:
     hybrid = settings.retrieval_bm25_enabled
+    reranker = (
+        RerankClient(
+            url=settings.reranker_url,
+            model=settings.reranker_model,
+            api_key=settings.reranker_api_key,
+            timeout_s=settings.reranker_timeout_s,
+        )
+        if settings.retrieval_rerank_enabled
+        else None
+    )
     retrievers = [VectorRetriever(session, provider)]
     if hybrid:
         retrievers.append(BM25Retriever(session))
@@ -41,8 +52,8 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
         # transaction here returns the connection to the pool before the gate
         # or the generator calls a model: left open it sits "idle in
         # transaction" for as long as they take, and a pool's worth of slow
-        # answers would stall every other endpoint. A reranker runs in `fuse`,
-        # before this point, and will need the same care when R3 adds it.
+        # answers would stall every other endpoint. The reranker runs in `fuse`,
+        # before this point, and releases the connection the same way.
         await session.commit()
         return expanded
 
@@ -64,10 +75,14 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
         rewrite=noops.rewrite,
         plan=noops.plan,
         retrieve=retrieve,
-        # With one source there is nothing to fuse, and the no-op keeps R1's
-        # scores and order to the last digit: the flag is also the switch the
-        # eval flips to compare the two.
-        fuse=fusion.fuse if hybrid else noops.fuse,
+        # With one source and no reranker there is nothing to fuse, and the
+        # no-op keeps R1's scores and order to the last digit: the flags are
+        # also the switches the eval flips to compare the rungs. The reranker
+        # is another service: the transaction ends before it is called, as
+        # it does before the model in `expand`.
+        fuse=(
+            fusion.make_fuse(reranker, release=session.commit) if hybrid or reranker else noops.fuse
+        ),
         expand=expand,
         build_context=build_context,
         gate=noops.gate,

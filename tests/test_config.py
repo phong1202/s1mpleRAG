@@ -207,3 +207,14 @@ def test_ef_search_must_cover_twice_the_over_fetch(db_env):
 
     with pytest.raises(ValueError, match="RETRIEVAL_EF_SEARCH"):
         Settings(retrieval_over_fetch=50, retrieval_ef_search=60)
+
+
+def test_the_rerank_pool_cannot_be_shallower_than_what_it_keeps(monkeypatch):
+    """Fifty to the reranker and ten kept: a pool of five would keep five on
+    success and ten on a fallback, and nothing would say why they differ."""
+    import pytest
+
+    from app.config import Settings
+
+    with pytest.raises(ValueError, match="RETRIEVAL_RERANK_CANDIDATES"):
+        Settings(retrieval_rerank_candidates=5, retrieval_rerank_keep=10)
