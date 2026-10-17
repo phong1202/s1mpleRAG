@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Text, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -13,9 +13,19 @@ class Conversation(Base):
     follow-up be read in its context without the client resending history."""
 
     __tablename__ = "conversations"
+    __table_args__ = (Index("ix_conversations_user_id_updated_at", "user_id", "updated_at"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    # The first question, cut to 120 characters: what a list of chats shows.
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    # Moved on by every exchange; the list of chats is ordered by it.
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
@@ -35,6 +45,10 @@ class Message(Base):
     )
     role: Mapped[str] = mapped_column(Text, nullable=False)  # user | assistant
     text: Mapped[str] = mapped_column(Text, nullable=False)
+    # An answer's citations exactly as POST /query returned them -- document
+    # and page, not chunk ids, which a re-ingest replaces. Null for questions
+    # and for messages from before they were kept.
+    citations: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -25,6 +25,9 @@ class ErrorCode(Enum):
     # --- Query ---
     CONVERSATION_NOT_FOUND = (404, "Conversation not found")
 
+    # --- Auth ---
+    ADMIN_USER_MISSING = (500, "The seeded admin user is missing: run the database migrations")
+
     # --- Rate limiting ---
     RATE_LIMIT_UNSATISFIABLE = (500, "Batch cost exceeds the rate limit bucket's capacity")
 

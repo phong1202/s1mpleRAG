@@ -26,15 +26,16 @@ class QueryService:
         self._session = session
         self._provider = provider
 
-    async def ask(self, payload: QueryRequest) -> QueryResponse:
+    async def ask(self, payload: QueryRequest, user_id) -> QueryResponse:
         settings = get_settings()
         started = time.perf_counter()
 
         conversations = ConversationRepository(self._session)
         if payload.conversation_id is None:
-            conversation = await conversations.create()
+            conversation = await conversations.create(user_id)
         else:
-            conversation = await conversations.get(payload.conversation_id)
+            # Another user's conversation is not found, as if it did not exist.
+            conversation = await conversations.get(payload.conversation_id, user_id)
             if conversation is None:
                 raise AppException(ErrorCode.CONVERSATION_NOT_FOUND)
         # Read whether or not the rewriter is on: cheap, and it keeps the
@@ -77,14 +78,21 @@ class QueryService:
 
         # Only an answer the user receives enters the history the next
         # question is read in.
-        await conversations.add_exchange(conversation.id, payload.question, result.text)
+        citations = [_serialise(c) for c in result.citations]
+        # Kept exactly as returned, so a reopened answer cites the same pages.
+        await conversations.add_exchange(
+            conversation,
+            payload.question,
+            result.text,
+            [c.model_dump(mode="json") for c in citations],
+        )
         await _persist_trace(
             self._session, payload.question, trace, len(result.citations), conversation.id
         )
 
         return QueryResponse(
             answer=result.text,
-            citations=[_serialise(c) for c in result.citations],
+            citations=citations,
             latency_ms=int((time.perf_counter() - started) * 1000),
             conversation_id=conversation.id,
         )

@@ -117,6 +117,11 @@ class Settings(BaseSettings):
     minio_bucket_raw: str = "raw"
     minio_bucket_staging: str = "staging"
 
+    # --- Auth ---
+    # auto_admin: every request is the seeded admin, until login exists. The
+    # only mode for now; named so that adding login means choosing one.
+    auth_mode: Literal["auto_admin"] = "auto_admin"
+
     # --- LLM ---
     # "stub" is the deliberate default: without a key the suite still runs.
     # A Literal, not a plain str: a typo like "opneai" must fail at

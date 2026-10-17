@@ -5,6 +5,7 @@ import uuid
 import pytest
 from sqlalchemy import func, select
 
+from app.auth import ADMIN_ID
 from app.config import get_settings
 from app.core.generator import Draft
 from app.core.stages.rewrite import RewriteResult
@@ -94,9 +95,9 @@ async def test_a_failed_request_adds_nothing_to_the_conversation(
 
 async def test_the_history_is_the_last_turns_in_order(db_session):
     repository = ConversationRepository(db_session)
-    conversation = await repository.create()
+    conversation = await repository.create(ADMIN_ID)
     for i in range(5):
-        await repository.add_exchange(conversation.id, f"hỏi {i}", f"đáp {i}")
+        await repository.add_exchange(conversation, f"hỏi {i}", f"đáp {i}")
 
     turns = await repository.recent_turns(conversation.id, limit=6)
 
