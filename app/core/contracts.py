@@ -69,6 +69,9 @@ class Query:
     # The one document the question names, as the user wrote it (R4 finds it,
     # R5 browses it).
     document_hint: str | None = None
+    # Set by the pipeline when the gate (R6) ran out of rounds still missing
+    # something: what the answer should say the documents may not cover.
+    unanswered: str | None = None
 
     def refined(self, text: str) -> "Query":
         """R6 loops by refining. Filters and history must survive the trip, or
@@ -122,6 +125,8 @@ class Context:
     passages: tuple[Passage, ...] = ()
     untrusted: tuple[WebPassage, ...] = ()
     token_count: int = 0
+    # Rounds of search that have added to it (R6 runs up to three).
+    rounds: int = 0
 
     @classmethod
     def empty(cls) -> "Context":

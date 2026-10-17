@@ -13,6 +13,7 @@ from app.core.retrievers.bm25 import BM25Retriever
 from app.core.retrievers.browse import BrowseRetriever
 from app.core.retrievers.vector import VectorRetriever
 from app.core.stages import fusion, noops
+from app.core.stages.gate import make_gate
 from app.core.stages.rewrite import make_rewrite
 from app.core.stages.route import route
 from app.repositories.chunk_repository import ChunkRepository
@@ -109,7 +110,13 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
         ),
         expand=expand,
         build_context=build_context,
-        gate=noops.gate,
+        # R6: with room for more than one round, a real gate decides whether
+        # to take it. With one round there is nothing to decide.
+        gate=(
+            make_gate(provider, reasoning_effort=settings.gate_reasoning_effort)
+            if settings.retrieval_max_iterations > 1
+            else noops.gate
+        ),
         generate=generate,
         reflect=noops.reflect,
     )

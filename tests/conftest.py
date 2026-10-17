@@ -109,6 +109,9 @@ def stages_off(monkeypatch):
         "web_search_enabled",
     ):
         monkeypatch.setattr(settings, flag, False)
+    # One round: with more, a developer's .env would put a real gate in front of
+    # every test's scripted answer.
+    monkeypatch.setattr(settings, "retrieval_max_iterations", 1)
 
 
 @pytest_asyncio.fixture

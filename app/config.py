@@ -135,6 +135,8 @@ class Settings(BaseSettings):
     # The rewriter (R4) only rephrases. Measured on the eval set: "none" gave
     # the same rewrites and the same recall as "low", median 1.3 s against 1.9 s.
     rewrite_reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
+    # The gate (R6) decides enough or not, and names what is missing.
+    gate_reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
     # -large rather than -small for its multilingual retrieval (MIRACL 54.9
     # vs 44.0) -- the corpus is Vietnamese. Shortened to embed_dimensions
     # by the API, which keeps the schema's vector(1536) and HNSW's 2000-dim
@@ -164,6 +166,9 @@ class Settings(BaseSettings):
     # reaches it.
     retrieval_rerank_candidates: int = 50
     context_token_budget: int = 8000
+    # Added to the budget for each round of search after the first (R6). Only
+    # a question the gate found short pays for the longer context.
+    context_round_extra: int = 3000
 
     # --- Reranker (R3) ---
     # Any server speaking the Cohere shape of /rerank: the repo's own CPU

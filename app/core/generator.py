@@ -73,6 +73,12 @@ def build_prompt(query: Query, context: Context) -> list[dict]:
 
     lines.append("")
     lines.append(f"[QUESTION] {query.text}")
+    if query.unanswered:
+        # The gate (R6) searched as many times as it may and still missed this.
+        lines.append(
+            f"[NOT FOUND] Repeated searches did not find: {query.unanswered}. "
+            "Say plainly that the documents may not cover this part."
+        )
 
     return [
         {"role": "system", "content": _SYSTEM},

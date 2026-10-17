@@ -35,7 +35,12 @@ async def fuse(query: Query, candidates: list[Candidate], trace: Trace) -> list[
 
 
 def build_context_stage(previous: Context, candidates: list[Candidate], trace: Trace) -> Context:
-    return _build_context(previous, candidates, get_settings().context_token_budget)
+    """The budget covers everything held so far (spec §6.3). Each round after
+    the first gets room of its own: round one alone filled 7,712 of 8,000
+    tokens, and the gate's further searches (R6) could add nothing."""
+    settings = get_settings()
+    budget = settings.context_token_budget + previous.rounds * settings.context_round_extra
+    return _build_context(previous, candidates, budget)
 
 
 async def gate(query: Query, context: Context, trace: Trace) -> GateVerdict:

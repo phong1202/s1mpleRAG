@@ -6,7 +6,7 @@ Nothing here moves.
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from app.core.contracts import Answer, Context, Query, Trace
@@ -65,32 +65,64 @@ async def _run(name: str, stage: Callable, trace: Trace, *args) -> Any:
     return result
 
 
-async def answer(
-    query: Query, stages: Stages, max_iterations: int, trace: Trace | None = None
-) -> Answer:
-    # Passed in by a caller that wants the trace even when this raises.
-    trace = Trace() if trace is None else trace
+@dataclass(frozen=True)
+class Gathered:
+    """What the retrieval loop ends with. `asked` is the question to answer;
+    `first_round` is what left `fuse` on the first round, which the eval has
+    scored since R1."""
+
+    asked: Query
+    context: Context
+    first_round: list
+    iterations: int
+
+
+async def gather(query: Query, stages: Stages, max_iterations: int, trace: Trace) -> Gathered:
+    """Every stage up to the answer: rewrite once, then search, fuse, expand,
+    build the context and ask the gate, as many rounds as it takes or may."""
     context = Context.empty()
+    first_round: list = []
 
     # Outside the loop: re-entry is at `plan`. The gate writes the refined
     # query itself, and running the rewriter over it again risks dropping the
     # very term the gate added.
     query = await _run("rewrite", stages.rewrite, trace, query, trace)
+    # What the user asked, as the rewriter put it. The gate's refined queries
+    # are searches, not questions: the answer is always to this one.
+    asked = query
+    verdict = None
 
     for iteration in range(1, max_iterations + 1):
         plan = await _run("plan", stages.plan, trace, query, trace)
         candidates = await _run("retrieve", stages.retrieve, trace, plan, trace)
         candidates = await _run("fuse", stages.fuse, trace, query, candidates, trace)
+        if iteration == 1:
+            first_round = list(candidates)
         candidates = await _run("expand", stages.expand, trace, candidates, trace)
         context = await _run(
             "build_context", stages.build_context, trace, context, candidates, trace
         )
         verdict = await _run("gate", stages.gate, trace, query, context, trace)
         trace.iterations = iteration
-        if verdict.sufficient:
+        if verdict.sufficient or iteration == max_iterations:
             break
         query = query.refined(verdict.refined_query or query.text)
 
-    text, citations = await _run("generate", stages.generate, trace, query, context, trace)
+    if verdict is not None and not verdict.sufficient:
+        # Out of rounds and still short: answer anyway (spec §6.3), saying
+        # which part the documents may not cover rather than filling it in.
+        asked = replace(asked, unanswered=verdict.missing or "part of the question")
+    return Gathered(asked, context, first_round, trace.iterations)
+
+
+async def answer(
+    query: Query, stages: Stages, max_iterations: int, trace: Trace | None = None
+) -> Answer:
+    # Passed in by a caller that wants the trace even when this raises.
+    trace = Trace() if trace is None else trace
+    gathered = await gather(query, stages, max_iterations, trace)
+    text, citations = await _run(
+        "generate", stages.generate, trace, gathered.asked, gathered.context, trace
+    )
     draft = Answer(text=text, citations=citations, trace=trace)
-    return await _run("reflect", stages.reflect, trace, draft, context, trace)
+    return await _run("reflect", stages.reflect, trace, draft, gathered.context, trace)

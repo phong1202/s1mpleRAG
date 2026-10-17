@@ -189,3 +189,14 @@ def test_the_quote_is_the_passage_that_matched_not_the_top_of_its_parent():
     (citation,) = map_citations("Claim [1].", context)
 
     assert citation.quote == "b) Khong chap hanh den tin hieu;"
+
+
+def test_what_the_searches_missed_is_named_in_the_prompt():
+    prompt = build_prompt(Query(text="q", unanswered="mức phạt với người ngồi sau"), _context())
+
+    assert "[NOT FOUND]" in prompt[-1]["content"]
+    assert "mức phạt với người ngồi sau" in prompt[-1]["content"]
+
+
+def test_nothing_missed_adds_nothing():
+    assert "[NOT FOUND]" not in build_prompt(Query(text="q"), _context())[-1]["content"]
