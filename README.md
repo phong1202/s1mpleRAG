@@ -27,9 +27,10 @@ before it:
 
 **Read path — retrieval.** One loop in `app/core/pipeline.py`: rewrite, plan,
 retrieve, fuse, expand to parents, build the context, gate, generate, reflect.
-Retrieval, expansion, context building and generation are real today; the
-other five are no-ops that later stages replace, each behind a
-`RETRIEVAL_*_ENABLED` flag.
+Retrieval, expansion, context building and generation always run; the other
+five are built behind settings (`RETRIEVAL_*_ENABLED`, and
+`RETRIEVAL_MAX_ITERATIONS` for the gate) and fall back to a no-op when off or
+when they fail.
 
 The design, and the reasons behind it, are in
 [`docs/system-design.md`](docs/system-design.md) (ingestion) and
@@ -390,7 +391,8 @@ variables are required; the rest fall back to defaults in `app/config.py`.
 | `RETRIEVAL_INTENT_ENABLED` | `false` | Follow-up questions (R4): one model call rewrites the question, using the conversation the server keeps, into one that stands alone; small talk is answered without searching. Conversations are kept either way: `POST /query` returns a `conversation_id` to send back with the next question. |
 | `RETRIEVAL_ROUTER_ENABLED` | `false` | Routing (R5): a request to summarise a named document is answered from its outline -- chapters and the titles under them -- instead of a search. Needs `RETRIEVAL_INTENT_ENABLED`. |
 | `RETRIEVAL_MAX_ITERATIONS`, `GATE_REASONING_EFFORT`, `CONTEXT_ROUND_EXTRA` | `1`, `none`, `3000` | The gate (R6): above 1, a model call after each round decides whether the context answers the main part of the question, and if not, what to search for next, up to that many rounds; each extra round may add `CONTEXT_ROUND_EXTRA` tokens. Built, but measured with no gain on the eval set (`docs/retrieval-design.md` §8.7), so it ships at 1. |
-| `RETRIEVAL_REFLECT_ENABLED`, `WEB_SEARCH_ENABLED` | all `false` | Stage flags for retrieval stages that are not built yet. |
+| `RETRIEVAL_REFLECT_ENABLED`, `REFLECT_REASONING_EFFORT` | `false`, `low` | Reflection (R7): a model call after the answer drops each sentence no source supports and says the documents do not cover it. On the eval set it caught all 20 planted fabrications and dropped nothing true, at about 1.5 s a question (`docs/retrieval-design.md` §8.7). |
+| `WEB_SEARCH_ENABLED` | `false` | Stage flag for web search (R8), not built yet. |
 
 Addresses in `.env` are as seen **from the host**. `docker-compose.yml` reads
 the same file and overrides them with service names for the containers.
@@ -422,9 +424,9 @@ the service name and the internal port rather than the host mapping.
   was lost stays in a running state.
 - **Citations point at a page, not a region.** The `locations` format is fixed
   in §5.3 of `docs/system-design.md`, but nothing produces it yet.
-- **Retrieval stops at R6.** Hybrid search, reranking, query rewriting,
-  routing and the sufficiency loop are built behind settings that ship off;
-  reflection and web search are designed, not built.
+- **Retrieval stops at R7.** Hybrid search, reranking, query rewriting,
+  routing, the sufficiency loop and reflection are built behind settings that
+  ship off; web search is designed, not built.
 - **No authentication.** `AUTH_MODE=auto_admin`, the only mode, treats every
   request as the seeded admin, and `GET /conversations` lists every
   conversation. Do not expose the API beyond this machine until login exists.

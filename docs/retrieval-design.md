@@ -588,6 +588,14 @@ On a catch: **drop the unsupported sentence and add a line saying the documents 
 Preferred over regenerating (another call, no guarantee) and over discarding the whole answer
 (usually an overreaction).
 
+> **Built at R7 (2026-10-17), and shipped off.** `RETRIEVAL_REFLECT_ENABLED` turns it on, at
+> reasoning effort `REFLECT_REASONING_EFFORT` (`low`); small talk is not checked. One departure
+> from the schema above: a `note` field, so the line replacing a dropped sentence is written in the
+> answer's language. The prompt says an omission is not an unsupported claim, and that a penalty
+> stated at the head of a clause covers every point under it: both were over-drops measured on the
+> set. With them it drops nothing from the eval set's drafts, which had nothing to drop, and catches
+> all twenty fabrications planted in those drafts (§8.7). It costs about 1.5 s a question.
+
 ### 6.6 Cost and model allocation
 
 | Stage | LLM calls per question |
@@ -821,6 +829,25 @@ How to read it:
   five or worse, is beaten by the first four of each list and by everything both lists agree on, and
   the cut to ten comes straight after. Recall beyond that is what the reranker of R3 is for: it
   chooses from the whole fused set, not from its first ten.
+- **R7 found nothing to catch.** Measured with `--full` on 2026-10-17: one draft per question, read
+  by a separate judge prompt (`eval/judge.py`, the same model at reasoning effort `high`) as drafted
+  and again after the check. The drafts stated nothing the judge could not find in the sources, in
+  Set A or Set B, and all five outside questions in Set B were declined by the answering prompt
+  alone; the one Set B miss, `b06`, is a question the corpus answers that was declined, which is
+  retrieval's and R8's. The first prompt only did harm: at `none` it dropped a right answer
+  (`a13`, whose fine is stated at the head of the clause and the act in a point under it) and
+  citation accuracy fell from 0.900 to 0.850; at `low` it also dropped `a08` for leaving out an
+  exception, and fell to 0.800. With the two clauses added, `low` drops nothing (0.900 before and
+  after) at a median 1.5 s, at most 5.4 s; `none` still drops a sentence of `a05`.
+- **Planted fabrications are caught, 20 of 20.** Since the drafts had nothing to catch, one
+  fabricated sentence was planted in each Set A draft (`eval/injections.yaml`, `python -m
+  eval.inject`), each checked against the passages: four pair an act with a penalty the sources give
+  to something else, five change a figure, eleven add a rule the sources do not have. At `low`
+  reflection dropped all twenty and nothing else. The clause-head line was the worry -- written
+  after `a13`, it could have let a wrong bracket through -- so it was measured out: without it, 19
+  of 20, and on `a13` the check dropped the true fine and kept the planted one. The other three
+  bracket plants were caught either way. Limits: twenty sentences written by hand, by the same kind
+  of model that checks them, one run each.
 - **R6 changed nothing on this set, and the table says why.** The gate is calibrated: 1.15–1.20
   rounds on average, inside the healthy 1.2–1.6 of §8.2 or just under it, and it calls "not enough"
   only where something is missing: `a01` (the fine for a car running a red light), `a14` (how long the
