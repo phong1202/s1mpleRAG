@@ -251,7 +251,9 @@ class _ScriptedCompletions:
 
         self.completed += 1
         text = messages[-1]["content"]
-        return RewriteResult(intent="SEARCH_CORPUS", standalone=text, sub_queries=[])
+        return RewriteResult(
+            intent="SEARCH_CORPUS", standalone=text, sub_queries=[], document_hint=""
+        )
 
 
 @pytest.mark.asyncio
@@ -284,6 +286,68 @@ def test_the_intent_is_read_from_the_trace():
     from eval.run import intent_of
 
     rewritten, untouched = Trace(), Trace()
-    rewritten.record("rewrite_detail", ms=0, intent="CHITCHAT", standalone="x", sub_queries=[])
+    rewritten.record(
+        "rewrite_detail", ms=0, intent="CHITCHAT", standalone="x", sub_queries=[], document_hint=""
+    )
 
     assert intent_of(rewritten) == "CHITCHAT" and intent_of(untouched) is None
+
+
+@pytest.mark.asyncio
+async def test_outline_coverage_counts_the_chapters_the_context_reaches(db_session):
+    """A summary needs the document's parts, not its ten passages most like
+    the question. One gold page cannot measure that (spec §8.7); the share of
+    top-level sections that reached the context can."""
+    import uuid
+
+    from app.models import ChildChunk, Document, ParentChunk
+    from eval.run import outline_coverage
+    from tests.helpers import unit_vector
+
+    document = Document(
+        sha256_hash=uuid.uuid4().hex * 2,
+        filename="x.pdf",
+        object_key=f"raw/{uuid.uuid4().hex}",
+        size_bytes=1,
+    )
+    db_session.add(document)
+    await db_session.flush()
+    parents = []
+    for i, heading in enumerate(
+        [
+            "Chương I > Điều 1",
+            "Chương I > Điều 2",
+            "Chương II > Điều 3",
+            "Chương III > Điều 4",
+            None,
+        ]
+    ):
+        parent = ParentChunk(
+            document_id=document.id,
+            chunk_index=i,
+            content="x",
+            heading_path=heading,
+            token_count=1,
+            page_start=1,
+            page_end=1,
+        )
+        db_session.add(parent)
+        await db_session.flush()
+        parents.append(parent.id)
+        db_session.add(
+            ChildChunk(
+                document_id=document.id,
+                parent_id=parent.id,
+                chunk_index=i,
+                content="x",
+                contextualized="x",
+                page_number=1,
+                token_count=1,
+                embedding=unit_vector(i),
+            )
+        )
+    await db_session.flush()
+
+    reached = await outline_coverage(db_session, document.id, [parents[0], parents[1], parents[3]])
+
+    assert reached == pytest.approx(2 / 3)

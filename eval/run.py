@@ -197,6 +197,34 @@ class CachedCompletions:
         partial.replace(self._path)
 
 
+async def outline_coverage(session, document_id, parent_ids) -> float:
+    """The share of a document's top-level sections that the given parents
+    belong to. A summary question's gold is one page (spec §8.4), which a
+    plain search finds; what a summary needs is the document's parts (R5)."""
+    from sqlalchemy import text
+
+    rows = await session.execute(
+        text("""
+        SELECT DISTINCT split_part(heading_path, ' > ', 1) AS top,
+               bool_or(id = ANY(CAST(:reached AS uuid[]))) OVER (
+                   PARTITION BY split_part(heading_path, ' > ', 1)) AS reached
+        FROM   parent_chunks
+        WHERE  document_id = CAST(:document_id AS uuid) AND heading_path IS NOT NULL
+        """),
+        {"document_id": document_id, "reached": list(parent_ids)},
+    )
+    sections = {row.top: row.reached for row in rows}
+    return sum(sections.values()) / len(sections) if sections else 0.0
+
+
+def strategy_of(trace) -> str | None:
+    """What the router (R5) chose; None without one."""
+    for node in trace.nodes:
+        if node.node == "route_detail":
+            return node.detail.get("strategy")
+    return None
+
+
 def intent_of(trace) -> str | None:
     """What the rewriter (R4) took the question for; None without one."""
     for node in trace.nodes:
@@ -311,6 +339,12 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
     }
     chitchat_in_a: list[str] = []
     rewrite_ms: list[int] = []
+    coverage: dict[str, float] = {}
+    strategies: dict[str, collections.Counter] = {
+        "A": collections.Counter(),
+        "B": collections.Counter(),
+    }
+    browsed: dict[str, bool] = {}
 
     try:
         async with AsyncSessionLocal() as session:
@@ -325,6 +359,8 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
                 gold = (question.gold_sha256, question.gold_page)
                 trace = Trace()
                 candidates = await retrieved(stages, question, trace)
+                if strategy := strategy_of(trace):
+                    strategies["A"][strategy] += 1
                 intent = intent_of(trace)
                 if intent:
                     rewrite_ms += [n.ms for n in trace.nodes if n.node == "rewrite"]
@@ -336,6 +372,13 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
                     rerank_models.add(served)
                 if fallback:
                     rerank_fallbacks.append(f"{question.id}: {fallback}")
+                if question.kind == "summarize":
+                    gold_id = next(i for i, sha in sha_by_id.items() if sha == question.gold_sha256)
+                    reached = [c.ref.parent_id for c in candidates if c.ref.document_id == gold_id]
+                    coverage[question.id] = await outline_coverage(session, gold_id, reached)
+                if candidates and all(c.source == "browse" for c in candidates):
+                    picked = sha_by_id.get(candidates[0].ref.document_id)
+                    browsed[question.id] = picked == question.gold_sha256
                 hits = [Hit(sha_by_id[c.ref.document_id], c.ref.page_number) for c in candidates]
                 recalls.append(recall_at_k(hits, gold, top_k))
                 ranks.append(reciprocal_rank(hits, gold))
@@ -370,8 +413,11 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
 
                 for question in dataset.set_b:
                     trace = Trace()
-                    await stages.rewrite(Query(text=question.question), trace)
+                    rewritten = await stages.rewrite(Query(text=question.question), trace)
+                    await stages.plan(rewritten, trace)
                     intents["B"][intent_of(trace) or "none"] += 1
+                    if strategy := strategy_of(trace):
+                        strategies["B"][strategy] += 1
 
     finally:
         # Also when a question fails mid-run: what was paid for is kept.
@@ -403,6 +449,10 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
     elif rewrite_ms:
         median = statistics.median(rewrite_ms)
         print(f"rewrite          median {median:.0f} ms, max {max(rewrite_ms)} ms")
+    for name, counter in strategies.items():
+        if counter:
+            shown = ", ".join(f"{s} {count}" for s, count in counter.most_common())
+            print(f"strategies, {name}   {shown}")
     if chitchat_in_a:
         # Small talk skips retrieval: a real question taken for it is lost.
         print(f"WARNING          taken for small talk: {', '.join(chitchat_in_a)}")
@@ -412,6 +462,14 @@ async def _main(full: bool, embed_cache: str | None = None, llm_cache: str | Non
     for kind, (count, recall, rank) in by_kind(scored).items():
         print(f"  {kind:<14} n={count:<3} recall {recall:.3f}  MRR {rank:.3f}")
     print(f"missed           {', '.join(missed) or '-'}")
+    if coverage:
+        mean = sum(coverage.values()) / len(coverage)
+        shown = ", ".join(f"{qid} {share:.2f}" for qid, share in coverage.items())
+        print(f"outline reached  {mean:.3f}  ({shown})")
+    if browsed:
+        right = sum(browsed.values())
+        wrong = [qid for qid, ok in browsed.items() if not ok]
+        print(f"browsed          {right}/{len(browsed)} on the right document {wrong or ''}")
     if full:
         print(f"citation acc.    {sum(cited_right_page) / len(cited_right_page):.3f}")
         print(f"mean iterations  {sum(iterations) / len(iterations):.2f}")
