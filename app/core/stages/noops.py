@@ -51,3 +51,8 @@ async def gate(query: Query, context: Context, trace: Trace) -> GateVerdict:
 async def reflect(query: Query, answer, context: Context, trace: Trace):
     """R7 replaces this."""
     return answer
+
+
+async def web(query: Query, trace: Trace) -> list[Candidate]:
+    """What a failed web search (R8) leaves: the corpus alone."""
+    return []

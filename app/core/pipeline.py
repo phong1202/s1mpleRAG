@@ -24,6 +24,9 @@ class Stages:
     gate: Callable
     generate: Callable
     reflect: Callable
+    # R8. None when web search is off: a stage that is not there leaves no
+    # trace entry, so the flag off reproduces R7 to the last node.
+    web: Callable | None = None
 
 
 # Only the stages with a meaningful empty version. `retrieve`, `expand`,
@@ -35,6 +38,7 @@ _FALLBACKS = {
     "fuse": noops.fuse,
     "gate": noops.gate,
     "reflect": noops.reflect,
+    "web": noops.web,
 }
 
 
@@ -107,6 +111,23 @@ async def gather(query: Query, stages: Stages, max_iterations: int, trace: Trace
         if verdict.sufficient or iteration == max_iterations:
             break
         query = query.refined(verdict.refined_query or query.text)
+
+    if (
+        verdict is not None
+        and not verdict.sufficient
+        and trace.iterations >= 2
+        and stages.web is not None
+    ):
+        # The last resort (spec decision 13): the gate found the corpus short,
+        # the corpus was searched again and is still short. Searched with the
+        # question, not the gate's search, which is worded for the corpus.
+        # What comes back goes into `untrusted` and on to the answer and the
+        # check only: nothing after this point chooses a tool (§7).
+        found = await _run("web", stages.web, trace, asked, trace)
+        if found:
+            context = await _run(
+                "build_context", stages.build_context, trace, context, found, trace
+            )
 
     if verdict is not None and not verdict.sufficient:
         # Out of rounds and still short: answer anyway (spec §6.3), saying

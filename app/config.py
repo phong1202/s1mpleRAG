@@ -203,6 +203,32 @@ class Settings(BaseSettings):
     retrieval_reflect_enabled: bool = False  # R7
     web_search_enabled: bool = False  # R8
 
+    # --- Web search (R8): Tavily, after the gate, and only then ---
+    tavily_api_key: str | None = None
+    web_search_max_results: int = 5
+    # Comma-separated. Empty searches the whole web.
+    web_search_include_domains: str = ""
+    web_search_timeout_s: float = 10.0
+
+    @property
+    def web_domains(self) -> tuple[str, ...]:
+        return tuple(d.strip() for d in self.web_search_include_domains.split(",") if d.strip())
+
+    @model_validator(mode="after")
+    def _require_what_web_search_runs_on(self) -> "Settings":
+        if not self.web_search_enabled:
+            return self
+        if not self.tavily_api_key:
+            raise ValueError("WEB_SEARCH_ENABLED needs TAVILY_API_KEY")
+        # The web waits for the corpus to be searched a second time (spec
+        # decision 13). With one round it would be on and never run.
+        if self.retrieval_max_iterations < 2:
+            raise ValueError(
+                "WEB_SEARCH_ENABLED needs RETRIEVAL_MAX_ITERATIONS of at least 2, "
+                f"got {self.retrieval_max_iterations}"
+            )
+        return self
+
     @model_validator(mode="after")
     def _require_a_wide_enough_candidate_queue(self) -> "Settings":
         # pgvector reads ef_search candidates and returns the best of them:

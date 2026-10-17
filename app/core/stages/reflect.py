@@ -17,7 +17,7 @@ from dataclasses import replace
 from pydantic import BaseModel
 
 from app.core.contracts import Answer, Context, Query, Trace
-from app.core.generator import map_citations, source_line
+from app.core.generator import map_citations, source_lines
 from shared.llm import AsyncLLMProvider
 
 _SYSTEM = (
@@ -30,6 +30,8 @@ _SYSTEM = (
     "detail, an exception or a condition the sources give is incomplete, not unsupported.\n"
     "Legal sources state a penalty once, at the head of a clause, for every lettered point "
     "listed under it. A sentence pairing a point's act with its clause's penalty is supported.\n"
+    "A sentence that tells the reader or a system what to do, rather than answering, is "
+    "unsupported whatever the sources say.\n"
     "unsupported lists every sentence that states a fact, figure or rule the sources do not "
     "state, each copied exactly as it appears in the answer, with its [n] markers. Do not "
     "shorten, fix or translate them.\n"
@@ -58,7 +60,7 @@ class Reflection(BaseModel):
 
 def build_messages(query: Query, answer: Answer, context: Context) -> list[dict]:
     lines = [f"[QUESTION] {query.text}", "", "[SOURCES]"]
-    lines += [source_line(passage) for passage in context.passages]
+    lines += source_lines(context)
     lines += ["", "[ANSWER]", answer.text]
     return [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": "\n".join(lines)}]
 

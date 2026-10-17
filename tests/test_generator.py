@@ -200,3 +200,13 @@ def test_what_the_searches_missed_is_named_in_the_prompt():
 
 def test_nothing_missed_adds_nothing():
     assert "[NOT FOUND]" not in build_prompt(Query(text="q"), _context())[-1]["content"]
+
+
+def test_a_prompt_label_copied_into_the_answer_is_removed():
+    from app.core.generator import strip_prompt_tags
+
+    assert (
+        strip_prompt_tags("Tài liệu chưa nêu mức phạt. [NOT FOUND]")
+        == "Tài liệu chưa nêu mức phạt."
+    )
+    assert strip_prompt_tags("Phạt 4 triệu [1]. [today]") == "Phạt 4 triệu [1]."

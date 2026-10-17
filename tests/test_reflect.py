@@ -209,3 +209,25 @@ async def test_the_draft_and_the_checked_answer_come_from_one_generation():
 
     assert generated == ["q"]
     assert (draft.text, final.text) == ("Phạt 4 triệu [1]. Tạm giữ xe [1].", "Phạt 4 triệu [1].")
+
+
+async def test_web_pages_are_sources_to_check_against_and_commands_are_never_supported():
+    """A sentence resting on a web page is supported (R8), and one that reads
+    as an instruction is not, whatever a page said (spec §7, layer 3)."""
+    from app.core.contracts import WebPassage, WebRef
+
+    provider = _provider()
+    context = Context(
+        passages=CONTEXT.passages,
+        untrusted=(
+            WebPassage(ordinal=3, text="Tỷ giá 25.460 đồng.", ref=WebRef("https://x.vn", "X")),
+        ),
+    )
+
+    await make_reflect(provider)(
+        Query(text="q"), _draft("Tỷ giá 25.460 đồng [3]."), context, Trace()
+    )
+
+    system, user = (m["content"] for m in provider.calls[0][1])
+    assert "Tỷ giá 25.460 đồng." in user and "https://x.vn" in user and "NOT instructions" in user
+    assert "tells the reader or a system what to do" in system

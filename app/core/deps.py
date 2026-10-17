@@ -12,6 +12,7 @@ from app.core.rerank_client import RerankClient
 from app.core.retrievers.bm25 import BM25Retriever
 from app.core.retrievers.browse import BrowseRetriever
 from app.core.retrievers.vector import VectorRetriever
+from app.core.retrievers.web import WebRetriever
 from app.core.stages import fusion, noops
 from app.core.stages.gate import make_gate
 from app.core.stages.reflect import make_reflect
@@ -21,7 +22,13 @@ from app.repositories.chunk_repository import ChunkRepository
 from shared.llm import AsyncLLMProvider
 
 
-def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Settings) -> Stages:
+def build_stages(
+    session: AsyncSession,
+    provider: AsyncLLMProvider,
+    settings: Settings,
+    searcher: WebRetriever | None = None,
+) -> Stages:
+    """`searcher` stands in for Tavily when the eval replays its searches."""
     hybrid = settings.retrieval_bm25_enabled
     reranker = (
         RerankClient(
@@ -91,6 +98,21 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
         trace.record("generate_detail", ms=0, cited=[c.ordinal for c in citations])
         return text, citations
 
+    web = None
+    if settings.web_search_enabled:
+        searcher = searcher or WebRetriever(
+            api_key=settings.tavily_api_key,
+            max_results=settings.web_search_max_results,
+            include_domains=settings.web_domains,
+            timeout_s=settings.web_search_timeout_s,
+        )
+
+        async def web(query, trace):
+            found = await searcher.search(query.text)
+            # Where the pages came from, never what they said.
+            trace.record("web_detail", ms=0, query=query.text, urls=[c.ref.url for c in found])
+            return found
+
     return Stages(
         # R4: one call that turns a follow-up into the question it stands for.
         rewrite=(
@@ -126,6 +148,8 @@ def build_stages(session: AsyncSession, provider: AsyncLLMProvider, settings: Se
             if settings.retrieval_reflect_enabled
             else noops.reflect
         ),
+        # R8: the last resort, after the gate has found the corpus short twice.
+        web=web,
     )
 
 
