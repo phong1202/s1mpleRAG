@@ -494,6 +494,15 @@ class Plan(BaseModel):
     reason: str                     # one sentence, for the trace
 ```
 
+> **Built at R5 (2026-10-17) without a model call of its own.** The rewriter (R4) already reads the
+> question and returns its intent; it now also returns the one document the question names
+> (`document_hint`). The router is code over those two fields: `CHITCHAT` → `NO_RETRIEVAL`,
+> `SUMMARIZE_DOC` with a named or open document → `BROWSE_DOC`, everything else → `HYBRID`. A second
+> call would cost every question about a second (measured at R4) to decide what the first call
+> already knew. `VECTOR_ONLY` is not used: nothing says when keyword search should be skipped.
+> `BROWSE_DOC` reads the document's outline from `parent_chunks.heading_path`; when no single
+> document clearly matches the name, the question is searched instead and the trace says why.
+
 **A closed set, not free-form JSON.** An open router invents tools that do not exist, filters in the
 wrong shape, and `top_k = 5000`. With a closed set, an invalid output is caught and falls back to
 `HYBRID`.
@@ -767,9 +776,14 @@ after the other.
 | | code | 4 | 1.000 | 0.613 |
 | | followup | 4 | 0.750 | 0.237 |
 | | summarize | 4 | 1.000 | 0.656 |
+| **R5** — `RETRIEVAL_ROUTER_ENABLED=true`, on top of R4 | **all** | **20** | **0.900** | **0.624** |
+| | baseline | 8 | 0.875 | 0.698 |
+| | code | 4 | 1.000 | 0.613 |
+| | followup | 4 | 0.750 | 0.237 |
+| | summarize | 4 | 1.000 | 0.875 |
 
 Missed at R1: `a06`, `a08`, `a10`, `a13`, `a14`, `a16`. Missed at R2: `a08`, `a13`, `a14`, `a16`, `a18`.
-Missed at R3: `a01`, `a14`, `a16`. Missed at R4: `a01`, `a15`. R3 was measured on 2026-10-17 with the same corpus and the same
+Missed at R3: `a01`, `a14`, `a16`. Missed at R4: `a01`, `a15`. Missed at R5: `a01`, `a15`. R3 was measured on 2026-10-17 with the same corpus and the same
 question vectors as R2 (`--embed-cache`), so the two rows differ only by the reranker.
 
 The R2 row was measured twice, before and after the keyword index was rebuilt to split codes (§5.2):
@@ -789,6 +803,15 @@ How to read it:
   five or worse, is beaten by the first four of each list and by everything both lists agree on, and
   the cut to ten comes straight after. Recall beyond that is what the reranker of R3 is for: it
   chooses from the whole fused set, not from its first ten.
+- **R5 is measured by the share of the document's outline that reached the context**, not by recall:
+  one gold page cannot measure a summary (§8.4). For the four summary questions it went from 0.440 at
+  R4 -- the ten passages most like the question cover two to four of a law's six to nine chapters --
+  to 1.000. All four were routed to `BROWSE_DOC` and all four found the right document by the name
+  the question used. Summary MRR rose from 0.656 to 0.875 because the outline opens with the
+  document's first page, which is the gold page. No other kind changed. The router took every Set B
+  question for `HYBRID`; the rewriter, with the `document_hint` field added to its prompt, now flags
+  only one of the five outside questions as `OUT_OF_SCOPE` (four before). That intent is not acted
+  on before R7, which will have to measure it again.
 - **R4 rewrote all four follow-ups correctly** ("Thế nếu người ngồi sau không đội thì sao?" became
   "Đi xe máy, người ngồi sau không đội mũ bảo hiểm thì bị phạt bao nhiêu?") and left all sixteen other
   questions word for word. Follow-up recall went from 0.500 to 0.750 and every other kind is unchanged.

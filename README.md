@@ -384,7 +384,8 @@ variables are required; the rest fall back to defaults in `app/config.py`.
 | `RETRIEVAL_RERANK_ENABLED` | `false` | Reranking (R3): a cross-encoder reorders the fused candidates. Needs a reranker server; see below. |
 | `RERANKER_URL`, `RERANKER_MODEL`, `RERANKER_API_KEY`, `RERANKER_TIMEOUT_S` | unset, unset, unset, `5` | Any server speaking Cohere's `/rerank`. Leave the first three unset for the CPU container: the URL becomes `http://reranker:8200` in compose and `http://localhost:8200` on the host, and the container uses the model it was built with. On any failure, or past the timeout, the fused order is kept. |
 | `RETRIEVAL_INTENT_ENABLED` | `false` | Follow-up questions (R4): one model call rewrites the question, using the conversation the server keeps, into one that stands alone; small talk is answered without searching. Conversations are kept either way: `POST /query` returns a `conversation_id` to send back with the next question. |
-| `RETRIEVAL_ROUTER_ENABLED`, `RETRIEVAL_REFLECT_ENABLED`, `WEB_SEARCH_ENABLED` | all `false` | Stage flags for retrieval stages that are not built yet. |
+| `RETRIEVAL_ROUTER_ENABLED` | `false` | Routing (R5): a request to summarise a named document is answered from its outline -- chapters and the titles under them -- instead of a search. Needs `RETRIEVAL_INTENT_ENABLED`. |
+| `RETRIEVAL_REFLECT_ENABLED`, `WEB_SEARCH_ENABLED` | all `false` | Stage flags for retrieval stages that are not built yet. |
 
 Addresses in `.env` are as seen **from the host**. `docker-compose.yml` reads
 the same file and overrides them with service names for the containers.
@@ -416,9 +417,9 @@ the service name and the internal port rather than the host mapping.
   was lost stays in a running state.
 - **Citations point at a page, not a region.** The `locations` format is fixed
   in §5.3 of `docs/system-design.md`, but nothing produces it yet.
-- **Retrieval stops at R4.** Hybrid search, reranking and query rewriting are
-  built behind flags that ship off; routing, the sufficiency loop, reflection
-  and web search are designed, not built.
+- **Retrieval stops at R5.** Hybrid search, reranking, query rewriting and
+  routing are built behind flags that ship off; the sufficiency loop,
+  reflection and web search are designed, not built.
 - **No streaming.** An answer arrives whole.
 - **The frontend does not send `conversation_id` back yet** (handed over in
   `docs/fe-query-handoff.md` §12), so every question in the chat starts a new
